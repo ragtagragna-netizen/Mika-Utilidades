@@ -1,8 +1,6 @@
 try:
-    # Disponible dentro del proceso de ComfyUI. Se protege con try/except
-    # para que el archivo se pueda importar (p.ej. para tests) fuera de él.
     from server import PromptServer
-except ImportError:
+except Exception:
     PromptServer = None
 
 
@@ -117,6 +115,238 @@ class TextBoxClipboard:
 
     def doit(self, text):
         return (text,)
+
+
+class TextBoxVisor:
+    """
+    Text Box Visor-Mika: acepta CUALQUIER tipo de dato en 'valor'
+    (INT, FLOAT, STRING, BOOLEAN, listas, dicts, tensores torch/numpy...)
+    y muestra una preview legible en la caja de texto. Tiene las mismas
+    funciones de portapapeles que Text Box Editor-Mika
+    (ver web/text_box_visor_mika.js).
+    """
+
+    MAX_ITEMS = 50
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "valor": ("*", {}),
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    OUTPUT_NODE = True
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, valor=None, text="", unique_id=None):
+        if valor is not None:
+            preview = self._format(valor)
+            if PromptServer is not None and PromptServer.instance is not None and unique_id is not None:
+                PromptServer.instance.send_sync(
+                    "mika-visor-preview",
+                    {"id": str(unique_id), "text": preview},
+                )
+            return (preview,)
+        return (text,)
+
+    def _format(self, v):
+        if v is None:
+            return "None"
+        if isinstance(v, str):
+            return v
+        if isinstance(v, bool):
+            return str(v)
+        if isinstance(v, (int, float)):
+            return repr(v)
+        if isinstance(v, (list, tuple)):
+            if len(v) == 0:
+                return "[]" if isinstance(v, list) else "()"
+            shown = v[: self.MAX_ITEMS]
+            lines = [f"[{i}] {self._format(item)}" for i, item in enumerate(shown)]
+            if len(v) > len(shown):
+                lines.append(f"... (+{len(v) - len(shown)} elementos más)")
+            return "\n".join(lines)
+        if isinstance(v, dict):
+            return "\n".join(f"{k}: {self._format(val)}" for k, val in v.items())
+        # Tensor-like (torch, numpy, etc.)
+        if hasattr(v, "shape") and hasattr(v, "dtype"):
+            base = f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype})"
+            try:
+                if hasattr(v, "numel") and callable(v.numel) and v.numel() <= 12:
+                    base += f"\n{v.tolist()}"
+            except Exception:
+                pass
+            return base
+        return str(v)
+
+
+class TagFilter:
+    r"""
+    Tag Filter-Mika: filtra un texto separado por comas (típicamente una
+    ruta con tags, p.ej. "\Escritorio\Promps nice\umbreon, pokemon,
+    pokemon (creature), red sclera, black fur") conservando solamente los
+    primeros N segmentos:
+    - max_tags=1 → "\Escritorio\Promps nice\umbreon"
+    - max_tags=2 → "\Escritorio\Promps nice\umbreon, pokemon"
+    - max_tags=3 → "\Escritorio\Promps nice\umbreon, pokemon, pokemon (creature)"
+    El separador por defecto es "," pero puede cambiarse (por ej. ";").
+    Los espacios alrededor de cada tag se limpian solos, y las comas
+    dobles o al final del texto se ignoran. Devuelve el texto filtrado
+    y cuántos tags se conservaron.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+                "max_tags": ("INT", {"default": 1, "min": 0, "max": 999999}),
+            },
+            "optional": {
+                "separator": ("STRING", {"default": ","}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "INT")
+    RETURN_NAMES = ("text", "tags_count")
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, text, max_tags, separator=","):
+        sep = separator if separator else ","
+        parts = [p.strip() for p in (text or "").split(sep) if p.strip() != ""]
+        kept = parts[:max_tags] if max_tags > 0 else []
+        joiner = sep.strip() + " " if sep.strip() else sep
+        return (joiner.join(kept), len(kept))
+
+
+# Tope máximo de pares find/replace que se pueden agregar con el botón "+".
+MAX_REPLACES = 30
+
+
+class TextReplaceDynamic:
+    """
+    Text Replace Dynamic-Mika: reemplaza texto en una cadena usando pares
+    dinámicos de "find" y "replace". Similar a CR Text Replace pero con
+    la capacidad de agregar/quitar pares manualmente desde la UI (ver
+    web/text_replace_dynamic.js): botones "+ Agregar reemplazo" y
+    "− Quitar reemplazo" permiten crear hasta 30 pares.
+    
+    Cada par tiene:
+    - find_N: el texto a buscar
+    - replace_N: el texto con el que reemplazarlo
+    
+    Los reemplazos se aplican en orden (1, 2, 3, ...). Si find_N está
+    vacío, ese par se ignora. Opcionalmente se puede usar regex
+    (expresiones regulares) en lugar de búsqueda literal.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+        for i in range(1, MAX_REPLACES + 1):
+            optional[f"find_{i}"] = ("STRING", {"default": "", "multiline": False})
+            optional[f"replace_{i}"] = ("STRING", {"default": "", "multiline": False})
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "optional": {
+                **optional,
+                "use_regex": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, text, use_regex=False, **kwargs):
+        import re
+        
+        result = text or ""
+        keys = sorted(
+            (k for k in kwargs if k.startswith("find_")),
+            key=lambda k: int(k.split("_")[1])
+        )
+        
+        for find_key in keys:
+            idx = find_key.split("_")[1]
+            replace_key = f"replace_{idx}"
+            find_str = kwargs.get(find_key, "")
+            replace_str = kwargs.get(replace_key, "")
+            
+            # Saltar pares vacíos
+            if not find_str:
+                continue
+            
+            try:
+                if use_regex:
+                    result = re.sub(find_str, replace_str, result)
+                else:
+                    result = result.replace(find_str, replace_str)
+            except re.error:
+                # Si la regex es inválida, ignorar este reemplazo
+                pass
+        
+        return (result,)
+
+
+# Tope máximo de slots de texto que se pueden agregar con el botón "+".
+MAX_CONCAT_SLOTS = 30
+
+
+class TextConcatenateDynamic:
+    """
+    Text Concatenate Dynamic-Mika: concatena múltiples textos en uno solo,
+    con separador configurable. Similar a CR Text Concatenate pero con la
+    capacidad de agregar/quitar slots manualmente desde la UI (ver
+    web/text_concatenate_dynamic.js): botones "+ Agregar texto" y
+    "− Quitar texto" permiten crear hasta 30 slots.
+    
+    Los textos vacíos se ignoran automáticamente. El separador por defecto
+    es ", " pero puede ser cualquier string (espacio, salto de línea, etc.).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+        for i in range(1, MAX_CONCAT_SLOTS + 1):
+            optional[f"text_{i}"] = ("STRING", {"default": "", "multiline": False})
+        return {
+            "required": {},
+            "optional": {
+                **optional,
+                "separator": ("STRING", {"default": ", "}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, separator=", ", **kwargs):
+        texts = []
+        keys = sorted(
+            (k for k in kwargs if k.startswith("text_")),
+            key=lambda k: int(k.split("_")[1])
+        )
+        
+        for key in keys:
+            value = kwargs.get(key, "")
+            if value:  # Ignorar textos vacíos
+                texts.append(value)
+        
+        return (separator.join(texts),)
 
 
 class FloatOutputList:
@@ -234,6 +464,10 @@ NODE_CLASS_MAPPINGS = {
     "StringSelectorCut": StringSelectorCut,
     "ScoreListExtendable": ScoreListExtendable,
     "TextBoxClipboard": TextBoxClipboard,
+    "TextBoxVisor": TextBoxVisor,
+    "TagFilter": TagFilter,
+    "TextReplaceDynamic": TextReplaceDynamic,
+    "TextConcatenateDynamic": TextConcatenateDynamic,
     "FloatOutputList": FloatOutputList,
     "ExecutionTimerConfig": ExecutionTimerConfig,
 }
@@ -242,6 +476,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "StringSelectorCut": "String Selector (Cut First Line)",
     "ScoreListExtendable": "Score List",
     "TextBoxClipboard": "Text Box Editor-Mika",
+    "TextBoxVisor": "Text Box Visor-Mika",
+    "TagFilter": "Tag Filter-Mika",
+    "TextReplaceDynamic": "Text Replace Dynamic-Mika",
+    "TextConcatenateDynamic": "Text Concatenate Dynamic-Mika",
     "FloatOutputList": "Float OutputList",
     "ExecutionTimerConfig": "⏱ Tiempos de Ejecución (config)",
 }
