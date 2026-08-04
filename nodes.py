@@ -45,26 +45,16 @@ class StringSelectorCut:
         return (lines[idx],)
 
 
-# Tope máximo de filas que se pueden llegar a agregar con el botón "+".
 MAX_SCORES = 50
 
 
 class ScoreListExtendable:
     """
-    Similar al nodo 'SCORE' de JPS-Nodes: una fila numerada por cada valor
-    (1, 2, 3, ...), cada una con su propio INT y flechas ◀ ▶.
-    A diferencia del original, la cantidad de filas NO es fija: la UI
-    (ver web/score_list.js) agrega botones "+ Agregar opción" / "− Quitar
-    opción" para ir creando más filas manualmente (1,2,3,...,50).
-
-    Cada fila trae además un campo de texto editable con el nombre de la
-    opción (por defecto "Opción 1", "Opción 2", etc.); se puede renombrar
-    con un click, igual que cualquier otro campo de texto de ComfyUI.
-
-    Todas las filas son entradas opcionales en Python (para que el nodo
-    funcione sin importar cuántas filas haya creado el usuario en la UI);
+    Similar al nodo 'SCORE' de JPS-Nodes: una fila numerada por cada valor.
+    La cantidad de filas NO es fija: la UI (ver web/score_list.js) agrega
+    botones "+ Agregar opción" / "− Quitar opción" (1..50).
     'int_out' es la suma de todas las filas presentes y 'detalle' es un
-    texto con "nombre: valor" por cada fila, en el orden en que aparecen.
+    texto con "nombre: valor" por cada fila.
     """
 
     @classmethod
@@ -98,16 +88,8 @@ class ScoreListExtendable:
 class TextBoxClipboard:
     """
     Text Box Editor-Mika: caja de texto simple con salida STRING. La UI
-    (ver web/text_box_editor_mika.js) le agrega 3 funciones portadas y
-    adaptadas de ComfyUI_Text_Tools_SG
-    (https://github.com/ShammiG/ComfyUI_Text_Tools_SG):
-    📋 copiar al portapapeles (o la selección), ☑ seleccionar todo y
-    📄 pegar del portapapeles en la posición del cursor — disponibles
-    incluso con el nodo colapsado (como iconos al lado del título), y
-    también en el menú del click derecho como respaldo. A diferencia de
-    la versión original, el pegado soluciona los problemas de texto
-    nuevo / saltos de línea: inserta en el cursor en vez de reemplazar
-    todo, y sincroniza correctamente el textarea con el widget.
+    (ver web/text_box_editor_mika.js) le agrega copiar / seleccionar todo /
+    pegar, disponibles expandido y colapsado.
     """
 
     @classmethod
@@ -129,11 +111,8 @@ class TextBoxClipboard:
 
 class TextBoxVisor:
     """
-    Text Box Visor-Mika: acepta CUALQUIER tipo de dato en 'valor'
-    (INT, FLOAT, STRING, BOOLEAN, listas, dicts, tensores torch/numpy...)
-    y muestra una preview legible en la caja de texto. Tiene las mismas
-    funciones de portapapeles que Text Box Editor-Mika
-    (ver web/text_box_visor_mika.js).
+    Text Box Visor-Mika: acepta CUALQUIER tipo de dato en 'valor' y muestra
+    una preview legible en la caja de texto.
     """
 
     MAX_ITEMS = 50
@@ -185,7 +164,6 @@ class TextBoxVisor:
             return "\n".join(lines)
         if isinstance(v, dict):
             return "\n".join(f"{k}: {self._format(val)}" for k, val in v.items())
-        # Tensor-like (torch, numpy, etc.)
         if hasattr(v, "shape") and hasattr(v, "dtype"):
             base = f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype})"
             try:
@@ -199,17 +177,8 @@ class TextBoxVisor:
 
 class TagFilter:
     r"""
-    Tag Filter-Mika: filtra un texto separado por comas (típicamente una
-    ruta con tags, p.ej. "\Escritorio\Promps nice\umbreon, pokemon,
-    pokemon (creature), red sclera, black fur") conservando solamente los
-    primeros N segmentos:
-    - max_tags=1 → "\Escritorio\Promps nice\umbreon"
-    - max_tags=2 → "\Escritorio\Promps nice\umbreon, pokemon"
-    - max_tags=3 → "\Escritorio\Promps nice\umbreon, pokemon, pokemon (creature)"
-    El separador por defecto es "," pero puede cambiarse (por ej. ";").
-    Los espacios alrededor de cada tag se limpian solos, y las comas
-    dobles o al final del texto se ignoran. Devuelve el texto filtrado
-    y cuántos tags se conservaron.
+    Tag Filter-Mika: conserva solo los primeros N segmentos de un texto
+    separado por comas (p.ej. una ruta con tags).
     """
 
     @classmethod
@@ -237,25 +206,13 @@ class TagFilter:
         return (joiner.join(kept), len(kept))
 
 
-# Tope máximo de pares find/replace que se pueden agregar con el botón "+".
 MAX_REPLACES = 30
 
 
 class TextReplaceDynamic:
     """
-    Text Replace Dynamic-Mika: reemplaza texto en una cadena usando pares
-    dinámicos de "find" y "replace". Similar a CR Text Replace pero con
-    la capacidad de agregar/quitar pares manualmente desde la UI (ver
-    web/text_replace_dynamic.js): botones "+ Agregar reemplazo" y
-    "− Quitar reemplazo" permiten crear hasta 30 pares.
-    
-    Cada par tiene:
-    - find_N: el texto a buscar
-    - replace_N: el texto con el que reemplazarlo
-    
-    Los reemplazos se aplican en orden (1, 2, 3, ...). Si find_N está
-    vacío, ese par se ignora. Opcionalmente se puede usar regex
-    (expresiones regulares) en lugar de búsqueda literal.
+    Text Replace Dynamic-Mika: reemplaza texto usando pares dinámicos
+    find/replace con botones +/- en la UI (ver web/text_replace_dynamic.js).
     """
 
     @classmethod
@@ -280,50 +237,35 @@ class TextReplaceDynamic:
     CATEGORY = "Mika Utilidades/string"
 
     def doit(self, text, use_regex=False, **kwargs):
-        import re
-        
         result = text or ""
         keys = sorted(
             (k for k in kwargs if k.startswith("find_")),
             key=lambda k: int(k.split("_")[1])
         )
-        
         for find_key in keys:
             idx = find_key.split("_")[1]
-            replace_key = f"replace_{idx}"
             find_str = kwargs.get(find_key, "")
-            replace_str = kwargs.get(replace_key, "")
-            
-            # Saltar pares vacíos
+            replace_str = kwargs.get(f"replace_{idx}", "")
             if not find_str:
                 continue
-            
             try:
                 if use_regex:
                     result = re.sub(find_str, replace_str, result)
                 else:
                     result = result.replace(find_str, replace_str)
             except re.error:
-                # Si la regex es inválida, ignorar este reemplazo
                 pass
-        
         return (result,)
 
 
-# Tope máximo de slots de texto que se pueden agregar con el botón "+".
 MAX_CONCAT_SLOTS = 30
 
 
 class TextConcatenateDynamic:
     """
-    Text Concatenate Dynamic-Mika: concatena múltiples textos en uno solo,
-    con separador configurable. Similar a CR Text Concatenate pero con la
-    capacidad de agregar/quitar slots manualmente desde la UI (ver
-    web/text_concatenate_dynamic.js): botones "+ Agregar texto" y
-    "− Quitar texto" permiten crear hasta 30 slots.
-    
-    Los textos vacíos se ignoran automáticamente. El separador por defecto
-    es ", " pero puede ser cualquier string (espacio, salto de línea, etc.).
+    Text Concatenate Dynamic-Mika: concatena múltiples textos con separador
+    configurable. Los slots se agregan/quitan con botones +/- en la UI
+    (ver web/text_concatenate_dynamic.js). Los textos vacíos se ignoran.
     """
 
     @classmethod
@@ -350,29 +292,17 @@ class TextConcatenateDynamic:
             (k for k in kwargs if k.startswith("text_")),
             key=lambda k: int(k.split("_")[1])
         )
-        
         for key in keys:
             value = kwargs.get(key, "")
-            if value:  # Ignorar textos vacíos
+            if value:
                 texts.append(value)
-        
         return (separator.join(texts),)
 
 
 class LoadImageMika:
     """
-    Load Image-Mika: carga una imagen desde una ruta local o URL, con
-    opción de preservar el canal alfa (RGBA). Devuelve la imagen como
-    tensor, la máscara del canal alfa (si existe), el nombre del archivo,
-    y opcionalmente las dimensiones WIDTH y HEIGHT de la imagen.
-    
-    Características:
-    - Soporta rutas locales y URLs HTTP/HTTPS
-    - Opción RGBA (booleano): si True preserva el canal alfa, si False convierte a RGB
-    - Genera máscara automáticamente si la imagen tiene canal alfa
-    - output_dimensions (booleano): si True calcula y devuelve WIDTH/HEIGHT, si False devuelve 0
-    - IS_CHANGED corregido: calcula hash SHA-256 del archivo para detectar cambios
-    - filename_text_extension: si True incluye extensión, si False solo nombre
+    Load Image-Mika: carga una imagen desde ruta local o URL, con opción
+    RGBA, máscara de alfa, dimensiones opcionales y nombre de archivo.
     """
 
     @classmethod
@@ -404,11 +334,10 @@ class LoadImageMika:
             except OSError:
                 print(f"Load Image-Mika: La imagen '{image_path.strip()}' no existe!")
                 i = Image.new(mode='RGB', size=(512, 512), color=(0, 0, 0))
-        
+
         if not i:
             return None
 
-        # Obtener dimensiones solo si output_dimensions está activo
         if output_dimensions:
             width, height = i.size
         else:
@@ -437,7 +366,7 @@ class LoadImageMika:
         try:
             response = requests.get(url)
             response.raise_for_status()
-            img = Image.Open(BytesIO(response.content))
+            img = Image.open(BytesIO(response.content))
             return img
         except requests.exceptions.HTTPError as errh:
             print(f"Load Image-Mika HTTP Error ({url}): {errh}")
@@ -449,22 +378,11 @@ class LoadImageMika:
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
-        """
-        Calcula el hash SHA-256 del archivo para detectar cambios.
-        Corregido: usa 'image_path' en lugar de los parámetros incorrectos
-        del código original de WAS Suite.
-        """
         image_path = kwargs.get('image_path', '')
-        
-        # Si es URL, no calcular hash (siempre recargar)
         if image_path.startswith('http'):
             return float("NaN")
-        
-        # Si el archivo no existe, no recargar
         if not os.path.exists(image_path):
             return None
-        
-        # Calcular hash SHA-256 del archivo
         try:
             sha256_hash = hashlib.sha256()
             with open(image_path, 'rb') as f:
@@ -476,32 +394,17 @@ class LoadImageMika:
 
 
 class SmartTagFilterMika:
-    """
-    Smart Tag Filter-Mika (compacto, slots tipo switch): las entradas
-    'prompt' y 'filter_tags' usan el tipo "*" (comodín), que NO tiene
-    widget asociado. Son sockets puros que solo aceptan conexión por cable,
-    igual que los nodos switch, y al convertir a subgrafo quedan como
-    slots limpios. Aceptan cualquier salida (STRING de tus nodos de texto,
-    taggers, etc.).
-
-    Reconoce:
-    - Tags con peso/prioridad: (fat:1.1), (strong:1.5), ((tag))
-    - Caracteres especiales: =), :D, ;d, \(pokemon\)
-    - Prefijos de color: con ignore_color_prefix, "shirt" coincide con "aqua shirt"
-
-    Modos:
-    - include: mantiene solo los tags de filter_tags
-    - exclude: remueve los tags de filter_tags
+    r"""
+    Smart Tag Filter-Mika (slots tipo switch con "*"): filtra tags con
+    soporte de pesos, caracteres especiales y prefijos de color.
     """
 
-    # Emoticones comunes que podrían confundirse con sintaxis de peso
     EMOTICONES = [
         "=)", "=(", ":D", ":P", ":3", ";)", ";d", ";D", ":)", ":(",
         ":/", ":|", ":o", ":O", ":*", ":'(", ":')", "XD", "xd",
         "D:", ">:(", ">:)", ":>", ":<", ":^)", ":-)", ":-(",
     ]
 
-    # Colores conocidos (tags de anime/danbooru) para ignorar como prefijo
     COLORS = {
         "red", "blue", "green", "yellow", "purple", "pink", "orange", "brown",
         "black", "white", "gray", "grey", "cyan", "magenta", "gold", "silver",
@@ -512,7 +415,6 @@ class SmartTagFilterMika:
         "brunette", "auburn", "ivory", "khaki", "charcoal", "fuchsia",
     }
 
-    # Modificadores de color que pueden preceder a un color (light_blue, dark_red)
     COLOR_MODIFIERS = {
         "light", "dark", "pale", "deep", "bright", "vivid", "muted", "soft",
         "neon", "pastel", "rich", "dull",
@@ -522,8 +424,6 @@ class SmartTagFilterMika:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # Tipo "*": socket puro sin widget, solo conexión por cable
-                # (igual que los nodos switch). Acepta STRING y cualquier tipo.
                 "prompt": ("*",),
                 "filter_tags": ("*",),
                 "mode": (["include", "exclude"],),
@@ -542,7 +442,6 @@ class SmartTagFilterMika:
 
     @staticmethod
     def _to_text(value):
-        """Convierte cualquier entrada conectada a texto."""
         if value is None:
             return ""
         if isinstance(value, str):
@@ -576,7 +475,6 @@ class SmartTagFilterMika:
 
         opening_parens = 0
         closing_parens = 0
-
         for char in original:
             if char == '(':
                 opening_parens += 1
@@ -584,7 +482,6 @@ class SmartTagFilterMika:
                 closing_parens += 1
             elif char not in ' \t':
                 break
-
         for char in reversed(original):
             if char == ')':
                 closing_parens += 1
@@ -603,41 +500,27 @@ class SmartTagFilterMika:
                         weight = float(parts[1])
                         base_tag = parts[0].strip()
                         normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
-                        return {
-                            'original': original,
-                            'base': normalized,
-                            'weight': weight,
-                            'has_weight': True,
-                            'weight_syntax': 'explicit'
-                        }
+                        return {'original': original, 'base': normalized, 'weight': weight,
+                                'has_weight': True, 'weight_syntax': 'explicit'}
                     except ValueError:
                         pass
             stripped = inner.strip()
 
         paren_pairs = min(opening_parens, closing_parens)
         weight = 1.0 + (paren_pairs * 0.1) if paren_pairs > 0 else 1.0
-
         base_tag = stripped
         normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
-
-        return {
-            'original': original,
-            'base': normalized,
-            'weight': weight,
-            'has_weight': paren_pairs > 0,
-            'weight_syntax': 'parentheses' if paren_pairs > 0 else 'none'
-        }
+        return {'original': original, 'base': normalized, 'weight': weight,
+                'has_weight': paren_pairs > 0,
+                'weight_syntax': 'parentheses' if paren_pairs > 0 else 'none'}
 
     def parse_prompt(self, prompt, case_sensitive=False):
         if not prompt or not prompt.strip():
             return []
-
         prompt = self.escape_emoticones(prompt)
-
         tags = []
         current = ''
         paren_depth = 0
-
         for char in prompt:
             if char == '(':
                 paren_depth += 1
@@ -651,41 +534,33 @@ class SmartTagFilterMika:
                 current = ''
                 continue
             current += char
-
         if current.strip():
             parsed = self.parse_smart_tag(current, case_sensitive)
             if parsed:
                 tags.append(parsed)
-
         for tag in tags:
             tag['original'] = self.unescape_emoticones(tag['original'])
-
         return tags
 
     def tags_match(self, tag1, tag2, ignore_weight=False, ignore_color_prefix=False):
         base1 = tag1['base']
         base2 = tag2['base']
-
         if base1 == base2:
             if ignore_weight:
                 return True
             return abs(tag1['weight'] - tag2['weight']) < 0.01
-
         if ignore_color_prefix:
             stripped1 = self.strip_color_prefix(base1)
             stripped2 = self.strip_color_prefix(base2)
-
             if stripped1 == base2 or stripped2 == base1:
                 if ignore_weight or abs(tag1['weight'] - tag2['weight']) < 0.01:
                     return True
-
         return False
 
-    def filter_tags(self, prompt, filter_tags, mode="include", case_sensitive=False, ignore_weight=False, ignore_color_prefix=False):
-        # Convertir entradas (pueden venir de cualquier tipo por ser "*")
+    def filter_tags(self, prompt, filter_tags, mode="include", case_sensitive=False,
+                    ignore_weight=False, ignore_color_prefix=False):
         prompt = self._to_text(prompt)
         filter_tags = self._to_text(filter_tags)
-
         prompt_tags = self.parse_prompt(prompt, case_sensitive)
         filter_list = self.parse_prompt(filter_tags, case_sensitive)
 
@@ -695,169 +570,133 @@ class SmartTagFilterMika:
         else:
             matched = []
             unmatched = []
-
             for ptag in prompt_tags:
-                found = False
-                for ftag in filter_list:
-                    if self.tags_match(ptag, ftag, ignore_weight, ignore_color_prefix):
-                        found = True
-                        break
-
+                found = any(self.tags_match(ptag, ftag, ignore_weight, ignore_color_prefix)
+                            for ftag in filter_list)
                 if found:
                     matched.append(ptag)
                 else:
                     unmatched.append(ptag)
 
-        if mode == "include":
-            result_tags = matched
-        else:
-            result_tags = unmatched
-
-        filtered = ", ".join([tag['original'] for tag in result_tags])
-        matched_str = ", ".join([tag['original'] for tag in matched])
-        unmatched_str = ", ".join([tag['original'] for tag in unmatched])
-
+        result_tags = matched if mode == "include" else unmatched
+        filtered = ", ".join([t['original'] for t in result_tags])
+        matched_str = ", ".join([t['original'] for t in matched])
+        unmatched_str = ", ".join([t['original'] for t in unmatched])
         return (filtered, matched_str, unmatched_str)
 
 
-import { app } from "/scripts/app.js";
+MAX_TAGIF_SLOTS = 6
 
-const DEFAULT_VISIBLE = 3;
 
-app.registerExtension({
-  name: "Comfy.TagIfMika",
-  async beforeRegisterNodeDef(nodeType, nodeData, app) {
-    if (nodeData.name !== "TagIfMika") return;
+class TagIfMika:
+    """
+    Tag If-Mika: condicional por presencia de tags. Hasta 6 pares
+    find/output agregables con botones +/- (ver web/tag_if_mika.js).
+    Cada output_N se activa solo si su find_N está presente.
+    'combined' junta todos los outputs activos.
+    """
 
-    function resize(node) {
-      const size = node.computeSize();
-      node.setSize([node.size[0], size[1]]);
-      node.setDirtyCanvas(true, true);
-    }
+    EMOTICONES = [
+        "=)", "=(", ":D", ":P", ":3", ";)", ";d", ";D", ":)", ":(",
+        ":/", ":|", ":o", ":O", ":*", ":'(", ":')", "XD", "xd",
+        "D:", ">:(", ">:)", ":>", ":<", ":^)", ":-)", ":-(",
+    ]
 
-    function sortPool(node) {
-      node.hiddenTagIfPairs.sort((a, b) => a.index - b.index);
-    }
-
-    function anchorIndex(node) {
-      const btnIdx = node.widgets.indexOf(node.addButtonWidget);
-      return btnIdx === -1 ? node.widgets.length : btnIdx;
-    }
-
-    function showNext(node) {
-      sortPool(node);
-      const pair = node.hiddenTagIfPairs.shift();
-      if (!pair) return null;
-      node.widgets.splice(anchorIndex(node), 0, pair.find, pair.output);
-      node.visibleTagIfPairs.push(pair);
-      const size = node.computeSize();
-      node.setSize([node.size[0], size[1]]);
-      return pair;
-    }
-
-    function hideLast(node) {
-      if (node.visibleTagIfPairs.length <= 1) return;
-      const pair = node.visibleTagIfPairs.pop();
-      for (const w of [pair.find, pair.output]) {
-        const idx = node.widgets.indexOf(w);
-        if (idx !== -1) node.widgets.splice(idx, 1);
-      }
-      pair.find.value = "";
-      pair.output.value = "";
-      node.hiddenTagIfPairs.push(pair);
-      const size = node.computeSize();
-      node.setSize([node.size[0], size[1]]);
-    }
-
-    const onNodeCreated = nodeType.prototype.onNodeCreated;
-    nodeType.prototype.onNodeCreated = function () {
-      const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
-
-      const findWidgets = this.widgets.filter((w) => w.name.startsWith("find_"));
-      const pairs = findWidgets
-        .map((findWidget) => {
-          const index = parseInt(findWidget.name.split("_")[1], 10);
-          const outputWidget = this.widgets.find((w) => w.name === `output_${index}`);
-          return outputWidget ? { index, find: findWidget, output: outputWidget } : null;
-        })
-        .filter(Boolean)
-        .sort((a, b) => a.index - b.index);
-
-      this.visibleTagIfPairs = pairs.slice(0, DEFAULT_VISIBLE);
-      this.hiddenTagIfPairs = pairs.slice(DEFAULT_VISIBLE);
-
-      for (const pair of this.hiddenTagIfPairs) {
-        for (const w of [pair.find, pair.output]) {
-          const idx = this.widgets.indexOf(w);
-          if (idx !== -1) this.widgets.splice(idx, 1);
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+        for i in range(1, MAX_TAGIF_SLOTS + 1):
+            optional[f"find_{i}"] = ("STRING", {"default": "", "multiline": False})
+            optional[f"output_{i}"] = ("STRING", {"default": "", "multiline": False})
+        return {
+            "required": {
+                "tags": ("STRING",),
+            },
+            "optional": optional,
         }
-      }
 
-      this.addButtonWidget = this.addWidget("button", "+ Agregar condición", null, () => {
-        showNext(this);
-        resize(this);
-      });
+    RETURN_TYPES = tuple(["STRING"] * (MAX_TAGIF_SLOTS + 1))
+    RETURN_NAMES = tuple([f"output_{i}" for i in range(1, MAX_TAGIF_SLOTS + 1)] + ["combined"])
+    FUNCTION = "tag"
+    CATEGORY = "Mika Utilidades/tags"
+    OUTPUT_NODE = True
 
-      this.removeButtonWidget = this.addWidget("button", "− Quitar condición", null, () => {
-        hideLast(this);
-        resize(this);
-      });
+    def escape_emoticones(self, text):
+        for emote in self.EMOTICONES:
+            escaped = emote.replace("(", "\\(").replace(")", "\\)").replace(":", "\\:")
+            text = re.sub(r'(?<!\\)' + re.escape(emote), escaped, text)
+        return text
 
-      resize(this);
-      return r;
-    };
+    def unescape_emoticones(self, text):
+        for emote in self.EMOTICONES:
+            escaped = emote.replace("(", "\\(").replace(")", "\\)").replace(":", "\\:")
+            text = text.replace(escaped, emote)
+        return text
 
-    const onSerialize = nodeType.prototype.onSerialize;
-    nodeType.prototype.onSerialize = function (o) {
-      const r = onSerialize ? onSerialize.apply(this, arguments) : undefined;
-      o.visibleTagIfCount = this.visibleTagIfPairs.length;
-      const vals = {};
-      for (const pair of this.visibleTagIfPairs) {
-        vals[`find_${pair.index}`] = pair.find.value;
-        vals[`output_${pair.index}`] = pair.output.value;
-      }
-      o.mikaTagIfValues = vals;
-      return r;
-    };
+    def parse_smart_tag(self, tag_text):
+        original = tag_text.strip()
+        if not original:
+            return None
+        original = self.escape_emoticones(original)
+        stripped = original.strip()
+        while stripped.startswith('(') and stripped.endswith(')'):
+            inner = stripped[1:-1].strip()
+            if ':' in inner:
+                parts = inner.rsplit(':', 1)
+                if len(parts) == 2:
+                    try:
+                        float(parts[1])
+                        stripped = parts[0].strip()
+                        break
+                    except ValueError:
+                        pass
+            stripped = inner.strip()
+        normalized = stripped.lower().replace(' ', '_').replace('-', '_')
+        return self.unescape_emoticones(normalized)
 
-    const onConfigure = nodeType.prototype.onConfigure;
-    nodeType.prototype.onConfigure = function (info) {
-      const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+    def parse_tags_list(self, tag_string):
+        if not tag_string or not tag_string.strip():
+            return []
+        tag_string = self.escape_emoticones(tag_string)
+        tags = []
+        current = ''
+        paren_depth = 0
+        for char in tag_string:
+            if char == '(':
+                paren_depth += 1
+            elif char == ')':
+                paren_depth -= 1
+            elif char == ',' and paren_depth == 0:
+                if current.strip():
+                    parsed = self.parse_smart_tag(current)
+                    if parsed:
+                        tags.append(parsed)
+                current = ''
+                continue
+            current += char
+        if current.strip():
+            parsed = self.parse_smart_tag(current)
+            if parsed:
+                tags.append(parsed)
+        return tags
 
-      const target = info.visibleTagIfCount ?? DEFAULT_VISIBLE;
-      while (this.visibleTagIfPairs.length < target && this.hiddenTagIfPairs.length > 0) {
-        showNext(this);
-      }
-      while (this.visibleTagIfPairs.length > target && this.visibleTagIfPairs.length > 1) {
-        hideLast(this);
-      }
-
-      if (info.mikaTagIfValues) {
-        for (const pair of this.visibleTagIfPairs) {
-          if (`find_${pair.index}` in info.mikaTagIfValues) pair.find.value = info.mikaTagIfValues[`find_${pair.index}`];
-          if (`output_${pair.index}` in info.mikaTagIfValues) pair.output.value = info.mikaTagIfValues[`output_${pair.index}`];
-        }
-      }
-
-      resize(this);
-      return r;
-    };
-  },
-});
+    def tag(self, tags, **kwargs):
+        tag_list = self.parse_tags_list(tags)
+        outputs = []
+        for i in range(1, MAX_TAGIF_SLOTS + 1):
+            find_val = kwargs.get(f"find_{i}", "")
+            out_val = kwargs.get(f"output_{i}", "")
+            matched = bool(find_val.strip()) and (self.parse_smart_tag(find_val) in tag_list)
+            outputs.append(out_val if matched else "")
+        combined = ", ".join([o for o in outputs if o])
+        return tuple(outputs + [combined])
 
 
 class FloatOutputList:
     """
-    Igual que 'String OutputList' de la extensión ComfyUI-outputlists-combiner
-    (https://github.com/geroldmeisinger/ComfyUI-outputlists-combiner), pero
-    convierte cada elemento a FLOAT en vez de dejarlo como texto.
-
-    Se escribe un valor numérico por línea (o separados por 'separator') en
-    el campo 'values', y el nodo los separa en una OutputList: cualquier
-    nodo conectado a 'value' se va a ejecutar una vez por cada número de la
-    lista, en orden (gracias a OUTPUT_IS_LIST=True). Es compatible con los
-    otros nodos de esa extensión (OutputLists Combinations, XYZ-GridPlot,
-    Formatted String, etc.) porque sigue el mismo patrón.
+    Float OutputList: convierte una lista de números en texto a una
+    OutputList de FLOAT (OUTPUT_IS_LIST), compatible con
+    ComfyUI-outputlists-combiner.
     """
 
     @classmethod
@@ -877,12 +716,6 @@ class FloatOutputList:
 
     @staticmethod
     def _decode_separator(separator):
-        # 'separator' es un campo de UNA sola línea: si el usuario escribe
-        # "\n" ahí, ComfyUI guarda literalmente los 2 caracteres "\" y "n"
-        # (no puede generar un salto de línea real en un campo de una
-        # línea). En cambio 'values' SÍ es multilínea y genera saltos de
-        # línea reales al apretar Enter. Por eso hay que "traducir" las
-        # secuencias de escape más comunes antes de usar el separador.
         return (
             separator.replace("\\r\\n", "\n")
             .replace("\\n", "\n")
@@ -904,10 +737,8 @@ class FloatOutputList:
                 raise ValueError(
                     f"Float OutputList: no se pudo convertir '{item}' a un número decimal."
                 )
-
         if not floats:
             floats = [0.0]
-
         indices = list(range(len(floats)))
         return (floats, indices, len(floats))
 
@@ -915,18 +746,7 @@ class FloatOutputList:
 class ExecutionTimerConfig:
     """
     Nodo de configuración para "Mika · Tiempos de Ejecución"
-    (ver web/execution_timer.js).
-
-    El registro y dibujado de los tiempos de ejecución de cada nodo del
-    workflow funciona SOLO, sin necesidad de agregar este nodo al grafo:
-    se activa apenas se instala el paquete. Este nodo es opcional y sirve
-    únicamente para cambiar su comportamiento por defecto (mostrar/ocultar
-    el panel flotante, mostrar/ocultar las etiquetas sobre cada nodo,
-    cantidad de decimales).
-
-    No hace falta conectarlo a nada: al ser un OUTPUT_NODE, ComfyUI lo
-    ejecuta igual aunque esté suelto en el canvas. En cuanto corre, envía
-    la configuración elegida a la extensión JS por websocket.
+    (ver web/execution_timer.js). Envía la configuración por websocket.
     """
 
     @classmethod

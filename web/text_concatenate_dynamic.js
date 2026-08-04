@@ -8,32 +8,37 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData, app) {
     if (nodeData.name !== "TextConcatenateDynamic") return;
 
-    function resize(node) {
-      const size = node.computeSize();
-      node.setSize([node.size[0], size[1]]);
-      node.setDirtyCanvas(true, true);
+    // FIX: refresco agresivo del grafo. Con el nodo ya dibujado, solo
+    // computeSize/setSize NO reposiciona los sockets de entrada.
+    // graph.change() + canvas.setDirty() fuerzan el recálculo de sockets
+    // en vivo (por eso al duplicar funcionaba: el primer draw los calculaba).
+    function relayout(node) {
+      try {
+        const size = node.computeSize();
+        node.setSize([node.size[0], size[1]]);
+      } catch (e) { /* no-op */ }
+      try { if (typeof node.onResize === "function") node.onResize(node.size); } catch (e) { /* no-op */ }
+      try { node.setDirtyCanvas(true, true); } catch (e) { /* no-op */ }
+      try { app.graph?.setDirtyCanvas?.(true, true); } catch (e) { /* no-op */ }
+      try { app.canvas?.setDirty?.(true, true); } catch (e) { /* no-op */ }
+      try { node.graph?.change?.(); } catch (e) { /* no-op */ }
     }
 
     function sortPool(node) {
       node.hiddenTextSlots.sort((a, b) => a.index - b.index);
     }
 
+    // FIX: insertar justo después del último texto visible (mantiene los
+    // textos contiguos y el separator al final), evitando desfases de sockets.
     function anchorIndex(node) {
+      if (node.visibleTextSlots.length) {
+        const last = node.visibleTextSlots[node.visibleTextSlots.length - 1].widget;
+        const idx = node.widgets.indexOf(last);
+        if (idx !== -1) return idx + 1;
+      }
       const sepIdx = node.widgets.indexOf(node.separatorWidget);
       if (sepIdx !== -1) return sepIdx;
-      const btnIdx = node.widgets.indexOf(node.addButtonWidget);
-      return btnIdx === -1 ? node.widgets.length : btnIdx;
-    }
-
-    // FIX CLAVE: después de modificar node.widgets hay que recalcular el
-    // tamaño Y forzar el re-render para que ComfyUI reposicione los sockets
-    // de entrada; sin esto los widgets nuevos quedan sin socket conectable.
-    function relayout(node) {
-      const size = node.computeSize();
-      node.setSize([node.size[0], size[1]]);
-      if (typeof node.onResize === "function") node.onResize(node.size);
-      node.setDirtyCanvas(true, true);
-      try { app.graph.setDirtyCanvas(true, true); } catch (e) { /* no-op */ }
+      return node.widgets.length;
     }
 
     function showNext(node) {
@@ -64,10 +69,7 @@ app.registerExtension({
 
       const textWidgets = this.widgets.filter((w) => w.name.startsWith("text_"));
       const slots = textWidgets
-        .map((widget) => {
-          const index = parseInt(widget.name.split("_")[1], 10);
-          return { index, widget };
-        })
+        .map((widget) => ({ index: parseInt(widget.name.split("_")[1], 10), widget }))
         .sort((a, b) => a.index - b.index);
 
       this.visibleTextSlots = slots.slice(0, DEFAULT_VISIBLE);
@@ -96,9 +98,7 @@ app.registerExtension({
       const r = onSerialize ? onSerialize.apply(this, arguments) : undefined;
       o.visibleTextCount = this.visibleTextSlots.length;
       const vals = {};
-      for (const slot of this.visibleTextSlots) {
-        vals[`text_${slot.index}`] = slot.widget.value;
-      }
+      for (const slot of this.visibleTextSlots) vals[`text_${slot.index}`] = slot.widget.value;
       o.mikaTextValues = vals;
       if (this.separatorWidget) o.mikaSeparator = this.separatorWidget.value;
       return r;
@@ -109,28 +109,17 @@ app.registerExtension({
       const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
 
       const target = info.visibleTextCount ?? DEFAULT_VISIBLE;
-      while (this.visibleTextSlots.length < target && this.hiddenTextSlots.length > 0) {
-        showNext(this);
-      }
-      while (this.visibleTextSlots.length > target && this.visibleTextSlots.length > 1) {
-        hideLast(this);
-      }
-
-      const sv = info.widgets_values || [];
+      while (this.visibleTextSlots.length < target && this.hiddenTextSlots.length > 0) showNext(this);
+      while (this.visibleTextSlots.length > target && this.visibleTextSlots.length > 1) hideLast(this);
 
       if (info.mikaTextValues) {
         for (const slot of this.visibleTextSlots) {
-          if (`text_${slot.index}` in info.mikaTextValues) {
-            slot.widget.value = info.mikaTextValues[`text_${slot.index}`];
-          }
+          if (`text_${slot.index}` in info.mikaTextValues) slot.widget.value = info.mikaTextValues[`text_${slot.index}`];
         }
-        if (this.separatorWidget && info.mikaSeparator !== undefined) {
-          this.separatorWidget.value = info.mikaSeparator;
-        }
-      } else if (sv.length) {
-        for (let i = 0; i < this.widgets.length && i < sv.length; i++) {
-          this.widgets[i].value = sv[i];
-        }
+        if (this.separatorWidget && info.mikaSeparator !== undefined) this.separatorWidget.value = info.mikaSeparator;
+      } else {
+        const sv = info.widgets_values || [];
+        for (let i = 0; i < this.widgets.length && i < sv.length; i++) this.widgets[i].value = sv[i];
       }
 
       relayout(this);
