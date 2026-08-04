@@ -205,7 +205,7 @@ function drawHeaderIcons(node, ctx) {
   const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
   const iconsWidth = ICONS.length * (ICON_SIZE + ICON_GAP) + ICON_GAP;
   const width = node.flags?.collapsed
-    ? (node._collapsed_width ?? node.size?.[0] ?? 200)
+    ? (node._mikaCollapsedWidth ?? node._collapsed_width ?? node.size?.[0] ?? 200)
     : (node.size?.[0] ?? 200);
   let x = width - iconsWidth - 4;
   const cy = -titleHeight * 0.5;
@@ -371,8 +371,24 @@ app.registerExtension({
           LG.NODE_COLLAPSED_WIDTH ?? 80,
           titleHeight + titleWidth + 14 + iconsWidth
         );
-        this._collapsed_width = width;
+        this._mikaCollapsedWidth = width; // fuente de verdad propia (no pelea con LiteGraph)
 
+    // FIX LINK definitivo: el cable usa NUESTRO ancho cacheado (constante),
+    // así el ancla coincide con la barra dibujada y no oscila nunca.
+    const origGetConnectionPos = nodeType.prototype.getConnectionPos;
+    nodeType.prototype.getConnectionPos = function (is_input, slot_number, out) {
+      const res = origGetConnectionPos
+        ? origGetConnectionPos.apply(this, arguments)
+        : (out || [0, 0]);
+      if (this.flags?.collapsed && !is_input && this._mikaCollapsedWidth && res) {
+        const LG = window.LiteGraph ?? {};
+        const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
+        res[0] = this.pos[0] + this._mikaCollapsedWidth;
+        res[1] = this.pos[1] - titleHeight * 0.5;
+      }
+      return res;
+    };
+	
         // Barra con la forma configurada (igual que el resto de nodos).
         const radius = LG.ROUND_RADIUS ?? 8;
         const shape = nodeShape(this);
