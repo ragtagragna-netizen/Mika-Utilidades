@@ -3,6 +3,16 @@ try:
 except Exception:
     PromptServer = None
 
+from PIL import Image, ImageOps
+from io import BytesIO
+import numpy as np
+import torch
+import os
+import hashlib
+import requests
+import re
+import decimal
+
 
 class StringSelectorCut:
     """
@@ -349,6 +359,493 @@ class TextConcatenateDynamic:
         return (separator.join(texts),)
 
 
+class LoadImageMika:
+    """
+    Load Image-Mika: carga una imagen desde una ruta local o URL, con
+    opción de preservar el canal alfa (RGBA). Devuelve la imagen como
+    tensor, la máscara del canal alfa (si existe), el nombre del archivo,
+    y opcionalmente las dimensiones WIDTH y HEIGHT de la imagen.
+    
+    Características:
+    - Soporta rutas locales y URLs HTTP/HTTPS
+    - Opción RGBA (booleano): si True preserva el canal alfa, si False convierte a RGB
+    - Genera máscara automáticamente si la imagen tiene canal alfa
+    - output_dimensions (booleano): si True calcula y devuelve WIDTH/HEIGHT, si False devuelve 0
+    - IS_CHANGED corregido: calcula hash SHA-256 del archivo para detectar cambios
+    - filename_text_extension: si True incluye extensión, si False solo nombre
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_path": ("STRING", {"default": "./ComfyUI/input/example.png", "multiline": False}),
+                "RGBA": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "output_dimensions": ("BOOLEAN", {"default": True}),
+                "filename_text_extension": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "INT")
+    RETURN_NAMES = ("image", "mask", "filename_text", "width", "height")
+    FUNCTION = "load_image"
+    CATEGORY = "Mika Utilidades/image"
+
+    def load_image(self, image_path, RGBA=False, output_dimensions=True, filename_text_extension=True):
+        if image_path.startswith('http'):
+            i = self.download_image(image_path)
+            i = ImageOps.exif_transpose(i)
+        else:
+            try:
+                i = Image.open(image_path)
+                i = ImageOps.exif_transpose(i)
+            except OSError:
+                print(f"Load Image-Mika: La imagen '{image_path.strip()}' no existe!")
+                i = Image.new(mode='RGB', size=(512, 512), color=(0, 0, 0))
+        
+        if not i:
+            return None
+
+        # Obtener dimensiones solo si output_dimensions está activo
+        if output_dimensions:
+            width, height = i.size
+        else:
+            width, height = 0, 0
+
+        image = i
+        if not RGBA:
+            image = image.convert('RGB')
+        image = np.array(image).astype(np.float32) / 255.0
+        image = torch.from_numpy(image)[None,]
+
+        if 'A' in i.getbands():
+            mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
+            mask = 1. - torch.from_numpy(mask)
+        else:
+            mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
+
+        if filename_text_extension:
+            filename = os.path.basename(image_path)
+        else:
+            filename = os.path.splitext(os.path.basename(image_path))[0]
+
+        return (image, mask, filename, width, height)
+
+    def download_image(self, url):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            img = Image.Open(BytesIO(response.content))
+            return img
+        except requests.exceptions.HTTPError as errh:
+            print(f"Load Image-Mika HTTP Error ({url}): {errh}")
+        except requests.exceptions.ConnectionError as errc:
+            print(f"Load Image-Mika Connection Error ({url}): {errc}")
+        except Exception as e:
+            print(f"Load Image-Mika Error: {e}")
+        return None
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        """
+        Calcula el hash SHA-256 del archivo para detectar cambios.
+        Corregido: usa 'image_path' en lugar de los parámetros incorrectos
+        del código original de WAS Suite.
+        """
+        image_path = kwargs.get('image_path', '')
+        
+        # Si es URL, no calcular hash (siempre recargar)
+        if image_path.startswith('http'):
+            return float("NaN")
+        
+        # Si el archivo no existe, no recargar
+        if not os.path.exists(image_path):
+            return None
+        
+        # Calcular hash SHA-256 del archivo
+        try:
+            sha256_hash = hashlib.sha256()
+            with open(image_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(4096), b''):
+                    sha256_hash.update(chunk)
+            return sha256_hash.hexdigest()
+        except Exception:
+            return float("NaN")
+
+
+class SmartTagFilterMika:
+    """
+    Smart Tag Filter-Mika (compacto, slots tipo switch): las entradas
+    'prompt' y 'filter_tags' usan el tipo "*" (comodín), que NO tiene
+    widget asociado. Son sockets puros que solo aceptan conexión por cable,
+    igual que los nodos switch, y al convertir a subgrafo quedan como
+    slots limpios. Aceptan cualquier salida (STRING de tus nodos de texto,
+    taggers, etc.).
+
+    Reconoce:
+    - Tags con peso/prioridad: (fat:1.1), (strong:1.5), ((tag))
+    - Caracteres especiales: =), :D, ;d, \(pokemon\)
+    - Prefijos de color: con ignore_color_prefix, "shirt" coincide con "aqua shirt"
+
+    Modos:
+    - include: mantiene solo los tags de filter_tags
+    - exclude: remueve los tags de filter_tags
+    """
+
+    # Emoticones comunes que podrían confundirse con sintaxis de peso
+    EMOTICONES = [
+        "=)", "=(", ":D", ":P", ":3", ";)", ";d", ";D", ":)", ":(",
+        ":/", ":|", ":o", ":O", ":*", ":'(", ":')", "XD", "xd",
+        "D:", ">:(", ">:)", ":>", ":<", ":^)", ":-)", ":-(",
+    ]
+
+    # Colores conocidos (tags de anime/danbooru) para ignorar como prefijo
+    COLORS = {
+        "red", "blue", "green", "yellow", "purple", "pink", "orange", "brown",
+        "black", "white", "gray", "grey", "cyan", "magenta", "gold", "silver",
+        "aqua", "teal", "navy", "maroon", "olive", "lime", "turquoise", "violet",
+        "indigo", "beige", "cream", "tan", "coral", "salmon", "crimson", "scarlet",
+        "azure", "cobalt", "emerald", "jade", "lavender", "lilac", "peach", "rose",
+        "ruby", "sapphire", "amber", "bronze", "copper", "platinum", "blonde",
+        "brunette", "auburn", "ivory", "khaki", "charcoal", "fuchsia",
+    }
+
+    # Modificadores de color que pueden preceder a un color (light_blue, dark_red)
+    COLOR_MODIFIERS = {
+        "light", "dark", "pale", "deep", "bright", "vivid", "muted", "soft",
+        "neon", "pastel", "rich", "dull",
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                # Tipo "*": socket puro sin widget, solo conexión por cable
+                # (igual que los nodos switch). Acepta STRING y cualquier tipo.
+                "prompt": ("*",),
+                "filter_tags": ("*",),
+                "mode": (["include", "exclude"],),
+            },
+            "optional": {
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+                "ignore_weight": ("BOOLEAN", {"default": False}),
+                "ignore_color_prefix": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("filtered", "matched", "unmatched")
+    FUNCTION = "filter_tags"
+    CATEGORY = "Mika Utilidades/tags"
+
+    @staticmethod
+    def _to_text(value):
+        """Convierte cualquier entrada conectada a texto."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)
+
+    def escape_emoticones(self, text):
+        for emote in self.EMOTICONES:
+            escaped = emote.replace("(", "\\(").replace(")", "\\)").replace(":", "\\:")
+            text = re.sub(r'(?<!\\)' + re.escape(emote), escaped, text)
+        return text
+
+    def unescape_emoticones(self, text):
+        for emote in self.EMOTICONES:
+            escaped = emote.replace("(", "\\(").replace(")", "\\)").replace(":", "\\:")
+            text = text.replace(escaped, emote)
+        return text
+
+    def strip_color_prefix(self, tag_base):
+        parts = tag_base.split("_")
+        if len(parts) >= 3 and parts[0] in self.COLOR_MODIFIERS and parts[1] in self.COLORS:
+            return "_".join(parts[2:])
+        if len(parts) >= 2 and parts[0] in self.COLORS:
+            return "_".join(parts[1:])
+        return tag_base
+
+    def parse_smart_tag(self, tag_text, case_sensitive=False):
+        original = tag_text.strip()
+        if not original:
+            return None
+
+        opening_parens = 0
+        closing_parens = 0
+
+        for char in original:
+            if char == '(':
+                opening_parens += 1
+            elif char == ')':
+                closing_parens += 1
+            elif char not in ' \t':
+                break
+
+        for char in reversed(original):
+            if char == ')':
+                closing_parens += 1
+            elif char == '(':
+                opening_parens += 1
+            elif char not in ' \t':
+                break
+
+        stripped = original.strip()
+        while stripped.startswith('(') and stripped.endswith(')'):
+            inner = stripped[1:-1].strip()
+            if ':' in inner:
+                parts = inner.rsplit(':', 1)
+                if len(parts) == 2:
+                    try:
+                        weight = float(parts[1])
+                        base_tag = parts[0].strip()
+                        normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
+                        return {
+                            'original': original,
+                            'base': normalized,
+                            'weight': weight,
+                            'has_weight': True,
+                            'weight_syntax': 'explicit'
+                        }
+                    except ValueError:
+                        pass
+            stripped = inner.strip()
+
+        paren_pairs = min(opening_parens, closing_parens)
+        weight = 1.0 + (paren_pairs * 0.1) if paren_pairs > 0 else 1.0
+
+        base_tag = stripped
+        normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
+
+        return {
+            'original': original,
+            'base': normalized,
+            'weight': weight,
+            'has_weight': paren_pairs > 0,
+            'weight_syntax': 'parentheses' if paren_pairs > 0 else 'none'
+        }
+
+    def parse_prompt(self, prompt, case_sensitive=False):
+        if not prompt or not prompt.strip():
+            return []
+
+        prompt = self.escape_emoticones(prompt)
+
+        tags = []
+        current = ''
+        paren_depth = 0
+
+        for char in prompt:
+            if char == '(':
+                paren_depth += 1
+            elif char == ')':
+                paren_depth -= 1
+            elif char == ',' and paren_depth == 0:
+                if current.strip():
+                    parsed = self.parse_smart_tag(current, case_sensitive)
+                    if parsed:
+                        tags.append(parsed)
+                current = ''
+                continue
+            current += char
+
+        if current.strip():
+            parsed = self.parse_smart_tag(current, case_sensitive)
+            if parsed:
+                tags.append(parsed)
+
+        for tag in tags:
+            tag['original'] = self.unescape_emoticones(tag['original'])
+
+        return tags
+
+    def tags_match(self, tag1, tag2, ignore_weight=False, ignore_color_prefix=False):
+        base1 = tag1['base']
+        base2 = tag2['base']
+
+        if base1 == base2:
+            if ignore_weight:
+                return True
+            return abs(tag1['weight'] - tag2['weight']) < 0.01
+
+        if ignore_color_prefix:
+            stripped1 = self.strip_color_prefix(base1)
+            stripped2 = self.strip_color_prefix(base2)
+
+            if stripped1 == base2 or stripped2 == base1:
+                if ignore_weight or abs(tag1['weight'] - tag2['weight']) < 0.01:
+                    return True
+
+        return False
+
+    def filter_tags(self, prompt, filter_tags, mode="include", case_sensitive=False, ignore_weight=False, ignore_color_prefix=False):
+        # Convertir entradas (pueden venir de cualquier tipo por ser "*")
+        prompt = self._to_text(prompt)
+        filter_tags = self._to_text(filter_tags)
+
+        prompt_tags = self.parse_prompt(prompt, case_sensitive)
+        filter_list = self.parse_prompt(filter_tags, case_sensitive)
+
+        if not filter_list:
+            matched = []
+            unmatched = prompt_tags
+        else:
+            matched = []
+            unmatched = []
+
+            for ptag in prompt_tags:
+                found = False
+                for ftag in filter_list:
+                    if self.tags_match(ptag, ftag, ignore_weight, ignore_color_prefix):
+                        found = True
+                        break
+
+                if found:
+                    matched.append(ptag)
+                else:
+                    unmatched.append(ptag)
+
+        if mode == "include":
+            result_tags = matched
+        else:
+            result_tags = unmatched
+
+        filtered = ", ".join([tag['original'] for tag in result_tags])
+        matched_str = ", ".join([tag['original'] for tag in matched])
+        unmatched_str = ", ".join([tag['original'] for tag in unmatched])
+
+        return (filtered, matched_str, unmatched_str)
+
+
+import { app } from "/scripts/app.js";
+
+const DEFAULT_VISIBLE = 3;
+
+app.registerExtension({
+  name: "Comfy.TagIfMika",
+  async beforeRegisterNodeDef(nodeType, nodeData, app) {
+    if (nodeData.name !== "TagIfMika") return;
+
+    function resize(node) {
+      const size = node.computeSize();
+      node.setSize([node.size[0], size[1]]);
+      node.setDirtyCanvas(true, true);
+    }
+
+    function sortPool(node) {
+      node.hiddenTagIfPairs.sort((a, b) => a.index - b.index);
+    }
+
+    function anchorIndex(node) {
+      const btnIdx = node.widgets.indexOf(node.addButtonWidget);
+      return btnIdx === -1 ? node.widgets.length : btnIdx;
+    }
+
+    function showNext(node) {
+      sortPool(node);
+      const pair = node.hiddenTagIfPairs.shift();
+      if (!pair) return null;
+      node.widgets.splice(anchorIndex(node), 0, pair.find, pair.output);
+      node.visibleTagIfPairs.push(pair);
+      const size = node.computeSize();
+      node.setSize([node.size[0], size[1]]);
+      return pair;
+    }
+
+    function hideLast(node) {
+      if (node.visibleTagIfPairs.length <= 1) return;
+      const pair = node.visibleTagIfPairs.pop();
+      for (const w of [pair.find, pair.output]) {
+        const idx = node.widgets.indexOf(w);
+        if (idx !== -1) node.widgets.splice(idx, 1);
+      }
+      pair.find.value = "";
+      pair.output.value = "";
+      node.hiddenTagIfPairs.push(pair);
+      const size = node.computeSize();
+      node.setSize([node.size[0], size[1]]);
+    }
+
+    const onNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+      const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
+
+      const findWidgets = this.widgets.filter((w) => w.name.startsWith("find_"));
+      const pairs = findWidgets
+        .map((findWidget) => {
+          const index = parseInt(findWidget.name.split("_")[1], 10);
+          const outputWidget = this.widgets.find((w) => w.name === `output_${index}`);
+          return outputWidget ? { index, find: findWidget, output: outputWidget } : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.index - b.index);
+
+      this.visibleTagIfPairs = pairs.slice(0, DEFAULT_VISIBLE);
+      this.hiddenTagIfPairs = pairs.slice(DEFAULT_VISIBLE);
+
+      for (const pair of this.hiddenTagIfPairs) {
+        for (const w of [pair.find, pair.output]) {
+          const idx = this.widgets.indexOf(w);
+          if (idx !== -1) this.widgets.splice(idx, 1);
+        }
+      }
+
+      this.addButtonWidget = this.addWidget("button", "+ Agregar condición", null, () => {
+        showNext(this);
+        resize(this);
+      });
+
+      this.removeButtonWidget = this.addWidget("button", "− Quitar condición", null, () => {
+        hideLast(this);
+        resize(this);
+      });
+
+      resize(this);
+      return r;
+    };
+
+    const onSerialize = nodeType.prototype.onSerialize;
+    nodeType.prototype.onSerialize = function (o) {
+      const r = onSerialize ? onSerialize.apply(this, arguments) : undefined;
+      o.visibleTagIfCount = this.visibleTagIfPairs.length;
+      const vals = {};
+      for (const pair of this.visibleTagIfPairs) {
+        vals[`find_${pair.index}`] = pair.find.value;
+        vals[`output_${pair.index}`] = pair.output.value;
+      }
+      o.mikaTagIfValues = vals;
+      return r;
+    };
+
+    const onConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function (info) {
+      const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+
+      const target = info.visibleTagIfCount ?? DEFAULT_VISIBLE;
+      while (this.visibleTagIfPairs.length < target && this.hiddenTagIfPairs.length > 0) {
+        showNext(this);
+      }
+      while (this.visibleTagIfPairs.length > target && this.visibleTagIfPairs.length > 1) {
+        hideLast(this);
+      }
+
+      if (info.mikaTagIfValues) {
+        for (const pair of this.visibleTagIfPairs) {
+          if (`find_${pair.index}` in info.mikaTagIfValues) pair.find.value = info.mikaTagIfValues[`find_${pair.index}`];
+          if (`output_${pair.index}` in info.mikaTagIfValues) pair.output.value = info.mikaTagIfValues[`output_${pair.index}`];
+        }
+      }
+
+      resize(this);
+      return r;
+    };
+  },
+});
+
+
 class FloatOutputList:
     """
     Igual que 'String OutputList' de la extensión ComfyUI-outputlists-combiner
@@ -468,6 +965,9 @@ NODE_CLASS_MAPPINGS = {
     "TagFilter": TagFilter,
     "TextReplaceDynamic": TextReplaceDynamic,
     "TextConcatenateDynamic": TextConcatenateDynamic,
+    "LoadImageMika": LoadImageMika,
+    "SmartTagFilterMika": SmartTagFilterMika,
+    "TagIfMika": TagIfMika,
     "FloatOutputList": FloatOutputList,
     "ExecutionTimerConfig": ExecutionTimerConfig,
 }
@@ -480,6 +980,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TagFilter": "Tag Filter-Mika",
     "TextReplaceDynamic": "Text Replace Dynamic-Mika",
     "TextConcatenateDynamic": "Text Concatenate Dynamic-Mika",
+    "LoadImageMika": "Load Image-Mika",
+    "SmartTagFilterMika": "Smart Tag Filter-Mika",
+    "TagIfMika": "Tag If-Mika",
     "FloatOutputList": "Float OutputList",
     "ExecutionTimerConfig": "⏱ Tiempos de Ejecución (config)",
 }
