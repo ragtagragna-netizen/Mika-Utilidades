@@ -1,9 +1,8 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-console.log("[Mika] Text Box Visor-Mika cargado — v1");
+console.log("[Mika] Text Box Visor-Mika cargado — v11.1 (botones en header + link estático)");
 
-// Mismos iconos vectoriales uniformes que la v10 (grilla 24x24, trazo 2).
 const ICON_CHECK = ["M20 6L9 17l-5-5"];
 const ICON_CROSS = ["M18 6L6 18", "M6 6l12 12"];
 const ICONS = [
@@ -18,16 +17,9 @@ const ICONS = [
 ];
 
 const ICON_SIZE = 16;
-const DOM_ICON_PX = 14;
 const ICON_GAP = 3;
 const FEEDBACK_MS = 1200;
 const NEUTRAL_BG = "rgba(128,128,128,0.18)";
-const NEUTRAL_BG_HOVER = "rgba(128,128,128,0.35)";
-const NEUTRAL_BORDER = "rgba(128,128,128,0.35)";
-
-function iconSVG(paths, size) {
-  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block">${paths.map((d) => `<path d="${d}"/>`).join("")}</svg>`;
-}
 
 function drawIconCanvas(ctx, paths, x, y, size, color) {
   ctx.save();
@@ -42,9 +34,6 @@ function drawIconCanvas(ctx, paths, x, y, size, color) {
   ctx.restore();
 }
 
-// -----------------------------------------------------------------------
-// Portapapeles + inserción (idéntico a la v10)
-// -----------------------------------------------------------------------
 function normalizeNewlines(text) {
   return (text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
@@ -94,9 +83,6 @@ function setWidgetText(node, widget, text) {
     ta.dispatchEvent(new Event("input", { bubbles: true }));
     ta.dispatchEvent(new Event("change", { bubbles: true }));
   }
-  if (typeof widget.callback === "function") {
-    try { widget.callback(text, node.graph?.canvas, node); } catch (err) { /* no-op */ }
-  }
   if (typeof node.onResize === "function") node.onResize(node.size);
   node.setDirtyCanvas(true, true);
 }
@@ -104,23 +90,35 @@ function setWidgetText(node, widget, text) {
 function insertTextIntoWidget(node, widget, rawText) {
   if (!widget) return;
   const text = normalizeNewlines(rawText);
-  const ta = getWidgetTextarea(widget);
+  const inputEl = getWidgetTextarea(widget);
 
   let newValue;
-  if (ta && ta.isConnected && ta.tagName === "TEXTAREA") {
-    const start = ta.selectionStart ?? ta.value.length;
-    const end = ta.selectionEnd ?? ta.value.length;
-    const current = ta.value ?? "";
+  if (inputEl && inputEl.isConnected && inputEl.tagName === "TEXTAREA") {
+    const start = inputEl.selectionStart ?? inputEl.value.length;
+    const end = inputEl.selectionEnd ?? inputEl.value.length;
+    const current = inputEl.value ?? "";
     newValue = current.slice(0, start) + text + current.slice(end);
-    setWidgetText(node, widget, newValue);
+    inputEl.value = newValue;
     const newPos = start + text.length;
-    ta.focus();
-    ta.setSelectionRange(newPos, newPos);
+    inputEl.focus();
+    inputEl.setSelectionRange(newPos, newPos);
+    inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    inputEl.dispatchEvent(new Event("change", { bubbles: true }));
   } else {
-    const current = widget.value ?? "";
-    newValue = current && text ? `${current}\n${text}` : current || text;
-    setWidgetText(node, widget, newValue);
+    const current = (widget.value ?? "").replace(/\n+$/, "");
+    const newText = text.replace(/^\n+/, "");
+    if (!current && !newText) newValue = "";
+    else if (!current) newValue = newText;
+    else if (!newText) newValue = current;
+    else if (!current.endsWith("\n") && !newText.startsWith("\n")) newValue = `${current}\n${newText}`;
+    else newValue = current + newText;
   }
+
+  widget.value = newValue;
+  if (typeof widget.callback === "function") widget.callback(newValue, node.graph?.canvas, node);
+  node.setDirtyCanvas(true, true);
+  if (typeof node.onResize === "function") node.onResize(node.size);
+  try { app.graph.setDirtyCanvas(true, true); } catch (e) { /* no-op */ }
 }
 
 function selectAllInWidget(widget) {
@@ -138,20 +136,19 @@ function textToCopyFrom(widget) {
   return widget?.value ?? "";
 }
 
-// -----------------------------------------------------------------------
-// Feedback + acciones (idéntico a la v10)
-// -----------------------------------------------------------------------
-function flashButton(btn, icon, ok) {
-  if (!btn) return;
-  btn.innerHTML = iconSVG(ok ? ICON_CHECK : ICON_CROSS, DOM_ICON_PX);
-  btn.style.color = ok ? "#8f8" : "#f88";
-  setTimeout(() => {
-    btn.innerHTML = btn._mikaOriginalHTML;
-    btn.style.color = "";
-  }, FEEDBACK_MS);
+function bindPaste(node, widget) {
+  const anchor = getWidgetTextarea(widget);
+  if (!anchor || anchor.tagName !== "TEXTAREA" || anchor._mikaPasteBound) return;
+  anchor._mikaPasteBound = true;
+  anchor.addEventListener("paste", (e) => {
+    const text = e.clipboardData?.getData("text/plain");
+    if (text == null || text === "") return;
+    e.preventDefault();
+    insertTextIntoWidget(node, widget, text);
+  });
 }
 
-function flashCollapsedIcon(node, key, ok) {
+function flashIcon(node, key, ok) {
   if (!node._mikaCollapsedFeedback) node._mikaCollapsedFeedback = {};
   node._mikaCollapsedFeedback[key] = { ok, until: Date.now() + FEEDBACK_MS };
   node.setDirtyCanvas(true, true);
@@ -168,19 +165,19 @@ function runAction(node, widget, key, onFeedback) {
   if (key === "copy") {
     writeClipboard(textToCopyFrom(widget))
       .then(() => onFeedback?.(true))
-      .catch((err) => { console.error("Mika Visor: no se pudo copiar.", err); onFeedback?.(false); });
+      .catch((err) => { console.error("Mika: no se pudo copiar.", err); onFeedback?.(false); });
   } else if (key === "selectAll") {
     selectAllInWidget(widget);
     onFeedback?.(true);
   } else if (key === "paste") {
     readClipboardText()
       .then((text) => { insertTextIntoWidget(node, widget, text); onFeedback?.(true); })
-      .catch((err) => { console.error("Mika Visor: no se pudo pegar (usá Ctrl+V).", err); onFeedback?.(false); });
+      .catch((err) => { console.error("Mika: no se pudo pegar (usá Ctrl+V).", err); onFeedback?.(false); });
   }
 }
 
 // -----------------------------------------------------------------------
-// Tooltip + hit-test (colapsado)
+// Tooltip flotante
 // -----------------------------------------------------------------------
 let tooltipEl = null;
 function ensureTooltip() {
@@ -205,9 +202,8 @@ function showTooltip(text, clientX, clientY) {
 }
 function hideTooltip() { if (tooltipEl) tooltipEl.style.display = "none"; }
 
-function hitTestCollapsedIcons(node, localX, localY) {
-  if (!node._mikaCollapsedIconRects) return null;
-  for (const rect of node._mikaCollapsedIconRects) {
+function hitTestRects(rects, localX, localY) {
+  for (const rect of rects) {
     if (localX >= rect.x && localX <= rect.x + rect.w && localY >= rect.y && localY <= rect.y + rect.h) {
       return rect;
     }
@@ -216,80 +212,63 @@ function hitTestCollapsedIcons(node, localX, localY) {
 }
 
 // -----------------------------------------------------------------------
-// MODO EXPANDIDO: barra de botones (misma lógica que la v10)
+// Dibuja los iconos a la derecha del header (título) y guarda sus rects.
 // -----------------------------------------------------------------------
-function ensureExpandedButtons(node, widget) {
-  const anchor = getWidgetTextarea(widget);
-  if (!anchor || !anchor.isConnected) return false;
-  const host = anchor.parentElement ?? anchor;
-  if (!host) return false;
-
-  if (anchor.tagName === "TEXTAREA" && !anchor._mikaPasteBound) {
-    anchor._mikaPasteBound = true;
-    anchor.addEventListener("paste", (e) => {
-      const text = e.clipboardData?.getData("text/plain");
-      if (text == null || text === "") return;
-      e.preventDefault();
-      insertTextIntoWidget(node, widget, text);
-    });
-  }
-
-  if (node._mikaBar && node._mikaBar.isConnected && node._mikaBarHost === host) return true;
-  if (node._mikaBar) { node._mikaBar.remove(); node._mikaBar = null; }
-
-  const cs = getComputedStyle(host);
-  if (cs.position === "static") host.style.position = "relative";
-
-  const bar = document.createElement("div");
-  Object.assign(bar.style, {
-    position: "absolute", top: "3px", right: "4px",
-    display: "flex", gap: "3px", zIndex: "10", pointerEvents: "auto",
-  });
+function drawHeaderIcons(node, ctx) {
+  const LG = window.LiteGraph ?? {};
+  const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
+  const iconsWidth = ICONS.length * (ICON_SIZE + ICON_GAP) + ICON_GAP;
+  const width = node.flags?.collapsed
+    ? (node._collapsed_width ?? node.size?.[0] ?? 200)
+    : (node.size?.[0] ?? 200);
+  let x = width - iconsWidth - 4;
+  const cy = -titleHeight * 0.5;
+  const feedbackMap = node._mikaCollapsedFeedback ?? {};
+  const titleColor = LG.NODE_TITLE_COLOR ?? "#999";
+  const rects = [];
+  const iconRadius = nodeShape(node) === "box" ? 0 : 4;
 
   for (const icon of ICONS) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.title = icon.title;
-    btn.innerHTML = iconSVG(icon.paths, DOM_ICON_PX);
-    btn._mikaOriginalHTML = btn.innerHTML;
-    Object.assign(btn.style, {
-      width: "22px", height: "22px", padding: "0",
-      display: "inline-flex", alignItems: "center", justifyContent: "center",
-      background: NEUTRAL_BG, border: `1px solid ${NEUTRAL_BORDER}`,
-      borderRadius: "4px", color: "inherit", cursor: "pointer", opacity: "0.9",
-    });
-    btn.onmouseenter = () => { btn.style.background = NEUTRAL_BG_HOVER; };
-    btn.onmouseleave = () => { btn.style.background = NEUTRAL_BG; };
-    btn.addEventListener("pointerdown", (e) => e.stopPropagation());
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      runAction(node, widget, icon.key, (ok) => flashButton(btn, icon, ok));
-    });
-    bar.appendChild(btn);
-  }
+    const feedback = feedbackMap[icon.key];
+    const showFeedback = feedback && feedback.until > Date.now();
 
-  host.appendChild(bar);
-  node._mikaBar = bar;
-  node._mikaBarHost = host;
-  return true;
-}
+    ctx.fillStyle = NEUTRAL_BG;
+    ctx.beginPath();
+    if (iconRadius > 0 && ctx.roundRect) ctx.roundRect(x, cy - ICON_SIZE / 2, ICON_SIZE, ICON_SIZE, iconRadius);
+    else ctx.rect(x, cy - ICON_SIZE / 2, ICON_SIZE, ICON_SIZE);
+    ctx.fill();
 
-function mikaExpandedTick(node) {
-  try {
-    if (node.flags?.collapsed) return;
-    const now = performance.now();
-    if (!node._mikaLastButtonCheck || now - node._mikaLastButtonCheck > 400) {
-      node._mikaLastButtonCheck = now;
-      ensureExpandedButtons(node, node.mikaTextWidget);
+    if (showFeedback) {
+      drawIconCanvas(ctx, feedback.ok ? ICON_CHECK : ICON_CROSS, x, cy - ICON_SIZE / 2, ICON_SIZE, feedback.ok ? "#8f8" : "#f88");
+    } else {
+      drawIconCanvas(ctx, icon.paths, x, cy - ICON_SIZE / 2, ICON_SIZE, titleColor);
     }
-  } catch (err) {
-    console.error("Mika Visor: error revisando botones expandidos.", err);
+
+    rects.push({ key: icon.key, x, y: cy - ICON_SIZE / 2, w: ICON_SIZE, h: ICON_SIZE });
+    x += ICON_SIZE + ICON_GAP;
   }
+
+  if (node.flags?.collapsed) node._mikaCollapsedIconRects = rects;
+  else node._mikaExpandedIconRects = rects;
 }
 
-// -----------------------------------------------------------------------
-// MODO COLAPSADO: listeners globales (flag propio para no chocar con v10)
-// -----------------------------------------------------------------------
+// Detecta la forma configurada (box/round/circle/card) igual que ComfyUI.
+function nodeShape(node) {
+  const LG = window.LiteGraph ?? {};
+  let s = node.shape ?? LG.NODE_DEFAULT_SHAPE;
+  if (typeof s === "number") {
+    if (s === LG.BOX_SHAPE) return "box";
+    if (s === LG.CIRCLE_SHAPE) return "circle";
+    if (s === LG.CARD_SHAPE) return "card";
+    return "round";
+  }
+  s = String(s ?? "").toLowerCase();
+  if (s.includes("box") || s.includes("square")) return "box";
+  if (s.includes("circle") || s.includes("capsule")) return "circle";
+  if (s.includes("card")) return "card";
+  return "round";
+}
+
 function eventToCanvasCoords(e) {
   const canvas = app.canvas;
   if (!canvas) return null;
@@ -302,44 +281,43 @@ function eventToCanvasCoords(e) {
       const p = canvas.convertEventToCanvas(e);
       return Array.isArray(p) ? p : [p?.x, p?.y];
     }
-  } catch (err) { /* no-op */ }
+  } catch (e2) { /* no-op */ }
   return null;
 }
 
-function findCollapsedIconAt(e) {
+function findIconAt(e, flagName) {
   const graph = app.graph;
   const pt = eventToCanvasCoords(e);
   if (!graph || !pt || pt[0] == null) return null;
   const nodes = graph._nodes ?? [];
   for (let i = nodes.length - 1; i >= 0; i--) {
     const node = nodes[i];
-    if (!node._mikaIsTextBoxVisor || !node.flags?.collapsed) continue;
-    if (!node._mikaCollapsedIconRects?.length) continue;
-    const rect = hitTestCollapsedIcons(node, pt[0] - node.pos[0], pt[1] - node.pos[1]);
+    if (!node[flagName]) continue;
+    const rects = node.flags?.collapsed ? node._mikaCollapsedIconRects : node._mikaExpandedIconRects;
+    if (!rects?.length) continue;
+    const rect = hitTestRects(rects, pt[0] - node.pos[0], pt[1] - node.pos[1]);
     if (rect) return { node, rect };
   }
   return null;
 }
 
 let globalListenersReady = false;
-function ensureGlobalListeners() {
+function ensureGlobalListeners(flagName) {
   if (globalListenersReady) return;
   globalListenersReady = true;
 
   window.addEventListener("pointerdown", (e) => {
-    const hit = findCollapsedIconAt(e);
+    const hit = findIconAt(e, flagName);
     if (!hit) return;
     e.stopPropagation();
     e.stopImmediatePropagation();
     e.preventDefault();
     hideTooltip();
-    runAction(hit.node, hit.node.mikaTextWidget, hit.rect.key, (ok) =>
-      flashCollapsedIcon(hit.node, hit.rect.key, ok)
-    );
+    runAction(hit.node, hit.node.mikaTextWidget, hit.rect.key, (ok) => flashIcon(hit.node, hit.rect.key, ok));
   }, true);
 
   window.addEventListener("pointermove", (e) => {
-    const hit = findCollapsedIconAt(e);
+    const hit = findIconAt(e, flagName);
     if (hit) {
       const icon = ICONS.find((i) => i.key === hit.rect.key);
       showTooltip(icon?.title ?? "", e.clientX, e.clientY);
@@ -350,7 +328,7 @@ function ensureGlobalListeners() {
 }
 
 // -----------------------------------------------------------------------
-// NUEVO: preview por websocket desde el backend (PromptServer.send_sync)
+// Preview por websocket desde el backend (PromptServer.send_sync)
 // -----------------------------------------------------------------------
 api.addEventListener("mika-visor-preview", (e) => {
   const { id, text } = e.detail ?? {};
@@ -370,98 +348,90 @@ app.registerExtension({
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "TextBoxVisor") return;
+    const FLAG = "_mikaIsTextBoxVisor";
 
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
-      this._mikaIsTextBoxVisor = true;
-      ensureGlobalListeners();
+      this[FLAG] = true;
+      ensureGlobalListeners(FLAG);
       this.mikaTextWidget =
-        (this.widgets ?? []).find(
-          (w) => w.name === "text" || w.type === "customtext" || w.type === "STRING"
-        ) ?? null;
-      ensureExpandedButtons(this, this.mikaTextWidget);
+        (this.widgets ?? []).find((w) => w.name === "text" || w.type === "customtext" || w.type === "STRING") ?? null;
+      bindPaste(this, this.mikaTextWidget);
       return r;
     };
 
+    // Expandido: iconos en el header + engancha el paste nativo.
     const onDrawForeground = nodeType.prototype.onDrawForeground;
-    nodeType.prototype.onDrawForeground = function (ctx, canvas) {
+    nodeType.prototype.onDrawForeground = function (ctx) {
       const r = onDrawForeground ? onDrawForeground.apply(this, arguments) : undefined;
-      mikaExpandedTick(this);
-      return r;
-    };
-    const onDraw = nodeType.prototype.onDraw;
-    nodeType.prototype.onDraw = function (ctx, canvas) {
-      const r = onDraw ? onDraw.apply(this, arguments) : undefined;
-      mikaExpandedTick(this);
+      if (this.flags?.collapsed) return r;
+      try {
+        bindPaste(this, this.mikaTextWidget);
+        drawHeaderIcons(this, ctx);
+      } catch (e) { /* no-op */ }
       return r;
     };
 
+    // Colapsado: lo dibujamos COMPLETO nosotros (return true evita que
+    // LiteGraph pinte su barra encima y tape los iconos). Replicamos la
+    // estética default: barra de altura estándar, fuente chica, forma
+    // según la configuración (box/round/circle/card) y círculo indicador.
+    // Al ser los únicos que fijan _collapsed_width, el link queda estable.
     nodeType.prototype.onDrawCollapsed = function (ctx) {
       try {
         const LG = window.LiteGraph ?? {};
         const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
         const titleText =
           (typeof this.getTitle === "function" ? this.getTitle() : this.title) ||
-          "Text Box Visor-Mika";
+          "Text Box Editor-Mika"; // ← en el visor: "Text Box Visor-Mika"
+
+        // Fuente chica FIJA (misma estética del título colapsado default).
+        const titleFont = "10px sans-serif";
+        ctx.save();
+        ctx.font = titleFont;
+        const titleWidth = ctx.measureText(titleText).width;
 
         const iconsWidth = ICONS.length * (ICON_SIZE + ICON_GAP) + ICON_GAP;
-        const titleWidth = ctx.measureText(titleText).width;
-        const width = Math.max(80, titleHeight + titleWidth + 14 + iconsWidth);
+        const width = Math.max(
+          LG.NODE_COLLAPSED_WIDTH ?? 80,
+          titleHeight + titleWidth + 14 + iconsWidth
+        );
         this._collapsed_width = width;
 
-        ctx.save();
-
+        // Barra con la forma configurada (igual que el resto de nodos).
+        const radius = LG.ROUND_RADIUS ?? 8;
+        const shape = nodeShape(this);
         ctx.fillStyle = this.bgcolor ?? LG.NODE_DEFAULT_BGCOLOR ?? "#353535";
         ctx.beginPath();
-        if (ctx.roundRect) ctx.roundRect(0, -titleHeight, width, titleHeight, titleHeight * 0.4);
-        else ctx.rect(0, -titleHeight, width, titleHeight);
+        if (!ctx.roundRect || shape === "box") {
+          ctx.rect(0, -titleHeight, width, titleHeight);
+        } else if (shape === "circle") {
+          ctx.roundRect(0, -titleHeight, width, titleHeight, titleHeight / 2);
+        } else if (shape === "card") {
+          ctx.roundRect(0, -titleHeight, width, titleHeight, [radius, radius, 0, 0]);
+        } else {
+          ctx.roundRect(0, -titleHeight, width, titleHeight, radius);
+        }
         ctx.fill();
 
+        // Círculo indicador izquierdo (igual que default).
         ctx.fillStyle = this.boxcolor ?? LG.NODE_DEFAULT_BOXCOLOR ?? "#888";
         ctx.beginPath();
         ctx.arc(titleHeight * 0.5, -titleHeight * 0.5, titleHeight * 0.28, 0, Math.PI * 2);
         ctx.fill();
 
-        const titleColor = LG.NODE_TITLE_COLOR ?? "#999";
-        ctx.fillStyle = titleColor;
+        // Título con fuente chica.
+        ctx.fillStyle = LG.NODE_TITLE_COLOR ?? "#999";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         ctx.fillText(titleText, titleHeight + 8, -titleHeight * 0.5 + 1);
-
-        this._mikaCollapsedIconRects = [];
-        let x = width - iconsWidth + ICON_GAP;
-        const cy = -titleHeight * 0.5;
-        const feedbackMap = this._mikaCollapsedFeedback ?? {};
-
-        for (const icon of ICONS) {
-          const feedback = feedbackMap[icon.key];
-          const showFeedback = feedback && feedback.until > Date.now();
-
-          ctx.fillStyle = NEUTRAL_BG;
-          ctx.beginPath();
-          if (ctx.roundRect) ctx.roundRect(x, cy - ICON_SIZE / 2, ICON_SIZE, ICON_SIZE, 4);
-          else ctx.rect(x, cy - ICON_SIZE / 2, ICON_SIZE, ICON_SIZE);
-          ctx.fill();
-
-          if (showFeedback) {
-            drawIconCanvas(ctx, feedback.ok ? ICON_CHECK : ICON_CROSS, x, cy - ICON_SIZE / 2, ICON_SIZE, feedback.ok ? "#8f8" : "#f88");
-          } else {
-            drawIconCanvas(ctx, icon.paths, x, cy - ICON_SIZE / 2, ICON_SIZE, titleColor);
-          }
-
-          this._mikaCollapsedIconRects.push({
-            key: icon.key, x, y: cy - ICON_SIZE / 2, w: ICON_SIZE, h: ICON_SIZE,
-          });
-          x += ICON_SIZE + ICON_GAP;
-        }
-
         ctx.restore();
-        return true;
-      } catch (err) {
-        console.error("Mika Visor: fallo dibujando colapsado; uso default.", err);
-        return false;
-      }
+
+        // Iconos a la derecha, sobre nuestra propia barra (quedan visibles).
+        drawHeaderIcons(this, ctx);
+      } catch (e) { /* no-op */ }
+      return true; // nosotros dibujamos todo; LiteGraph no pisa nada.
     };
 
     const origGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
@@ -472,21 +442,11 @@ app.registerExtension({
         for (const icon of ICONS) {
           options.push({
             content: icon.title,
-            callback: () =>
-              runAction(this, this.mikaTextWidget, icon.key, (ok) =>
-                flashCollapsedIcon(this, icon.key, ok)
-              ),
+            callback: () => runAction(this, this.mikaTextWidget, icon.key, (ok) => flashIcon(this, icon.key, ok)),
           });
         }
       }
       return r;
-    };
-
-    const origOnRemoved = nodeType.prototype.onRemoved;
-    nodeType.prototype.onRemoved = function () {
-      if (this._mikaBar?.isConnected) this._mikaBar.remove();
-      this._mikaBar = null;
-      return origOnRemoved ? origOnRemoved.apply(this, arguments) : undefined;
     };
   },
 });
