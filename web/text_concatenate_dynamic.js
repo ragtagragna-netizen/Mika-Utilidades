@@ -25,19 +25,24 @@ app.registerExtension({
       return btnIdx === -1 ? node.widgets.length : btnIdx;
     }
 
+    // FIX CLAVE: después de modificar node.widgets hay que recalcular el
+    // tamaño Y forzar el re-render para que ComfyUI reposicione los sockets
+    // de entrada; sin esto los widgets nuevos quedan sin socket conectable.
+    function relayout(node) {
+      const size = node.computeSize();
+      node.setSize([node.size[0], size[1]]);
+      if (typeof node.onResize === "function") node.onResize(node.size);
+      node.setDirtyCanvas(true, true);
+      try { app.graph.setDirtyCanvas(true, true); } catch (e) { /* no-op */ }
+    }
+
     function showNext(node) {
       sortPool(node);
       const slot = node.hiddenTextSlots.shift();
       if (!slot) return null;
-      
-      const insertIdx = anchorIndex(node);
-      node.widgets.splice(insertIdx, 0, slot.widget);
+      node.widgets.splice(anchorIndex(node), 0, slot.widget);
       node.visibleTextSlots.push(slot);
-      
-      // Forzar recálculo inmediato después de modificar widgets
-      const size = node.computeSize();
-      node.setSize([node.size[0], size[1]]);
-      
+      relayout(node);
       return slot;
     }
 
@@ -48,10 +53,7 @@ app.registerExtension({
       if (idx !== -1) node.widgets.splice(idx, 1);
       slot.widget.value = "";
       node.hiddenTextSlots.push(slot);
-      
-      // Forzar recálculo inmediato después de modificar widgets
-      const size = node.computeSize();
-      node.setSize([node.size[0], size[1]]);
+      relayout(node);
     }
 
     const onNodeCreated = nodeType.prototype.onNodeCreated;
@@ -79,17 +81,13 @@ app.registerExtension({
       this.addButtonWidget = this.addWidget("button", "+ Agregar texto", null, () => {
         if (this.visibleTextSlots.length >= MAX_SLOTS) return;
         showNext(this);
-        resize(this);
       });
 
       this.removeButtonWidget = this.addWidget("button", "− Quitar texto", null, () => {
         hideLast(this);
-        resize(this);
       });
 
-      // Forzar recálculo inicial
-      resize(this);
-      
+      relayout(this);
       return r;
     };
 
@@ -135,7 +133,7 @@ app.registerExtension({
         }
       }
 
-      resize(this);
+      relayout(this);
       return r;
     };
   },
