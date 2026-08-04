@@ -1,12 +1,8 @@
 import { app } from "/scripts/app.js";
 
-console.log("[Mika] Text Box Editor-Mika cargado — v10 (botones expandidos fix + iconos SVG uniformes)");
+console.log("[Mika] Text Box Editor-Mika cargado — v10.1 (fix línea vacía en modo colapsado)");
 
-// -----------------------------------------------------------------------
 // Iconos vectoriales (grilla 24x24, trazo 2, estilo "feather").
-// DOM  -> <svg stroke="currentColor"> (se adapta al tema activo).
-// Canvas -> Path2D + strokeStyle (uniformes, sin emojis de colores).
-// -----------------------------------------------------------------------
 const ICON_CHECK = ["M20 6L9 17l-5-5"];
 const ICON_CROSS = ["M18 6L6 18", "M6 6l12 12"];
 
@@ -37,8 +33,8 @@ const ICONS = [
   },
 ];
 
-const ICON_SIZE = 16;      // canvas (colapsado)
-const DOM_ICON_PX = 14;    // botones DOM (expandido)
+const ICON_SIZE = 16;
+const DOM_ICON_PX = 14;
 const ICON_GAP = 3;
 const FEEDBACK_MS = 1200;
 
@@ -119,8 +115,27 @@ function insertTextIntoWidget(node, widget, rawText) {
     inputEl.dispatchEvent(new Event("input", { bubbles: true }));
     inputEl.dispatchEvent(new Event("change", { bubbles: true }));
   } else {
-    const current = widget.value ?? "";
-    newValue = current && text ? `${current}\n${text}` : current || text;
+    // Nodo colapsado o textarea todavía no montado: no hay cursor,
+    // así que agregamos el texto al final sin perder lo que ya había.
+    // FIX: eliminar saltos de línea al final del contenido actual para
+    // evitar líneas vacías al concatenar.
+    const current = (widget.value ?? "").replace(/\n+$/, "");
+    const newText = text.replace(/^\n+/, "");
+    
+    if (!current && !newText) {
+      newValue = "";
+    } else if (!current) {
+      newValue = newText;
+    } else if (!newText) {
+      newValue = current;
+    } else {
+      // Si current no termina con \n y newText no empieza con \n, agregar uno
+      if (!current.endsWith("\n") && !newText.startsWith("\n")) {
+        newValue = `${current}\n${newText}`;
+      } else {
+        newValue = current + newText;
+      }
+    }
   }
 
   widget.value = newValue;
