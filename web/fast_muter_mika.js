@@ -11,51 +11,46 @@ app.registerExtension({
     if (nodeData.name !== "FastMuterMika") return;
 
     // ------------------------------------------------------------------
+    // Forzar aceptar cualquier conexion en nuestros inputs *
+    // ------------------------------------------------------------------
+    const origOnConnectInput = nodeType.prototype.onConnectInput;
+    nodeType.prototype.onConnectInput = function (
+      inputIndex,
+      outputType,
+      outputSlot,
+      outputNode,
+      outputIndex
+    ) {
+      return true;
+    };
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
     function getGraph(node) {
       return node.graph || app.graph;
     }
 
+    function getLink(graph, linkId) {
+      if (linkId == null || !graph) return null;
+      return (
+        graph.links?.[linkId] ??
+        (graph.links instanceof Map ? graph.links.get(linkId) : null)
+      );
+    }
+
     function getConnectedNode(myNode, inputIndex) {
       const graph = getGraph(myNode);
       const input = myNode.inputs?.[inputIndex];
       if (!input?.link) return null;
-      const link = graph.links?.[input.link];
+      const link = getLink(graph, input.link);
       if (!link) return null;
       return graph.getNodeById?.(link.origin_id) || null;
-    }
-
-    function isNodeOff(node) {
-      return node.mode === MODE_OFF;
     }
 
     function setNodeMode(node, mode) {
       node.mode = mode;
       getGraph(node)?.setDirtyCanvas(true, true);
-    }
-
-    function isBooleanConnection(myNode, inputIndex) {
-      const connNode = getConnectedNode(myNode, inputIndex);
-      if (!connNode) return false;
-      if (connNode.type === "PrimitiveNode") return true;
-      const graph = getGraph(myNode);
-      const input = myNode.inputs?.[inputIndex];
-      const link = graph.links?.[input.link];
-      if (link && connNode.outputs?.[link.origin_slot]) {
-        const outType = connNode.outputs[link.origin_slot].type;
-        return outType === "BOOLEAN";
-      }
-      return false;
-    }
-
-    function resolveBooleanValue(myNode, inputIndex) {
-      const connNode = getConnectedNode(myNode, inputIndex);
-      if (!connNode) return undefined;
-      if (connNode.type === "PrimitiveNode") {
-        return Boolean(connNode.widgets?.[0]?.value);
-      }
-      return undefined;
     }
 
     function saveMapping(node) {
@@ -71,6 +66,14 @@ app.registerExtension({
       return node.properties?.["_mika_target_map"] || {};
     }
 
+    function getNextSlotName(node) {
+      const used = new Set((node.inputs || []).map((i) => i.name));
+      for (let i = 1; i <= MAX_SLOTS; i++) {
+        if (!used.has(`node_${i}`)) return `node_${i}`;
+      }
+      return null;
+    }
+
     // ------------------------------------------------------------------
     // Estabilizar inputs (estilo rgthree)
     // ------------------------------------------------------------------
@@ -79,15 +82,6 @@ app.registerExtension({
       let changed = false;
       const inputs = node.inputs || [];
 
-      const lastInput = inputs[inputs.length - 1];
-      if (!lastInput || lastInput.link != null) {
-        if (inputs.length < MAX_SLOTS + 1) {
-          const newIdx = inputs.length + 1;
-          node.addInput(`node_${newIdx}`, "*");
-          changed = true;
-        }
-      }
-
       for (let i = inputs.length - 2; i >= 0; i--) {
         if (!inputs[i]?.link) {
           node.removeInput(i);
@@ -95,19 +89,24 @@ app.registerExtension({
         }
       }
 
-      for (let i = 0; i < (node.inputs || []).length; i++) {
-        const input = node.inputs[i];
-        if (input?.link) {
-          const connNode = getConnectedNode(node, i);
-          if (connNode) {
-            input.label = connNode.title || input.name;
-          }
+      const last = (node.inputs || [])[(node.inputs || []).length - 1];
+      if (!last || last.link != null) {
+        const name = getNextSlotName(node);
+        if (name) {
+          node.addInput(name, "*");
+          changed = true;
         }
       }
 
-      if (changed) {
-        rebuildWidgets(node);
+      for (let i = 0; i < (node.inputs || []).length; i++) {
+        const input = node.inputs[i];
+        if (input?.link) {
+          const conn = getConnectedNode(node, i);
+          if (conn) input.label = conn.title || input.name;
+        }
       }
+
+      if (changed) rebuildWidgets(node);
     }
 
     // ------------------------------------------------------------------
@@ -115,61 +114,54 @@ app.registerExtension({
     // ------------------------------------------------------------------
     function rebuildWidgets(node) {
       const toRemove = (node.widgets || []).filter((w) => w._mikaToggle);
-      for (const w of toRemove) {
-        node.removeWidget(w);
-      }
+      for (const w of toRemove) node.removeWidget(w);
 
       node._mikaMapping = [];
-      const savedTargets = loadMapping(node);
+      const saved = loadMapping(node);
       const graph = getGraph(node);
 
       for (let i = 0; i < (node.inputs || []).length; i++) {
         const input = node.inputs[i];
         if (!input?.link) continue;
 
-        const connNode = getConnectedNode(node, i);
-        if (!connNode) continue;
+        const conn = getConnectedNode(node, i);
+        if (!conn) continue;
 
-        const isSGInput =
-          connNode.type === "SubgraphInput" ||
-          connNode.properties?.["subgraph_input_index"] != null;
+        const isSG =
+          conn.type === "SubgraphInput" ||
+          conn.properties?.["subgraph_input_index"] != null;
 
-        let targetNodeId, targetNode;
-        if (isSGInput && savedTargets[input.name]) {
-          targetNodeId = savedTargets[input.name];
-          targetNode = graph.getNodeById?.(targetNodeId);
+        let tid, target;
+        if (isSG && saved[input.name]) {
+          tid = saved[input.name];
+          target = graph.getNodeById?.(tid);
         } else {
-          targetNodeId = connNode.id;
-          targetNode = connNode;
+          tid = conn.id;
+          target = conn;
         }
 
-        if (!targetNode) continue;
+        if (!target) continue;
 
-        const isOff = targetNode.mode === MODE_OFF;
-        const widget = node.addWidget(
+        const isEnabled = target.mode === MODE_ON;
+        const w = node.addWidget(
           "toggle",
-          `Enable ${targetNode.title}`,
-          isOff
+          `Enable ${target.title}`,
+          isEnabled
         );
-        widget._mikaToggle = true;
-        widget._mikaInputIndex = i;
-        widget._mikaTargetNodeId = targetNodeId;
+        w._mikaToggle = true;
+        w._mikaInputIndex = i;
+        w._mikaTargetNodeId = tid;
 
-        if (node.properties?.["_mika_collapse"]) {
-          widget.hidden = true;
-        }
-
-        const capturedTargetId = targetNodeId;
-        widget.callback = (value) => {
-          const g = getGraph(node);
-          const t = g.getNodeById?.(capturedTargetId);
-          if (t) setNodeMode(t, value ? MODE_ON : MODE_OFF);
+        const _tid = tid;
+        w.callback = (val) => {
+          const t = getGraph(node).getNodeById?.(_tid);
+          if (t) setNodeMode(t, val ? MODE_ON : MODE_OFF);
         };
 
         node._mikaMapping.push({
           inputIndex: i,
-          targetNodeId: targetNodeId,
-          widget: widget,
+          targetNodeId: tid,
+          widget: w,
         });
       }
 
@@ -178,9 +170,11 @@ app.registerExtension({
     }
 
     function resizeNode(node) {
-      const visibleWidgets = (node.widgets || []).filter((w) => !w.hidden);
+      const vis = (node.widgets || []).filter((w) => !w.hidden);
+      const collapsed = node.properties?.["_mika_collapse"];
       const inputCount = (node.inputs || []).length;
-      const h = Math.max(visibleWidgets.length * 20 + inputCount * 20 + 6, 36);
+      const slotH = collapsed ? 0 : inputCount * 20;
+      const h = Math.max(vis.length * 20 + slotH + 6, 36);
       const w = Math.max(node.size?.[0] || 200, 200);
       node.setSize([w, h]);
       node.setDirtyCanvas(true, true);
@@ -189,42 +183,29 @@ app.registerExtension({
     // ------------------------------------------------------------------
     // onNodeCreated
     // ------------------------------------------------------------------
-    const origOnNodeCreated = nodeType.prototype.onNodeCreated;
+    const origCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
-      const r = origOnNodeCreated?.apply(this, arguments);
+      const r = origCreated?.apply(this, arguments);
 
       this._mikaMapping = [];
       this.properties["_mika_collapse"] = false;
 
-      while (this.inputs.length > 0) {
-        this.removeInput(0);
-      }
+      while (this.inputs.length > 0) this.removeInput(0);
       this.addInput("node_1", "*");
 
       const collapseBtn = this.addWidget(
         "button",
-        "\u25BC Toggles",
+        "\u25BC Slots",
         null,
         () => {
           this.properties["_mika_collapse"] = !this.properties["_mika_collapse"];
           collapseBtn.label = this.properties["_mika_collapse"]
-            ? "\u25BA Toggles"
-            : "\u25BC Toggles";
-          for (const w of this.widgets || []) {
-            if (w._mikaToggle) w.hidden = this.properties["_mika_collapse"];
-          }
+            ? "\u25BA Slots"
+            : "\u25BC Slots";
           resizeNode(this);
         }
       );
       collapseBtn.serialize = false;
-
-      const refreshBtn = this.addWidget(
-        "button",
-        "Refresh",
-        null,
-        () => stabilizeInputs(this)
-      );
-      refreshBtn.serialize = false;
 
       this.setSize([200, 40]);
       setTimeout(() => stabilizeInputs(this), 100);
@@ -234,9 +215,9 @@ app.registerExtension({
     // ------------------------------------------------------------------
     // onConfigure
     // ------------------------------------------------------------------
-    const origOnConfigure = nodeType.prototype.onConfigure;
+    const origConfigure = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function (info) {
-      const r = origOnConfigure?.apply(this, arguments);
+      const r = origConfigure?.apply(this, arguments);
       setTimeout(() => stabilizeInputs(this), 100);
       return r;
     };
@@ -244,7 +225,7 @@ app.registerExtension({
     // ------------------------------------------------------------------
     // onConnectionsChange
     // ------------------------------------------------------------------
-    const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+    const origConn = nodeType.prototype.onConnectionsChange;
     nodeType.prototype.onConnectionsChange = function (
       type,
       index,
@@ -252,31 +233,25 @@ app.registerExtension({
       linkInfo,
       ioSlot
     ) {
-      origOnConnectionsChange?.apply(this, arguments);
+      origConn?.apply(this, arguments);
       if (!linkInfo) return;
       setTimeout(() => stabilizeInputs(this), 10);
     };
 
     // ------------------------------------------------------------------
-    // onExecuted: aplicar mute desde el backend
+    // onExecuted
     // ------------------------------------------------------------------
-    const origOnExecuted = nodeType.prototype.onExecuted;
+    const origExec = nodeType.prototype.onExecuted;
     nodeType.prototype.onExecuted = function (message) {
-      origOnExecuted?.apply(this, arguments);
-
-      const bypassState = message?.bypass_state?.[0];
-      if (bypassState && typeof bypassState === "object") {
+      origExec?.apply(this, arguments);
+      const state = message?.bypass_state?.[0];
+      if (state && typeof state === "object") {
         const graph = getGraph(this);
         for (const entry of this._mikaMapping || []) {
-          const inputName = this.inputs?.[entry.inputIndex]?.name;
-          if (inputName && inputName in bypassState) {
-            const target = graph.getNodeById?.(entry.targetNodeId);
-            if (target) {
-              setNodeMode(
-                target,
-                bypassState[inputName] ? MODE_ON : MODE_OFF
-              );
-            }
+          const name = this.inputs?.[entry.inputIndex]?.name;
+          if (name && name in state) {
+            const t = graph.getNodeById?.(entry.targetNodeId);
+            if (t) setNodeMode(t, state[name] ? MODE_ON : MODE_OFF);
           }
         }
       }
@@ -285,47 +260,75 @@ app.registerExtension({
     // ------------------------------------------------------------------
     // onDrawForeground
     // ------------------------------------------------------------------
-    const origOnDrawForeground = nodeType.prototype.onDrawForeground;
+    const origDraw = nodeType.prototype.onDrawForeground;
     nodeType.prototype.onDrawForeground = function (ctx) {
-      const r = origOnDrawForeground?.apply(this, arguments);
+      const r = origDraw?.apply(this, arguments);
 
       const now = Date.now();
+
       if (!this._mikaLastSync || now - this._mikaLastSync > 400) {
         this._mikaLastSync = now;
-
         const graph = getGraph(this);
-        let dirty = false;
 
         for (const entry of this._mikaMapping || []) {
           const target = graph.getNodeById?.(entry.targetNodeId);
           if (!target) continue;
-
           const w = entry.widget;
-          const isBoolConn = isBooleanConnection(this, entry.inputIndex);
-
-          if (isBoolConn) {
-            const resolved = resolveBooleanValue(this, entry.inputIndex);
-            if (resolved !== undefined) {
-              if (target.mode !== (resolved ? MODE_ON : MODE_OFF)) {
-                setNodeMode(target, resolved ? MODE_ON : MODE_OFF);
-              }
-              if (w.value !== resolved) {
-                w.value = resolved;
-                dirty = true;
-              }
-            }
-            w.disabled = true;
-          } else {
-            const actualState = target.mode === MODE_OFF;
-            if (w.value !== actualState) {
-              w.value = actualState;
-              dirty = true;
-            }
-            w.disabled = false;
-          }
+          const isEnabled = target.mode === MODE_ON;
+          if (w.value !== isEnabled) w.value = isEnabled;
         }
 
-        if (dirty) this.setDirtyCanvas(true, true);
+        this.setDirtyCanvas(true, true);
+      }
+
+      if (!this._mikaLastRebuild || now - this._mikaLastRebuild > 2000) {
+        this._mikaLastRebuild = now;
+        let needsRebuild = false;
+        const inputs = this.inputs || [];
+
+        for (const entry of this._mikaMapping || []) {
+          if (
+            entry.inputIndex >= inputs.length ||
+            !inputs[entry.inputIndex]?.link
+          ) {
+            needsRebuild = true;
+            break;
+          }
+        }
+        if (!needsRebuild) {
+          for (let i = 0; i < inputs.length; i++) {
+            if (
+              inputs[i]?.link &&
+              !(this._mikaMapping || []).some((m) => m.inputIndex === i)
+            ) {
+              needsRebuild = true;
+              break;
+            }
+          }
+        }
+        if (needsRebuild) stabilizeInputs(this);
+      }
+
+      if (this.properties?.["_mika_collapse"] && ctx) {
+        const slotH = LiteGraph.NODE_SLOT_HEIGHT || 20;
+        const titleH = LiteGraph.NODE_TITLE_HEIGHT || 30;
+        const bg = this.bgcolor || "#353535";
+
+        for (let i = 0; i < (this.inputs || []).length; i++) {
+          const sy = this.pos[1] + titleH + i * slotH + slotH / 2;
+          const sx = this.pos[0];
+          ctx.fillStyle = bg;
+          ctx.beginPath();
+          ctx.arc(sx, sy, 7, 0, Math.PI * 2);
+          ctx.fill();
+
+          const label = this.inputs[i].label || this.inputs[i].name;
+          if (label) {
+            ctx.font = "12px sans-serif";
+            const tw = ctx.measureText(label).width;
+            ctx.fillRect(sx + 10, sy - 7, tw + 6, 14);
+          }
+        }
       }
 
       return r;
