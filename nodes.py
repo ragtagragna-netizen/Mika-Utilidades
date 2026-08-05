@@ -11,16 +11,159 @@ import os
 import hashlib
 import requests
 import re
-import decimal
+import folder_paths
+import time
 
+
+# ======================================================================
+# HELPERS DE PARSEO DE TAGS (compartidos por SmartTagFilter, TagIf, etc.)
+# ======================================================================
+
+_EMOTICONES = [
+    "=)", "=(", ":D", ":P", ":3", ";)", ";d", ";D", ":)", ":(",
+    ":/", ":|", ":o", ":O", ":*", ":'(", ":')", "XD", "xd",
+    "D:", ">:(", ">:)", ":>", ":<", ":^)", ":-)", ":-(",
+]
+
+_COLORS = {
+    "red", "blue", "green", "yellow", "purple", "pink", "orange", "brown",
+    "black", "white", "gray", "grey", "cyan", "magenta", "gold", "silver",
+    "aqua", "teal", "navy", "maroon", "olive", "lime", "turquoise", "violet",
+    "indigo", "beige", "cream", "tan", "coral", "salmon", "crimson", "scarlet",
+    "azure", "cobalt", "emerald", "jade", "lavender", "lilac", "peach", "rose",
+    "ruby", "sapphire", "amber", "bronze", "copper", "platinum", "blonde",
+    "brunette", "auburn", "ivory", "khaki", "charcoal", "fuchsia",
+}
+
+_COLOR_MODIFIERS = {
+    "light", "dark", "pale", "deep", "bright", "vivid", "muted", "soft",
+    "neon", "pastel", "rich", "dull",
+}
+
+
+def _escape_emoticones(text):
+    for emote in _EMOTICONES:
+        escaped = emote.replace("(", "\\(").replace(")", "\\)").replace(":", "\\:")
+        text = re.sub(r'(?<!\\)' + re.escape(emote), escaped, text)
+    return text
+
+
+def _unescape_emoticones(text):
+    for emote in _EMOTICONES:
+        escaped = emote.replace("(", "\\(").replace(")", "\\)").replace(":", "\\:")
+        text = text.replace(escaped, emote)
+    return text
+
+
+def _strip_color_prefix(tag_base):
+    parts = tag_base.split("_")
+    if len(parts) >= 3 and parts[0] in _COLOR_MODIFIERS and parts[1] in _COLORS:
+        return "_".join(parts[2:])
+    if len(parts) >= 2 and parts[0] in _COLORS:
+        return "_".join(parts[1:])
+    return tag_base
+
+
+def _parse_smart_tag(tag_text, case_sensitive=False):
+    original = tag_text.strip()
+    if not original:
+        return None
+
+    opening_parens = 0
+    closing_parens = 0
+    for char in original:
+        if char == '(':
+            opening_parens += 1
+        elif char == ')':
+            closing_parens += 1
+        elif char not in ' \t':
+            break
+    for char in reversed(original):
+        if char == ')':
+            closing_parens += 1
+        elif char == '(':
+            opening_parens += 1
+        elif char not in ' \t':
+            break
+
+    stripped = original.strip()
+    while stripped.startswith('(') and stripped.endswith(')'):
+        inner = stripped[1:-1].strip()
+        if ':' in inner:
+            parts = inner.rsplit(':', 1)
+            if len(parts) == 2:
+                try:
+                    weight = float(parts[1])
+                    base_tag = parts[0].strip()
+                    normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
+                    return {'original': original, 'base': normalized, 'weight': weight,
+                            'has_weight': True, 'weight_syntax': 'explicit'}
+                except ValueError:
+                    pass
+        stripped = inner.strip()
+
+    paren_pairs = min(opening_parens, closing_parens)
+    weight = 1.0 + (paren_pairs * 0.1) if paren_pairs > 0 else 1.0
+    base_tag = stripped
+    normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
+    return {'original': original, 'base': normalized, 'weight': weight,
+            'has_weight': paren_pairs > 0,
+            'weight_syntax': 'parentheses' if paren_pairs > 0 else 'none'}
+
+
+def _parse_prompt(prompt, case_sensitive=False):
+    if not prompt or not prompt.strip():
+        return []
+    prompt = _escape_emoticones(prompt)
+    tags = []
+    current = ''
+    paren_depth = 0
+    for char in prompt:
+        if char == '(':
+            paren_depth += 1
+        elif char == ')':
+            paren_depth -= 1
+        elif char == ',' and paren_depth == 0:
+            if current.strip():
+                parsed = _parse_smart_tag(current, case_sensitive)
+                if parsed:
+                    tags.append(parsed)
+            current = ''
+            continue
+        current += char
+    if current.strip():
+        parsed = _parse_smart_tag(current, case_sensitive)
+        if parsed:
+            tags.append(parsed)
+    for tag in tags:
+        tag['original'] = _unescape_emoticones(tag['original'])
+    return tags
+
+
+def _tags_match(tag1, tag2, ignore_weight=False, ignore_color_prefix=False):
+    base1 = tag1['base']
+    base2 = tag2['base']
+    if base1 == base2:
+        if ignore_weight:
+            return True
+        return abs(tag1['weight'] - tag2['weight']) < 0.01
+    if ignore_color_prefix:
+        s1 = _strip_color_prefix(base1)
+        s2 = _strip_color_prefix(base2)
+        if s1 == base2 or s2 == base1:
+            if ignore_weight or abs(tag1['weight'] - tag2['weight']) < 0.01:
+                return True
+    return False
+
+
+# ======================================================================
+# NODOS
+# ======================================================================
 
 class StringSelectorCut:
     """
-    Igual que 'String Selector' de Impact-Pack:
-    - Campo multilinea 'strings' con varias líneas.
-    - 'select' elige una línea (con wraparound, como las flechas ◀ ▶ del original).
-    La UI (ver web/cut_first_line.js) añade además un botón para cortar
-    la primera línea del texto (todo hasta el primer salto de renglón).
+    Igual que 'String Selector' de Impact-Pack: selecciona una línea por
+    índice con wraparound. La UI agrega botón para cortar la primera línea.
     """
 
     @classmethod
@@ -50,11 +193,8 @@ MAX_SCORES = 50
 
 class ScoreListExtendable:
     """
-    Similar al nodo 'SCORE' de JPS-Nodes: una fila numerada por cada valor.
-    La cantidad de filas NO es fija: la UI (ver web/score_list.js) agrega
-    botones "+ Agregar opción" / "− Quitar opción" (1..50).
-    'int_out' es la suma de todas las filas presentes y 'detalle' es un
-    texto con "nombre: valor" por cada fila.
+    Similar al nodo 'SCORE' de JPS-Nodes: filas numeradas con nombre y valor.
+    Filas dinámicas (1..50) con botones +/- en la UI.
     """
 
     @classmethod
@@ -87,9 +227,8 @@ class ScoreListExtendable:
 
 class TextBoxClipboard:
     """
-    Text Box Editor-Mika: caja de texto simple con salida STRING. La UI
-    (ver web/text_box_editor_mika.js) le agrega copiar / seleccionar todo /
-    pegar, disponibles expandido y colapsado.
+    Text Box Editor-Mika: caja de texto con botones de copiar / seleccionar
+    todo / pegar en el header (expandido y colapsado).
     """
 
     @classmethod
@@ -112,7 +251,7 @@ class TextBoxClipboard:
 class TextBoxVisor:
     """
     Text Box Visor-Mika: acepta CUALQUIER tipo de dato en 'valor' y muestra
-    una preview legible en la caja de texto.
+    una preview legible. Preview en vivo por websocket.
     """
 
     MAX_ITEMS = 50
@@ -178,7 +317,7 @@ class TextBoxVisor:
 class TagFilter:
     r"""
     Tag Filter-Mika: conserva solo los primeros N segmentos de un texto
-    separado por comas (p.ej. una ruta con tags).
+    separado por comas.
     """
 
     @classmethod
@@ -211,8 +350,8 @@ MAX_REPLACES = 30
 
 class TextReplaceDynamic:
     """
-    Text Replace Dynamic-Mika: reemplaza texto usando pares dinámicos
-    find/replace con botones +/- en la UI (ver web/text_replace_dynamic.js).
+    Text Replace Dynamic-Mika: reemplaza texto con pares dinámicos
+    find/replace (botones +/-, hasta 30 pares). Regex opcional.
     """
 
     @classmethod
@@ -264,13 +403,11 @@ MAX_CONCAT_SLOTS = 30
 class TextConcatenateDynamic:
     """
     Text Concatenate Dynamic-Mika: concatena múltiples textos con separador
-    configurable. Los slots se agregan/quitan con botones +/- en la UI
-    (ver web/text_concatenate_dynamic.js).
-    
-    Limpia el resultado automáticamente: normaliza separadores duplicados,
-    quita separadores al inicio/final, y elimina espacios extras. Esto
-    evita que listas muy largas de tags (con emoticones, pesos, etc.)
-    rompan el parsing en nodos downstream.
+    configurable. Slots dinámicos (hasta 30) con botones +/-.
+
+    clean_output=True  → recorta cada texto, descarta vacíos, colapsa
+                         separadores duplicados y espacios múltiples.
+    clean_output=False → concatena tal cual, sin modificar nada.
     """
 
     @classmethod
@@ -293,44 +430,38 @@ class TextConcatenateDynamic:
     CATEGORY = "Mika Utilidades/string"
 
     def doit(self, separator=", ", clean_output=True, **kwargs):
-        texts = []
+        # Lectura defensiva del boolean
+        if isinstance(clean_output, str):
+            clean_output = clean_output.strip().lower() in ("true", "1", "yes", "on")
+        else:
+            clean_output = bool(clean_output)
+
         keys = sorted(
             (k for k in kwargs if k.startswith("text_")),
             key=lambda k: int(k.split("_")[1])
         )
+
+        texts = []
         for key in keys:
             value = kwargs.get(key, "")
-            if value and value.strip():  # Ignorar vacíos y solo espacios
-                # Strip cada entrada para evitar espacios al inicio/final
-                texts.append(value.strip())
-        
-        # Concatenar todas las entradas con el separador
+            if value is None:
+                value = ""
+            if clean_output:
+                value = value.strip()
+            if value == "":
+                continue
+            texts.append(value)
+
         result = separator.join(texts)
-        
+
+        # Limpieza SOLO si está activada
         if clean_output and result:
-            # 1. Normalizar separadores duplicados
-            #    Ej: ", , " → ", "   o   ", , , " → ", "
             if separator:
-                sep_escaped = re.escape(separator)
-                result = re.sub(f'({sep_escaped})\\s*', separator, result)
-                
-                # 2. Quitar separador al inicio y al final
-                while result.startswith(separator):
-                    result = result[len(separator):]
-                while result.endswith(separator):
-                    result = result[:-len(separator)]
-            
-            # 3. Normalizar espacios múltiples a uno solo
-            #    (no dentro de tags con paréntesis/pesos)
+                parts = [p.strip() for p in result.split(separator)]
+                parts = [p for p in parts if p]
+                result = separator.join(parts)
             result = re.sub(r' {2,}', ' ', result)
-            
-            # 4. Limpiar espacios alrededor del separador
-            if separator and separator.strip():
-                sep_stripped = separator.strip()
-                sep_escaped = re.escape(sep_stripped)
-                # Quita espacios antes/después del separador
-                result = re.sub(f'\\s*{sep_escaped}\\s*', separator, result)
-        
+
         return (result,)
 
 
@@ -428,154 +559,10 @@ class LoadImageMika:
             return float("NaN")
 
 
-# -----------------------------------------------------------------------
-# Parser inteligente de tags COMPARTE entre SmartTagFilter, TagIf y TagRemover.
-# -----------------------------------------------------------------------
-
-_EMOTICONES = [
-    "=)", "=(", ":D", ":P", ":3", ";)", ";d", ";D", ":)", ":(",
-    ":/", ":|", ":o", ":O", ":*", ":'(", ":')", "XD", "xd",
-    "D:", ">:(", ">:)", ":>", ":<", ":^)", ":-)", ":-(",
-]
-
-_COLORS = {
-    "red", "blue", "green", "yellow", "purple", "pink", "orange", "brown",
-    "black", "white", "gray", "grey", "cyan", "magenta", "gold", "silver",
-    "aqua", "teal", "navy", "maroon", "olive", "lime", "turquoise", "violet",
-    "indigo", "beige", "cream", "tan", "coral", "salmon", "crimson", "scarlet",
-    "azure", "cobalt", "emerald", "jade", "lavender", "lilac", "peach", "rose",
-    "ruby", "sapphire", "amber", "bronze", "copper", "platinum", "blonde",
-    "brunette", "auburn", "ivory", "khaki", "charcoal", "fuchsia",
-}
-
-_COLOR_MODIFIERS = {
-    "light", "dark", "pale", "deep", "bright", "vivid", "muted", "soft",
-    "neon", "pastel", "rich", "dull",
-}
-
-
-def _escape_emoticones(text):
-    for emote in _EMOTICONES:
-        escaped = emote.replace("(", "\\(").replace(")", "\\)").replace(":", "\\:")
-        text = re.sub(r'(?<!\\)' + re.escape(emote), escaped, text)
-    return text
-
-
-def _unescape_emoticones(text):
-    for emote in _EMOTICONES:
-        escaped = emote.replace("(", "\\(").replace(")", "\\)").replace(":", "\\:")
-        text = text.replace(escaped, emote)
-    return text
-
-
-def _strip_color_prefix(tag_base):
-    parts = tag_base.split("_")
-    if len(parts) >= 3 and parts[0] in _COLOR_MODIFIERS and parts[1] in _COLORS:
-        return "_".join(parts[2:])
-    if len(parts) >= 2 and parts[0] in _COLORS:
-        return "_".join(parts[1:])
-    return tag_base
-
-
-def _parse_smart_tag(tag_text, case_sensitive=False):
-    """Parsea un tag y devuelve dict {original, base, weight, has_weight}."""
-    original = tag_text.strip()
-    if not original:
-        return None
-
-    opening_parens = 0
-    closing_parens = 0
-    for char in original:
-        if char == '(':
-            opening_parens += 1
-        elif char == ')':
-            closing_parens += 1
-        elif char not in ' \t':
-            break
-    for char in reversed(original):
-        if char == ')':
-            closing_parens += 1
-        elif char == '(':
-            opening_parens += 1
-        elif char not in ' \t':
-            break
-
-    stripped = original.strip()
-    while stripped.startswith('(') and stripped.endswith(')'):
-        inner = stripped[1:-1].strip()
-        if ':' in inner:
-            parts = inner.rsplit(':', 1)
-            if len(parts) == 2:
-                try:
-                    weight = float(parts[1])
-                    base_tag = parts[0].strip()
-                    normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
-                    return {'original': original, 'base': normalized, 'weight': weight,
-                            'has_weight': True, 'weight_syntax': 'explicit'}
-                except ValueError:
-                    pass
-        stripped = inner.strip()
-
-    paren_pairs = min(opening_parens, closing_parens)
-    weight = 1.0 + (paren_pairs * 0.1) if paren_pairs > 0 else 1.0
-    base_tag = stripped
-    normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
-    return {'original': original, 'base': normalized, 'weight': weight,
-            'has_weight': paren_pairs > 0,
-            'weight_syntax': 'parentheses' if paren_pairs > 0 else 'none'}
-
-
-def _parse_prompt(prompt, case_sensitive=False):
-    """Parsea un prompt completo en una lista de dicts {original, base, weight, ...}."""
-    if not prompt or not prompt.strip():
-        return []
-    prompt = _escape_emoticones(prompt)
-    tags = []
-    current = ''
-    paren_depth = 0
-    for char in prompt:
-        if char == '(':
-            paren_depth += 1
-        elif char == ')':
-            paren_depth -= 1
-        elif char == ',' and paren_depth == 0:
-            if current.strip():
-                parsed = _parse_smart_tag(current, case_sensitive)
-                if parsed:
-                    tags.append(parsed)
-            current = ''
-            continue
-        current += char
-    if current.strip():
-        parsed = _parse_smart_tag(current, case_sensitive)
-        if parsed:
-            tags.append(parsed)
-    for tag in tags:
-        tag['original'] = _unescape_emoticones(tag['original'])
-    return tags
-
-
-def _tags_match(tag1, tag2, ignore_weight=False, ignore_color_prefix=False):
-    """Compara si dos tags coinciden, considerando opciones."""
-    base1 = tag1['base']
-    base2 = tag2['base']
-    if base1 == base2:
-        if ignore_weight:
-            return True
-        return abs(tag1['weight'] - tag2['weight']) < 0.01
-    if ignore_color_prefix:
-        s1 = _strip_color_prefix(base1)
-        s2 = _strip_color_prefix(base2)
-        if s1 == base2 or s2 == base1:
-            if ignore_weight or abs(tag1['weight'] - tag2['weight']) < 0.01:
-                return True
-    return False
-
-
 class SmartTagFilterMika:
     r"""
-    Smart Tag Filter-Mika (slots tipo switch con "*"): filtra tags con
-    soporte de pesos, caracteres especiales y prefijos de color.
+    Smart Tag Filter-Mika: filtra tags con soporte de pesos, caracteres
+    especiales y prefijos de color. Modo include/exclude.
     """
 
     @classmethod
@@ -640,9 +627,7 @@ MAX_TAGIF_SLOTS = 6
 class TagIfMika:
     """
     Tag If-Mika: condicional por presencia de tags. Hasta 6 pares
-    find/output agregables con botones +/- (ver web/tag_if_mika.js).
-    Cada output_N se activa solo si su find_N está presente.
-    'combined' junta todos los outputs activos.
+    find/output dinámicos con botones +/-.
     """
 
     @classmethod
@@ -725,14 +710,9 @@ class TagIfMika:
 
 class TagRemoverMika:
     """
-    Tag Remover-Mika: remueve tags de un prompt usando el algoritmo
-    simple de LevelPixel extendido con manejo de:
-    - Pesos: (fat:1.1) se remueve con "fat"
-    - Paréntesis anidados: ((tag)) se remueve con "tag"
-    - Tags escapados: \(pokemon\) se remueve con "pokemon"
-    - Emoticones: =), :D, ;d se comparan tal cual
-    
-    Split por coma + normalización + comparación directa en set.
+    Tag Remover-Mika: remueve tags de un prompt usando el algoritmo simple
+    de LevelPixel extendido con manejo de pesos, paréntesis anidados y
+    tags escapados.
     """
 
     @classmethod
@@ -743,6 +723,7 @@ class TagRemoverMika:
                 "exclude_tags": ("*",),
             },
             "optional": {
+                "case_sensitive": ("BOOLEAN", {"default": False}),
                 "ignore_weight": ("BOOLEAN", {"default": True}),
             },
         }
@@ -762,23 +743,33 @@ class TagRemoverMika:
         return str(value)
 
     @staticmethod
-    def _normalize_tag(tag, ignore_weight=True):
-        """
-        Normaliza un tag para comparación:
-        1. Quita paréntesis de peso: (fat:1.1) → fat
-        2. Quita paréntesis anidados: ((tag)) → tag
-        3. Quita backslashes de escape: \(pokemon\) → (pokemon)
-        4. Lowercase + espacios/guiones → underscore
-        """
+    def _split_tags(text):
+        tags = []
+        current = ''
+        depth = 0
+        for char in text:
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+            elif char == ',' and depth == 0:
+                if current.strip():
+                    tags.append(current.strip())
+                current = ''
+                continue
+            current += char
+        if current.strip():
+            tags.append(current.strip())
+        return tags
+
+    @staticmethod
+    def _normalize_for_compare(tag, case_sensitive=False, ignore_weight=True):
         tag = tag.strip()
         if not tag:
             return ""
-
         if ignore_weight:
-            # Remover paréntesis externos con peso
             while tag.startswith('(') and tag.endswith(')'):
                 inner = tag[1:-1].strip()
-                # Verificar si es sintaxis de peso (tag:number)
                 if ':' in inner:
                     parts = inner.rsplit(':', 1)
                     try:
@@ -789,48 +780,47 @@ class TagRemoverMika:
                         tag = inner
                 else:
                     tag = inner
-
-        # Quitar backslashes de escape: \( → (, \) → ), \, → ,
+        # Quitar backslashes de escape
         tag = tag.replace('\\(', '(').replace('\\)', ')').replace('\\,', ',').replace('\\:', ':')
-
-        # Normalizar: lowercase + espacios/guiones → underscore
-        tag = tag.lower().replace('-', '_').replace(' ', '_')
+        if not case_sensitive:
+            tag = tag.lower()
+        tag = tag.replace('-', '_').replace(' ', '_')
         return tag
 
-    def tag(self, tags, exclude_tags, ignore_weight=True):
+    def tag(self, tags, exclude_tags, case_sensitive=False, ignore_weight=True):
         tags_text = self._to_text(tags)
         exclude_text = self._to_text(exclude_tags)
 
-        # 1. Split por coma (reemplazar \n con , primero)
-        tags_list = [tag.strip() for tag in tags_text.replace("\n", ",").split(",")]
-        tags_normalized = [self._normalize_tag(tag, ignore_weight) for tag in tags_list]
+        tag_list = self._split_tags(tags_text)
+        exclude_list = self._split_tags(exclude_text)
 
-        exclude_list = [tag.strip() for tag in exclude_text.replace("\n", ",").split(",")]
-        exclude_normalized = [self._normalize_tag(tag, ignore_weight) for tag in exclude_list]
+        if not exclude_list:
+            return (tags_text, "", 0)
 
-        # 2. Crear set de tags a excluir (lookup O(1))
-        exclude_set = set(norm for norm in exclude_normalized if norm)
+        exclude_set = set()
+        for t in exclude_list:
+            norm = self._normalize_for_compare(t, case_sensitive, ignore_weight)
+            if norm:
+                exclude_set.add(norm)
 
-        # 3. Filtrar: mantener solo los que NO están en exclude
-        result = []
+        kept = []
         removed = []
-        for i, tag_norm in enumerate(tags_normalized):
-            if tag_norm and tag_norm not in exclude_set:
-                result.append(tags_list[i])
-            elif tag_norm and tag_norm in exclude_set:
-                removed.append(tags_list[i])
+        for tag in tag_list:
+            norm = self._normalize_for_compare(tag, case_sensitive, ignore_weight)
+            if norm and norm in exclude_set:
+                removed.append(tag)
+            else:
+                kept.append(tag)
 
-        # 4. Reconstruir strings
-        result_str = ", ".join(result)
+        result = ", ".join(kept)
         removed_str = ", ".join(removed)
-        return (result_str, removed_str, len(removed))
+        return (result, removed_str, len(removed))
 
 
 class FloatOutputList:
     """
     Float OutputList: convierte una lista de números en texto a una
-    OutputList de FLOAT (OUTPUT_IS_LIST), compatible con
-    ComfyUI-outputlists-combiner.
+    OutputList de FLOAT (OUTPUT_IS_LIST).
     """
 
     @classmethod
@@ -879,8 +869,8 @@ class FloatOutputList:
 
 class ExecutionTimerConfig:
     """
-    Nodo de configuración para "Mika · Tiempos de Ejecución"
-    (ver web/execution_timer.js). Envía la configuración por websocket.
+    Nodo de configuración para "Mika · Tiempos de Ejecución".
+    Envía la configuración por websocket.
     """
 
     @classmethod
@@ -913,18 +903,8 @@ class ExecutionTimerConfig:
 
 class PromptEditLoopMika:
     """
-    Prompt Edit (Loop)-Mika: nodo único de edición de prompt con memoria
-    entre ejecuciones (funciona en bucle), sin guardado en disco.
-    En cada ejecución del workflow:
-    1. El cuadro editable contiene el prompt que quedó de la ejecución
-       ANTERIOR (ya editado a mano si se quiso).
-    2. Llega el prompt nuevo de la generación actual por 'input_text'.
-    3. El cuadro editable se refresca automáticamente con ese prompt nuevo,
-       quedando listo para que lo edites antes de la SIGUIENTE ejecución.
-    Salidas: 'prompt_anterior' (lo que había editado en el cuadro) y
-    'prompt_generacion_actual' (el recién llegado).
-    La UI (ver web/prompt_edit_loop_mika.js) mantiene el refresco tras cada
-    ejecución y agrega resaltado inline de tags similares mientras escribís.
+    Prompt Edit (Loop)-Mika: edición de prompt con memoria entre ejecuciones
+    (bucle), sin guardado en disco. Retiene el prompt anterior y el actual.
     """
 
     @classmethod
@@ -955,74 +935,11 @@ class PromptEditLoopMika:
         return float("nan")
 
 
-import folder_paths
-import hashlib
-import time
-
-class ImagePreviewCleanMika:
-    """
-    Image Preview Clean-Mika: muestra una preview de imagen con botón para
-    copiar al portapapeles SIN metadata, SIN workflow, SIN información de
-    generación. Solo la imagen pura.
-    
-    La UI (ver web/image_preview_clean_mika.js) agrega un botón en el header
-    (estilo Text Box Editor-Mika) que copia la imagen como PNG limpio.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "images": ("IMAGE",),
-            },
-        }
-
-    RETURN_TYPES = ()
-    FUNCTION = "preview"
-    CATEGORY = "Mika Utilidades/image"
-    OUTPUT_NODE = True
-
-    def preview(self, images):
-        results = []
-        
-        for idx, image in enumerate(images):
-            # Convertir tensor a PIL Image
-            i = 255. * image.cpu().numpy()
-            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-            
-            # Generar filename único basado en hash de la imagen
-            image_hash = hashlib.sha256(image.cpu().numpy().tobytes()).hexdigest()[:16]
-            filename = f"mika_preview_{image_hash}_{int(time.time())}.png"
-            
-            # Guardar en el directorio temporal de ComfyUI (SIN metadata)
-            output_dir = folder_paths.get_output_directory()
-            filepath = os.path.join(output_dir, filename)
-            
-            # Guardar como PNG limpio (sin PngInfo, sin exif, sin metadata)
-            img.save(filepath, 'PNG')
-            
-            results.append({
-                "filename": filename,
-                "subfolder": "",
-                "type": "output"
-            })
-        
-        return {"ui": {"images": results}}
-        
-        
 class TextLineSelectorMika:
     """
     Text Line Selector-Mika: selecciona un rango de líneas de la caja de
-    texto y las devuelve como LISTA.
-
-    Con 'delete_selected_lines' controlás qué pasa tras cada ejecución:
-    - True  → las líneas seleccionadas se ELIMINAN de la caja de texto
-              (sistema de bucle: en cada vuelta quedan menos líneas).
-    - False → las líneas se seleccionan pero NO se borran de la caja.
-
-    Salidas:
-    - selected_lines: LISTA de strings (una por línea seleccionada).
-    - remaining_text: el texto resultante en la caja.
+    texto y las devuelve como LISTA. Con 'delete_selected_lines' controlás
+    si se eliminan del cuadro tras cada ejecución.
     """
 
     @classmethod
@@ -1047,10 +964,7 @@ class TextLineSelectorMika:
     OUTPUT_NODE = True
 
     def run(self, text, start_index, end_index, delete_selected_lines=True, skip_empty_lines=True):
-        # Dividir el texto en líneas
         all_lines = text.split("\n")
-
-        # Opcionalmente ignorar líneas vacías al indexar
         if skip_empty_lines:
             lines = [line for line in all_lines if line.strip() != ""]
         else:
@@ -1058,25 +972,20 @@ class TextLineSelectorMika:
 
         total_lines = len(lines)
 
-        # Texto vacío: devolver sin cambios
         if total_lines == 0:
             return {
                 "ui": {"text": [text]},
                 "result": ([], text),
             }
 
-        # Limitar índices al rango válido
         start = max(0, min(start_index, total_lines - 1))
         end = max(0, min(end_index, total_lines - 1))
 
-        # Asegurar start <= end (si se invierten, los intercambiamos)
         if start > end:
             start, end = end, start
 
-        # Extraer las líneas seleccionadas
         selected = lines[start:end + 1]
 
-        # Según la opción, eliminar o conservar las líneas seleccionadas
         if delete_selected_lines:
             remaining_lines = lines[:start] + lines[end + 1:]
         else:
@@ -1084,43 +993,21 @@ class TextLineSelectorMika:
 
         remaining_text = "\n".join(remaining_lines)
 
-        # 'ui.text' es lo que el JS usa para actualizar la caja de texto.
-        # Si no se elimina, devolvemos el texto igual para que no cambie.
         return {
             "ui": {"text": [remaining_text]},
             "result": (selected, remaining_text),
         }
 
-    # Forzar ejecución siempre para que el bucle se refresque en cada vuelta
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         return float("nan")
-        
-        
+
+
 class TextLineStepperMika:
     """
     Text Line Stepper-Mika: selecciona líneas de forma ESCALONADA (auto-avanza).
-
-    En cada ejecución selecciona el rango actual [start_index, end_index],
-    lo devuelve como LISTA, y avanza automáticamente al siguiente bloque
-    del mismo tamaño. Los widgets start_index y end_index se actualizan
-    solos para reflejar el próximo rango, pero podés editarlos manualmente
-    para reiniciar o saltar a cualquier posición.
-
-    Ejemplo con 10 líneas y rango 0-2 (3 líneas por paso):
-      Vuelta 1: selecciona 0,1,2 → avanza a 3-5
-      Vuelta 2: selecciona 3,4,5 → avanza a 6-8
-      Vuelta 3: selecciona 6,7,8 → avanza a 9-11
-      Vuelta 4: selecciona solo la 9 (parcial) → avanza a 12-14
-
-    - loop=True: al llegar al final vuelve al inicio automáticamente.
-    - delete_selected_lines=True: elimina las líneas seleccionadas
-      (el texto se encoge y los índices vuelven al inicio).
-
-    Salidas:
-    - selected_lines: LISTA con las líneas del rango actual.
-    - remaining_text: el texto resultante (igual o reducido según delete).
-    - current_start / current_end: el rango que se usó en ESTA ejecución.
+    En cada ejecución selecciona el rango actual y avanza al siguiente bloque.
+    Los índices se actualizan solos pero pueden editarse manualmente.
     """
 
     @classmethod
@@ -1147,7 +1034,6 @@ class TextLineStepperMika:
 
     def run(self, text, start_index, end_index,
             delete_selected_lines=False, loop=False, skip_empty_lines=True):
-        # Dividir el texto en líneas
         all_lines = text.split("\n")
         if skip_empty_lines:
             lines = [line for line in all_lines if line.strip() != ""]
@@ -1156,19 +1042,16 @@ class TextLineStepperMika:
 
         total_lines = len(lines)
 
-        # Texto vacío: devolver sin cambios
         if total_lines == 0:
             return {
                 "ui": {"text": [text], "start_index": [start_index], "end_index": [end_index]},
                 "result": ([], text, start_index, end_index),
             }
 
-        # Ordenar índices y calcular tamaño del bloque
         start = min(start_index, end_index)
         end = max(start_index, end_index)
         chunk_size = end - start + 1
 
-        # Si start está fuera de rango, la selección es vacía
         if start >= total_lines:
             next_start, next_end = self._next_range(end, chunk_size, total_lines, loop)
             return {
@@ -1176,19 +1059,15 @@ class TextLineStepperMika:
                 "result": ([], text, start, end),
             }
 
-        # Limitar end al rango válido y extraer líneas seleccionadas
         actual_end = min(end, total_lines - 1)
         selected = lines[start:actual_end + 1]
 
-        # Procesar según delete_selected_lines
         if delete_selected_lines:
-            # Eliminar las seleccionadas: el texto se encoge, índices vuelven al inicio
             remaining_lines = lines[:start] + lines[actual_end + 1:]
             remaining_text = "\n".join(remaining_lines)
             next_start = 0
             next_end = min(chunk_size - 1, max(0, len(remaining_lines) - 1))
         else:
-            # Sin eliminar: avanzar al siguiente bloque del mismo tamaño
             remaining_text = text
             next_start, next_end = self._next_range(actual_end, chunk_size, total_lines, loop)
 
@@ -1199,33 +1078,70 @@ class TextLineStepperMika:
 
     @staticmethod
     def _next_range(current_end, chunk_size, total_lines, loop):
-        """Calcula el próximo rango [start, end] tras avanzar un bloque."""
         next_start = current_end + 1
         next_end = next_start + chunk_size - 1
-
-        # Si nos pasamos del final y hay loop, volvemos al inicio
         if loop and next_start >= total_lines:
             next_start = 0
             next_end = min(chunk_size - 1, total_lines - 1)
-
         return next_start, next_end
 
-    # Forzar ejecución siempre para que el avance se refleje en cada vuelta
     @classmethod
     def IS_CHANGED(cls, **kwargs):
-        return float("nan")        
+        return float("nan")
+
+
+class ImagePreviewCleanMika:
+    """
+    Image Preview Clean-Mika: muestra una preview de imagen con botón para
+    copiar al portapapeles SIN metadata, SIN workflow. Solo la imagen pura.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "preview"
+    CATEGORY = "Mika Utilidades/image"
+    OUTPUT_NODE = True
+
+    def preview(self, images):
+        results = []
+        for idx, image in enumerate(images):
+            i = 255. * image.cpu().numpy()
+            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+
+            image_hash = hashlib.sha256(image.cpu().numpy().tobytes()).hexdigest()[:16]
+            filename = f"mika_preview_{image_hash}_{int(time.time())}.png"
+
+            output_dir = folder_paths.get_output_directory()
+            filepath = os.path.join(output_dir, filename)
+
+            # Guardar como PNG limpio (sin metadata)
+            img.save(filepath, 'PNG')
+
+            results.append({
+                "filename": filename,
+                "subfolder": "",
+                "type": "output"
+            })
+
+        return {"ui": {"images": results}}
 
 
 MAX_GROUP_SLOTS = 20
-MAX_NODE_SLOTS = 20
+
 
 class FastGroupsBypasserMika:
     """
     Fast Groups Bypasser-Mika: genera un toggle BOOLEAN linkeable por cada
-    grupo detectado en el grafo actual.
-    
-    Los slots BOOLEAN (group_1 a group_20) son conectables y promocionables
-    en subgrafos. Solo se muestran los toggles de los grupos detectados.
+    grupo detectado en el grafo actual. Los slots BOOLEAN (group_1 a group_20)
+    son conectables y promocionables en subgrafos. Solo se muestran los
+    toggles de los grupos detectados.
     """
 
     @classmethod
@@ -1260,154 +1176,12 @@ class FastGroupsBypasserMika:
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
-        # Generar un hash de los valores booleanos actuales.
-        # Si cambia cualquier boolean, el hash cambia → ComfyUI
-        # re-ejecuta el nodo y dispara onExecuted con los nuevos valores.
-        # Esto es critico para que el bypass funcione cuando los
-        # booleanos se controlan desde fuera de un subgrafo.
-        state = {
-            k: v
-            for k, v in sorted(kwargs.items())
-            if k.startswith("group_") and isinstance(v, bool)
-        }
-        return hashlib.md5(str(state).encode()).hexdigest()
+        return False
 
 
-class FastGroupsMuterMika:
-    """
-    Fast Groups Muter-Mika: igual que el Bypasser pero usa mode=2 (NEVER/mute)
-    en vez de mode=4 (BYPASS). Incluye sorting, filtro por color/título,
-    restricciones de toggle y acciones rápidas.
-
-    Los slots BOOLEAN (group_1 a group_50) son conectables y promocionables
-    en subgrafos. Solo se muestran los toggles de los grupos detectados.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        optional = {
-            "groups_filter": ("STRING", {"default": "", "multiline": False}),
-        }
-        for i in range(1, MAX_GROUP_SLOTS + 1):
-            optional[f"group_{i}"] = ("BOOLEAN", {"default": False})
-
-        return {
-            "required": {},
-            "optional": optional,
-        }
-
-    RETURN_TYPES = ()
-    FUNCTION = "pass_through"
-    CATEGORY = "Mika Utilidades/utils"
-    OUTPUT_NODE = True
-
-    def pass_through(self, groups_filter="", **kwargs):
-        bypass_state = {}
-        for key, value in kwargs.items():
-            if key.startswith("group_") and isinstance(value, bool):
-                bypass_state[key] = value
-
-        return {
-            "ui": {
-                "bypass_state": [bypass_state],
-            }
-        }
-
-    @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        state = {
-            k: v
-            for k, v in sorted(kwargs.items())
-            if k.startswith("group_") and isinstance(v, bool)
-        }
-        return hashlib.md5(str(state).encode()).hexdigest()
-
-
-class FastBypasserMika:
-    """
-    Fast Bypasser-Mika: detecta nodos por conexion (como rgthree).
-    Cada link a un input * crea un toggle para ese nodo.
-    Los inputs * son promocionables en subgrafos: si un boolean
-    fluye por el input, se aplica como bypass (mode=4).
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        optional = {}
-        for i in range(1, MAX_NODE_SLOTS + 1):
-            optional[f"node_{i}"] = ("*", {"default": None})
-        return {
-            "required": {},
-            "optional": optional,
-        }
-
-    RETURN_TYPES = ()
-    FUNCTION = "pass_through"
-    CATEGORY = "Mika Utilidades/utils"
-    OUTPUT_NODE = True
-
-    def pass_through(self, **kwargs):
-        bypass_state = {}
-        for key, value in kwargs.items():
-            if isinstance(value, bool):
-                bypass_state[key] = value
-        return {
-            "ui": {
-                "bypass_state": [bypass_state],
-            }
-        }
-
-    @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        state = {
-            k: v
-            for k, v in sorted(kwargs.items())
-            if isinstance(v, bool)
-        }
-        return hashlib.md5(str(state).encode()).hexdigest()
-
-
-class FastMuterMika:
-    """
-    Fast Muter-Mika: igual que el Bypasser pero usa mode=2 (NEVER/mute)
-    en vez de mode=4 (BYPASS). Detecta nodos por conexion.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        optional = {}
-        for i in range(1, MAX_NODE_SLOTS + 1):
-            optional[f"node_{i}"] = ("*", {"default": None})
-        return {
-            "required": {},
-            "optional": optional,
-        }
-
-    RETURN_TYPES = ()
-    FUNCTION = "pass_through"
-    CATEGORY = "Mika Utilidades/utils"
-    OUTPUT_NODE = True
-
-    def pass_through(self, **kwargs):
-        bypass_state = {}
-        for key, value in kwargs.items():
-            if isinstance(value, bool):
-                bypass_state[key] = value
-        return {
-            "ui": {
-                "bypass_state": [bypass_state],
-            }
-        }
-
-    @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        state = {
-            k: v
-            for k, v in sorted(kwargs.items())
-            if isinstance(v, bool)
-        }
-        return hashlib.md5(str(state).encode()).hexdigest()
-
+# ======================================================================
+# MAPPINGS
+# ======================================================================
 
 NODE_CLASS_MAPPINGS = {
     "StringSelectorCut": StringSelectorCut,
@@ -1424,13 +1198,10 @@ NODE_CLASS_MAPPINGS = {
     "FloatOutputList": FloatOutputList,
     "ExecutionTimerConfig": ExecutionTimerConfig,
     "PromptEditLoopMika": PromptEditLoopMika,
-    "ImagePreviewCleanMika": ImagePreviewCleanMika,
     "TextLineSelectorMika": TextLineSelectorMika,
     "TextLineStepperMika": TextLineStepperMika,
+    "ImagePreviewCleanMika": ImagePreviewCleanMika,
     "FastGroupsBypasserMika": FastGroupsBypasserMika,
-    "FastGroupsMuterMika": FastGroupsMuterMika,
-    "FastBypasserMika": FastBypasserMika,
-    "FastMuterMika": FastMuterMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1448,11 +1219,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FloatOutputList": "Float OutputList",
     "ExecutionTimerConfig": "⏱ Tiempos de Ejecución (config)",
     "PromptEditLoopMika": "Prompt Edit (Loop)-Mika",
-    "ImagePreviewCleanMika": "Image Preview Clean-Mika",
     "TextLineSelectorMika": "Text Line Selector-Mika",
     "TextLineStepperMika": "Text Line Stepper-Mika",
+    "ImagePreviewCleanMika": "Image Preview Clean-Mika",
     "FastGroupsBypasserMika": "Fast Groups Bypasser-Mika",
-    "FastGroupsMuterMika": "Fast Groups Muter-Mika",
-    "FastBypasserMika": "Fast Bypasser-Mika",
-    "FastMuterMika": "Fast Muter-Mika",
 }
