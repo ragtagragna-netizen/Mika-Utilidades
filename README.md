@@ -1,127 +1,191 @@
 # Mika Utilidades
 
-Paquete de nodos custom para **ComfyUI** orientado a la manipulación de texto, tags, prompts y utilidades de workflow. Nodos minimalistas, pensados para acelerar pipelines de generación con Stable Diffusion y workflows iterativos.
+Paquete de nodos personalizados para ComfyUI:
+
+- **String Selector (Cut First Line)** — selector de líneas de texto, con
+  botón para ir cortando la primera línea.
+- **Score List** — lista de puntajes numerados y renombrables, con filas
+  que se pueden agregar o quitar.
+- **Text Box Editor-Mika** — caja de texto con copiar / seleccionar
+  todo / pegar (pegado real en el cursor, con saltos de línea), disponibles
+  incluso con el nodo colapsado.
+- **Float OutputList** — separa un texto con números en una OutputList de
+  valores FLOAT (compatible con ComfyUI-outputlists-combiner).
+- **⏱ Tiempos de Ejecución** — mide y muestra visualmente, dentro del propio
+  workflow, cuánto tarda en ejecutarse cada nodo.
+
+## Instalación
+
+1. Copia toda la carpeta `Mika-Utilidades` dentro de:
+   `ComfyUI/custom_nodes/`
+2. Reinicia ComfyUI.
 
 ---
 
-## 📦 Nodos incluidos
+## String Selector (Cut First Line)
 
-### 🔤 String
+Nodo basado en el "String Selector" de Impact-Pack, con un botón extra para
+cortar la primera línea del texto (todo hasta el primer salto de renglón).
 
-| Nodo | Descripción |
-|------|-------------|
-| **String Selector (Cut First Line)** | Selecciona una línea de un texto multilínea por índice, con wraparound. La UI agrega un botón para cortar la primera línea. |
-| **Text Box Editor-Mika** | Caja de texto con botones de copiar / seleccionar todo / pegar en el cursor, dibujados en el header (modo expandido y colapsado). Incluye pegado nativo con Ctrl+V que respeta saltos de línea. |
-| **Text Box Visor-Mika** | Visor universal que acepta cualquier tipo (STRING, INT, FLOAT, listas, dicts, tensores) y muestra una preview legible. Se refresca en vivo por websocket. |
-| **Tag Filter-Mika** | Filtra un texto separado por comas conservando solo los primeros N segmentos (útil para rutas con tags). |
-| **Text Replace Dynamic-Mika** | Reemplaza texto con pares `find/replace` dinámicos (botones +/-, hasta 30 pares). Soporte regex opcional. |
-| **Text Concatenate Dynamic-Mika** | Concatena múltiples textos con separador configurable. Slots dinámicos (hasta 30) con botones +/-. |
+Búscalo como **"String Selector (Cut First Line)"** (categoría
+`Mika Utilidades/string`).
 
-### 🏷️ Tags
-
-| Nodo | Descripción |
-|------|-------------|
-| **Smart Tag Filter-Mika** | Filtro inteligente de tags con soporte de pesos `(tag:1.1)`, paréntesis anidados `((tag))`, emoticones `=)`, `:D`, y prefijos de color (`aqua shirt` coincide con `shirt`). Modo include/exclude. Entradas tipo switch (`*`). |
-| **Tag If-Mika** | Condicional por presencia de tags. Hasta 6 pares `find/output` dinámicos con botones +/-. Cada output se activa solo si su tag está presente; `combined` junta todos los activos. |
-| **Tag Remover-Mika** | Remueve tags de un prompt con la misma inteligencia que Smart Tag Filter: pesos, emoticones y prefijos de color. Devuelve resultado, tags removidos y cantidad. |
-
-### 🖼️ Imagen
-
-| Nodo | Descripción |
-|------|-------------|
-| **Load Image-Mika** | Carga imágenes desde ruta local o URL. Soporte RGBA, máscara de alfa, dimensiones opcionales (width/height) y nombre de archivo. Hash SHA-256 para detectar cambios. |
-
-### 📋 Lista
-
-| Nodo | Descripción |
-|------|-------------|
-| **Float OutputList** | Convierte una lista de números en texto a una OutputList de FLOAT (`OUTPUT_IS_LIST`), compatible con ComfyUI-outputlists-combiner. |
-
-### 📝 Score
-
-| Nodo | Descripción |
-|------|-------------|
-| **Score List** | Lista numerada de valores INT con nombres editables. Filas dinámicas (hasta 50) con botones +/-. Devuelve suma total y detalle. |
-
-### ✏️ Prompt
-
-| Nodo | Descripción |
-|------|-------------|
-| **Prompt Edit (Loop)-Mika** | Edición de prompt con memoria entre ejecuciones (bucle), sin guardado en disco. Retiene el prompt anterior y el actual. Resaltado inline de tags coincidentes mientras escribís (sin pop-ups). |
-
-### ⏱️ Tiempos
-
-| Nodo | Descripción |
-|------|-------------|
-| **⏱ Tiempos de Ejecución (config)** | Nodo opcional de configuración para el registro de tiempos de ejecución por nodo. Muestra/oculta panel flotante y badges, ajusta decimales. |
+- **strings**: campo multilinea, igual que el original (una entrada por línea).
+- **select**: índice de la línea a devolver como salida `STRING` (con
+  wraparound, igual que las flechas ◀ ▶ del nodo de Impact-Pack).
+- **✂ Cortar primera línea** (botón nuevo): al hacer click, elimina la
+  primera línea del campo `strings` junto con su salto de línea, dejando el
+  resto del texto listo para seguir trabajando (útil por ejemplo para ir
+  consumiendo un listado línea por línea).
 
 ---
 
-## 🚀 Instalación
+## Score List
 
-### Opción 1: Git
+Nodo similar al "SCORE" de JPS-Nodes: una fila por cada valor, con flechas
+◀ ▶ para ajustar el número. A diferencia del original, la cantidad de filas
+no es fija: se pueden agregar manualmente con un botón, y **cada fila tiene
+un nombre editable**.
 
-```bash
-cd ComfyUI/custom_nodes
-git clone https://github.com/ragtagragna-netizen/Mika-Utilidades.git
+Búscalo como **"Score List"** (categoría `Mika Utilidades/score`).
+
+> Nota: si ya tenés este nodo puesto en un workflow viejo (con el título
+> "Score List (Extendable)"), el nombre no cambia solo — hay que borrarlo y
+> poner uno nuevo desde el buscador de nodos, o renombrarlo a mano
+> (doble click sobre el título).
+
+- Empieza con 6 filas (1 a 6), igual que el nodo original.
+- Cada fila tiene un campo de texto arriba del número, con un nombre por
+  defecto ("Opción 1", "Opción 2", ...). Se puede **renombrar con un click**,
+  igual que cualquier otro campo de texto de ComfyUI.
+- **+ Agregar opción**: agrega una fila nueva al final (hasta 50).
+- **− Quitar opción**: quita la última fila (deja mínimo 1). Al ocultarla
+  se reinicia (nombre y valor por defecto), así si se vuelve a agregar
+  arranca limpia.
+- **int_out**: suma de todos los valores de todas las filas presentes.
+- **detalle**: texto con "nombre: valor" de cada fila, uno por renglón —
+  útil para loguear o mostrar el desglose de puntajes.
+- Las filas, sus nombres y sus valores se guardan y se recuperan
+  correctamente al guardar/recargar el workflow.
+
+---
+
+## ⏱ Tiempos de Ejecución
+
+Mide automáticamente cuánto tarda cada nodo en ejecutarse, **sin necesidad
+de agregar nada al workflow**: se activa solo apenas instalás el paquete.
+
+- **Etiqueta sobre cada nodo**: muestra el tiempo de su última corrida, en
+  la esquina superior derecha del nodo.
+  - 🟢 verde = rápido · 🟡 amarillo = medio · 🔴 rojo = lento (relativo al
+    total de la corrida)
+  - 🔵 azul = resultado tomado de caché (no se volvió a ejecutar)
+- **Panel flotante** (esquina inferior derecha, se puede arrastrar desde el
+  título y colapsar con el botón "–"): lista todos los nodos de la corrida
+  actual ordenados de más lento a más rápido, con una mini barra de tiempo
+  relativo, y el total general abajo de todo.
+- **Contraído**, el panel se achica a solo el título y funciona como un
+  cronómetro en vivo: muestra el tiempo transcurrido de la corrida actual,
+  actualizándose solo mientras el workflow está corriendo, y se detiene al
+  terminar.
+- El puntito junto al título del panel se pone verde mientras el workflow
+  está corriendo, y gris cuando termina.
+
+### Nodo de configuración (opcional)
+
+Si querés cambiar el comportamiento por defecto, agregá al workflow el nodo
+**"⏱ Tiempos de Ejecución (config)"** (categoría `Mika Utilidades/tiempos`).
+No hace falta conectarlo a nada: se ejecuta igual porque es un nodo de
+salida (`OUTPUT_NODE`).
+
+- `mostrar_panel_flotante`: muestra u oculta el panel de la esquina.
+- `mostrar_etiquetas_en_nodos`: muestra u oculta las etiquetas sobre cada nodo.
+- `decimales`: cantidad de decimales al mostrar segundos (0 a 4).
+
+---
+
+## Text Box Editor-Mika
+
+Caja de texto, con 3 funciones portadas y adaptadas de
+[ComfyUI_Text_Tools_SG (nodo "Text Tools 🪶 Editor-SG")](https://github.com/ShammiG/ComfyUI_Text_Tools_SG):
+
+- 📋 **Copiar** al portapapeles. Si hay texto seleccionado dentro del
+  cuadro, copia solo la selección; si no, copia todo.
+- ☑ **Seleccionar todo** el texto (para copiarlo/cortarlo a mano).
+- 📄 **Pegar** el contenido del portapapeles **en la posición del cursor**
+  (como un paste normal, no reemplaza todo el texto).
+
+Búscalo como **"Text Box Editor-Mika"** (categoría `Mika Utilidades/string`).
+El tipo interno del nodo (`TextBoxClipboard`) no cambió, así que los
+workflows viejos que ya lo tenían siguen funcionando igual, solo que ahora
+el pegado es más confiable.
+
+**La diferencia con el original:** estas 3 funciones siguen disponibles
+**aunque el nodo esté colapsado** — se dibujan como iconos chiquitos al
+lado del título, son clickeables, y al pasar el mouse por encima muestran
+un tooltip con su nombre (igual que los botones del modo expandido, que
+usan el tooltip nativo del navegador). Además, las mismas 3 acciones
+también están siempre en el **menú del click derecho** sobre el nodo,
+como respaldo.
+
+**Arreglos sobre la versión anterior ("Text Box (Portapapeles)"):**
+
+- El botón 📄 **insertaba mal el texto y a veces parecía no hacer nada**:
+  ahora inserta en la posición del cursor y, sobre todo, avisa a ComfyUI
+  del cambio (dispara los eventos `input`/`change` sobre el textarea real),
+  que es lo que hace que el cuadro se actualice y crezca correctamente con
+  texto de varias líneas.
+- Los saltos de línea del texto pegado se normalizan (`\r\n` → `\n`), para
+  que el contenido pegado desde Windows no se vea raro.
+- Si el navegador no permite leer el portapapeles con el botón (pasa en
+  Firefox, o si no se otorgó el permiso), **pegar con Ctrl+V directo en el
+  cuadro de texto siempre funciona igual de bien**, gracias a un listener
+  nativo de "paste" agregado sobre el textarea — no depende de la Clipboard
+  API ni de sus permisos.
+- El botón 📋 ahora también respeta la selección de texto (si seleccionás
+  una parte del texto y copiás, copia solo eso).
+
+> Nota: "Pegar" con el botón usa el portapapeles del sistema a través del
+> navegador — la primera vez puede pedir permiso para leer el portapapeles.
+> Si tu navegador no lo permite, usá Ctrl+V directo sobre el cuadro de
+> texto: funciona siempre, con o sin ese permiso.
+
+---
+
+## Float OutputList
+
+Igual que **"String OutputList"** de la extensión de terceros
+[ComfyUI-outputlists-combiner](https://github.com/geroldmeisinger/ComfyUI-outputlists-combiner),
+pero convierte cada elemento a **FLOAT** en vez de dejarlo como texto. Es
+compatible con los demás nodos de esa extensión (`OutputLists Combinations`,
+`XYZ-GridPlot`, `Formatted String`, etc.) porque sigue el mismo patrón de
+OutputList.
+
+Búscalo como **"Float OutputList"** (categoría `Mika Utilidades/lista`).
+
+- **separator**: texto usado para separar los valores (por defecto `\n`,
+  o sea uno por línea).
+- **values**: campo multilinea con un número por línea (o separados por
+  `separator`). Las líneas vacías se ignoran.
+- **value** (`FLOAT` 𝌠): cada número de la lista, uno por vez — los nodos
+  conectados acá se ejecutan una vez por cada valor, en orden.
+- **index** (`INT` 𝌠): posición de cada valor (0, 1, 2, ...).
+- **count** (`INT`): cantidad total de valores.
+
+Si algún renglón no se puede convertir a número, el nodo tira un error
+claro indicando cuál fue.
+
+---
+
+## Estructura
+
 ```
-
-### Opción 2: Manual
-
-Descargá el ZIP y descomprimilo en `ComfyUI/custom_nodes/Mika-Utilidades/`.
-
-Luego **reiniciá ComfyUI**. Los nodos aparecen en el menú contextual bajo estas categorías:
-
-- `Mika Utilidades/string`
-- `Mika Utilidades/tags`
-- `Mika Utilidades/image`
-- `Mika Utilidades/lista`
-- `Mika Utilidades/score`
-- `Mika Utilidades/prompt`
-- `Mika Utilidades/tiempos`
-
----
-
-## 🎨 Extras incluidos
-
-- **Colores extra para nodos**: el paquete agrega automáticamente 18 colores adicionales al menú "Colors" del click derecho en cualquier nodo (red, blue, cyan, magenta, pink, teal, brown, etc.), adaptados al tema activo y con detección de la forma (box/round/circle/card).
-- **Iconos SVG uniformes**: los nodos de texto usan iconos vectoriales coherentes en modo expandido y colapsado, con tooltips y feedback ✓/✗.
-- **Slots tipo switch**: los nodos de tags usan entradas `*` (socket puro, sin caja de texto) para integración limpia con subgrafos.
-- **Parser inteligente compartido**: Smart Tag Filter, Tag If y Tag Remover usan el mismo parser de tags (pesos, emoticones, prefijos de color), con comportamiento consistente.
-
----
-
-## 🔁 Cómo funciona Prompt Edit (Loop)-Mika
-
-Cada vez que corrés el workflow:
-
-**Vuelta N:**
-1. El cuadro `editable_text_widget` tiene el prompt que quedó de la vuelta N-1 (ya editado a mano si quisiste tocarlo). Ese es el `prompt_anterior` de esta vuelta.
-2. Llega el prompt nuevo de la generación actual por `input_text`. Ese es el `prompt_generacion_actual`.
-3. El cuadro editable se refresca solo con ese prompt nuevo, listo para que lo edites antes de correr la vuelta N+1.
-
-El nodo se fuerza a ejecutarse siempre (`IS_CHANGED` devuelve `NaN`) para que la retención en memoria se refresque en cada vuelta.
-
----
-
-## 🧩 Compatibilidad
-
-- ComfyUI 0.30+
-- Python 3.10+
-- Frontend clásico y nuevo (detecta automáticamente el tipo de widget y claves de color)
-
-## 📄 Licencia
-
-MIT
-
-## 🙏 Créditos
-
-Inspirado en nodos de:
-
-- [WASasquatch/was-node-suite-comfyui](https://github.com/WASasquatch/was-node-suite-comfyui) (Load Image)
-- [sugarkwork/comfyui_tag_filter](https://github.com/sugarkwork/comfyui_tag_filter) (TagFilter, TagIf, TagRemover)
-- [Suzie1/ComfyUI_Comfyroll_CustomNodes](https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes) (Text Replace, Text Concatenate)
-- [ShammiG/ComfyUI_Text_Tools_SG](https://github.com/ShammiG/ComfyUI_Text_Tools_SG) (funciones de portapapeles)
-- [geroldmeisinger/ComfyUI-outputlists-combiner](https://github.com/geroldmeisinger/ComfyUI-outputlists-combiner) (OutputList)
-
-Adaptados y extendidos con mejoras de UI, manejo de caracteres especiales, slots dinámicos y estilo consistente.
+Mika-Utilidades/
+├── __init__.py              # registra los nodos y la carpeta web
+├── nodes.py                 # lógica Python de los 5 nodos
+└── web/
+    ├── cut_first_line.js       # botón de cortar primera línea (String Selector)
+    ├── score_list.js           # botones +/- y nombres editables (Score List)
+    ├── text_box_editor_mika.js # copiar/seleccionar/pegar, incluso colapsado
+    └── execution_timer.js      # etiquetas + panel de tiempos de ejecución
+```

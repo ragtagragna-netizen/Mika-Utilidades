@@ -43,24 +43,27 @@ _COLOR_MODIFIERS = {
 
 def _escape_emoticones(text):
     for emote in _EMOTICONES:
-        escaped = emote.replace("(", "\\(").replace(")", "\\)").replace(":", "\\:")
-        text = re.sub(r'(?<!\\)' + re.escape(emote), escaped, text)
+        escaped = emote.replace("(", r"\(").replace(")", r"\)").replace(":", r"\:")
+        text = re.sub(r'(?<!\\)' + re.escape(emote), lambda m: escaped, text)
     return text
 
 
 def _unescape_emoticones(text):
     for emote in _EMOTICONES:
-        escaped = emote.replace("(", "\\(").replace(")", "\\)").replace(":", "\\:")
+        escaped = emote.replace("(", r"\(").replace(")", r"\)").replace(":", r"\:")
         text = text.replace(escaped, emote)
     return text
 
 
-def _strip_color_prefix(tag_base):
+def strip_color_prefix(tag_base):
     parts = tag_base.split("_")
+
     if len(parts) >= 3 and parts[0] in _COLOR_MODIFIERS and parts[1] in _COLORS:
         return "_".join(parts[2:])
+
     if len(parts) >= 2 and parts[0] in _COLORS:
         return "_".join(parts[1:])
+
     return tag_base
 
 
@@ -71,6 +74,7 @@ def _parse_smart_tag(tag_text, case_sensitive=False):
 
     opening_parens = 0
     closing_parens = 0
+
     for char in original:
         if char == '(':
             opening_parens += 1
@@ -78,6 +82,7 @@ def _parse_smart_tag(tag_text, case_sensitive=False):
             closing_parens += 1
         elif char not in ' \t':
             break
+
     for char in reversed(original):
         if char == ')':
             closing_parens += 1
@@ -87,8 +92,10 @@ def _parse_smart_tag(tag_text, case_sensitive=False):
             break
 
     stripped = original.strip()
+
     while stripped.startswith('(') and stripped.endswith(')'):
         inner = stripped[1:-1].strip()
+
         if ':' in inner:
             parts = inner.rsplit(':', 1)
             if len(parts) == 2:
@@ -96,28 +103,43 @@ def _parse_smart_tag(tag_text, case_sensitive=False):
                     weight = float(parts[1])
                     base_tag = parts[0].strip()
                     normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
-                    return {'original': original, 'base': normalized, 'weight': weight,
-                            'has_weight': True, 'weight_syntax': 'explicit'}
+
+                    return {
+                        'original': original,
+                        'base': normalized,
+                        'weight': weight,
+                        'has_weight': True,
+                        'weight_syntax': 'explicit'
+                    }
                 except ValueError:
                     pass
+
         stripped = inner.strip()
 
     paren_pairs = min(opening_parens, closing_parens)
     weight = 1.0 + (paren_pairs * 0.1) if paren_pairs > 0 else 1.0
     base_tag = stripped
     normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
-    return {'original': original, 'base': normalized, 'weight': weight,
-            'has_weight': paren_pairs > 0,
-            'weight_syntax': 'parentheses' if paren_pairs > 0 else 'none'}
+
+    return {
+        'original': original,
+        'base': normalized,
+        'weight': weight,
+        'has_weight': paren_pairs > 0,
+        'weight_syntax': 'parentheses' if paren_pairs > 0 else 'none'
+    }
 
 
 def _parse_prompt(prompt, case_sensitive=False):
     if not prompt or not prompt.strip():
         return []
+
     prompt = _escape_emoticones(prompt)
+
     tags = []
     current = ''
     paren_depth = 0
+
     for char in prompt:
         if char == '(':
             paren_depth += 1
@@ -130,30 +152,69 @@ def _parse_prompt(prompt, case_sensitive=False):
                     tags.append(parsed)
             current = ''
             continue
+
         current += char
+
     if current.strip():
         parsed = _parse_smart_tag(current, case_sensitive)
         if parsed:
             tags.append(parsed)
+
     for tag in tags:
         tag['original'] = _unescape_emoticones(tag['original'])
+
     return tags
 
 
 def _tags_match(tag1, tag2, ignore_weight=False, ignore_color_prefix=False):
     base1 = tag1['base']
     base2 = tag2['base']
+
     if base1 == base2:
         if ignore_weight:
             return True
         return abs(tag1['weight'] - tag2['weight']) < 0.01
+
     if ignore_color_prefix:
-        s1 = _strip_color_prefix(base1)
-        s2 = _strip_color_prefix(base2)
+        s1 = strip_color_prefix(base1)
+        s2 = strip_color_prefix(base2)
+
         if s1 == base2 or s2 == base1:
             if ignore_weight or abs(tag1['weight'] - tag2['weight']) < 0.01:
                 return True
+
     return False
+
+
+def _mika_coerce_bool(value):
+    """
+    Convierte valores entrantes a bool de forma segura.
+    Útil cuando los toggles vienen linkeados desde distintos tipos de nodos.
+    """
+    if isinstance(value, bool):
+        return value
+
+    if value is None:
+        return False
+
+    if isinstance(value, (int, float)):
+        return value != 0
+
+    if isinstance(value, str):
+        return value.strip().lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+            "si",
+            "sí",
+            "enabled",
+        )
+
+    try:
+        return bool(value)
+    except Exception:
+        return False
 
 
 # ======================================================================
@@ -182,8 +243,10 @@ class StringSelectorCut:
 
     def doit(self, strings, select):
         lines = [s for s in strings.split("\n") if s.strip() != ""]
+
         if len(lines) == 0:
             return ("",)
+
         idx = select % len(lines)
         return (lines[idx],)
 
@@ -200,9 +263,11 @@ class ScoreListExtendable:
     @classmethod
     def INPUT_TYPES(cls):
         optional = {}
+
         for i in range(1, MAX_SCORES + 1):
             optional[f"nombre_{i}"] = ("STRING", {"default": f"Opción {i}", "multiline": False})
             optional[str(i)] = ("INT", {"default": 0, "min": -999999, "max": 999999, "step": 1})
+
         return {
             "required": {},
             "optional": optional,
@@ -215,13 +280,16 @@ class ScoreListExtendable:
 
     def doit(self, **kwargs):
         keys = sorted((k for k in kwargs if k.isdigit()), key=lambda k: int(k))
+
         total = 0
         details = []
+
         for k in keys:
             value = int(kwargs[k])
             total += value
             label = str(kwargs.get(f"nombre_{k}", k)).strip() or k
             details.append(f"{label}: {value}")
+
         return (total, "\n".join(details))
 
 
@@ -276,41 +344,56 @@ class TextBoxVisor:
     def doit(self, valor=None, text="", unique_id=None):
         if valor is not None:
             preview = self._format(valor)
+
             if PromptServer is not None and PromptServer.instance is not None and unique_id is not None:
                 PromptServer.instance.send_sync(
                     "mika-visor-preview",
                     {"id": str(unique_id), "text": preview},
                 )
+
             return (preview,)
+
         return (text,)
 
     def _format(self, v):
         if v is None:
             return "None"
+
         if isinstance(v, str):
             return v
+
         if isinstance(v, bool):
             return str(v)
+
         if isinstance(v, (int, float)):
             return repr(v)
+
         if isinstance(v, (list, tuple)):
             if len(v) == 0:
                 return "[]" if isinstance(v, list) else "()"
+
             shown = v[: self.MAX_ITEMS]
             lines = [f"[{i}] {self._format(item)}" for i, item in enumerate(shown)]
+
             if len(v) > len(shown):
                 lines.append(f"... (+{len(v) - len(shown)} elementos más)")
+
             return "\n".join(lines)
+
         if isinstance(v, dict):
             return "\n".join(f"{k}: {self._format(val)}" for k, val in v.items())
+
         if hasattr(v, "shape") and hasattr(v, "dtype"):
             base = f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype})"
+
             try:
                 if hasattr(v, "numel") and callable(v.numel) and v.numel() <= 12:
                     base += f"\n{v.tolist()}"
             except Exception:
                 pass
+
             return base
+
         return str(v)
 
 
@@ -342,6 +425,7 @@ class TagFilter:
         parts = [p.strip() for p in (text or "").split(sep) if p.strip() != ""]
         kept = parts[:max_tags] if max_tags > 0 else []
         joiner = sep.strip() + " " if sep.strip() else sep
+
         return (joiner.join(kept), len(kept))
 
 
@@ -357,9 +441,11 @@ class TextReplaceDynamic:
     @classmethod
     def INPUT_TYPES(cls):
         optional = {}
+
         for i in range(1, MAX_REPLACES + 1):
             optional[f"find_{i}"] = ("STRING", {"default": "", "multiline": False})
             optional[f"replace_{i}"] = ("STRING", {"default": "", "multiline": False})
+
         return {
             "required": {
                 "text": ("STRING", {"multiline": True, "default": ""}),
@@ -377,16 +463,20 @@ class TextReplaceDynamic:
 
     def doit(self, text, use_regex=False, **kwargs):
         result = text or ""
+
         keys = sorted(
             (k for k in kwargs if k.startswith("find_")),
             key=lambda k: int(k.split("_")[1])
         )
+
         for find_key in keys:
             idx = find_key.split("_")[1]
             find_str = kwargs.get(find_key, "")
             replace_str = kwargs.get(f"replace_{idx}", "")
+
             if not find_str:
                 continue
+
             try:
                 if use_regex:
                     result = re.sub(find_str, replace_str, result)
@@ -394,6 +484,7 @@ class TextReplaceDynamic:
                     result = result.replace(find_str, replace_str)
             except re.error:
                 pass
+
         return (result,)
 
 
@@ -406,15 +497,18 @@ class TextConcatenateDynamic:
     configurable. Slots dinámicos (hasta 30) con botones +/-.
 
     clean_output=True  → recorta cada texto, descarta vacíos, colapsa
-                         separadores duplicados y espacios múltiples.
+                          separadores duplicados y espacios múltiples.
+
     clean_output=False → concatena tal cual, sin modificar nada.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         optional = {}
+
         for i in range(1, MAX_CONCAT_SLOTS + 1):
             optional[f"text_{i}"] = ("STRING", {"default": "", "multiline": False})
+
         return {
             "required": {},
             "optional": {
@@ -430,7 +524,6 @@ class TextConcatenateDynamic:
     CATEGORY = "Mika Utilidades/string"
 
     def doit(self, separator=", ", clean_output=True, **kwargs):
-        # Lectura defensiva del boolean
         if isinstance(clean_output, str):
             clean_output = clean_output.strip().lower() in ("true", "1", "yes", "on")
         else:
@@ -442,24 +535,29 @@ class TextConcatenateDynamic:
         )
 
         texts = []
+
         for key in keys:
             value = kwargs.get(key, "")
+
             if value is None:
                 value = ""
+
             if clean_output:
                 value = value.strip()
+
             if value == "":
                 continue
+
             texts.append(value)
 
         result = separator.join(texts)
 
-        # Limpieza SOLO si está activada
         if clean_output and result:
             if separator:
                 parts = [p.strip() for p in result.split(separator)]
                 parts = [p for p in parts if p]
                 result = separator.join(parts)
+
             result = re.sub(r' {2,}', ' ', result)
 
         return (result,)
@@ -490,19 +588,21 @@ class LoadImageMika:
     CATEGORY = "Mika Utilidades/image"
 
     def load_image(self, image_path, RGBA=False, output_dimensions=True, filename_text_extension=True):
+        i = None
+
         if image_path.startswith('http'):
             i = self.download_image(image_path)
-            i = ImageOps.exif_transpose(i)
+            if i is not None:
+                i = ImageOps.exif_transpose(i)
         else:
             try:
                 i = Image.open(image_path)
                 i = ImageOps.exif_transpose(i)
             except OSError:
                 print(f"Load Image-Mika: La imagen '{image_path.strip()}' no existe!")
-                i = Image.new(mode='RGB', size=(512, 512), color=(0, 0, 0))
 
-        if not i:
-            return None
+        if i is None:
+            i = Image.new(mode='RGB', size=(512, 512), color=(0, 0, 0))
 
         if output_dimensions:
             width, height = i.size
@@ -510,8 +610,10 @@ class LoadImageMika:
             width, height = 0, 0
 
         image = i
+
         if not RGBA:
             image = image.convert('RGB')
+
         image = np.array(image).astype(np.float32) / 255.0
         image = torch.from_numpy(image)[None,]
 
@@ -540,15 +642,19 @@ class LoadImageMika:
             print(f"Load Image-Mika Connection Error ({url}): {errc}")
         except Exception as e:
             print(f"Load Image-Mika Error: {e}")
+
         return None
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         image_path = kwargs.get('image_path', '')
+
         if image_path.startswith('http'):
             return float("NaN")
+
         if not os.path.exists(image_path):
             return None
+
         try:
             sha256_hash = hashlib.sha256()
             with open(image_path, 'rb') as f:
@@ -597,6 +703,7 @@ class SmartTagFilterMika:
                     ignore_weight=False, ignore_color_prefix=False):
         prompt = self._to_text(prompt)
         filter_tags = self._to_text(filter_tags)
+
         prompt_tags = _parse_prompt(prompt, case_sensitive)
         filter_list = _parse_prompt(filter_tags, case_sensitive)
 
@@ -606,18 +713,24 @@ class SmartTagFilterMika:
         else:
             matched = []
             unmatched = []
+
             for ptag in prompt_tags:
-                found = any(_tags_match(ptag, ftag, ignore_weight, ignore_color_prefix)
-                            for ftag in filter_list)
+                found = any(
+                    _tags_match(ptag, ftag, ignore_weight, ignore_color_prefix)
+                    for ftag in filter_list
+                )
+
                 if found:
                     matched.append(ptag)
                 else:
                     unmatched.append(ptag)
 
         result_tags = matched if mode == "include" else unmatched
+
         filtered = ", ".join([t['original'] for t in result_tags])
         matched_str = ", ".join([t['original'] for t in matched])
         unmatched_str = ", ".join([t['original'] for t in unmatched])
+
         return (filtered, matched_str, unmatched_str)
 
 
@@ -633,9 +746,11 @@ class TagIfMika:
     @classmethod
     def INPUT_TYPES(cls):
         optional = {}
+
         for i in range(1, MAX_TAGIF_SLOTS + 1):
             optional[f"find_{i}"] = ("STRING", {"default": "", "multiline": False})
             optional[f"output_{i}"] = ("STRING", {"default": "", "multiline": False})
+
         return {
             "required": {
                 "tags": ("STRING",),
@@ -653,10 +768,13 @@ class TagIfMika:
         original = tag_text.strip()
         if not original:
             return None
+
         original = _escape_emoticones(original)
         stripped = original.strip()
+
         while stripped.startswith('(') and stripped.endswith(')'):
             inner = stripped[1:-1].strip()
+
             if ':' in inner:
                 parts = inner.rsplit(':', 1)
                 if len(parts) == 2:
@@ -666,17 +784,22 @@ class TagIfMika:
                         break
                     except ValueError:
                         pass
+
             stripped = inner.strip()
+
         normalized = stripped.lower().replace(' ', '_').replace('-', '_')
         return _unescape_emoticones(normalized)
 
     def parse_tags_list(self, tag_string):
         if not tag_string or not tag_string.strip():
             return []
+
         tag_string = _escape_emoticones(tag_string)
+
         tags = []
         current = ''
         paren_depth = 0
+
         for char in tag_string:
             if char == '(':
                 paren_depth += 1
@@ -689,22 +812,29 @@ class TagIfMika:
                         tags.append(parsed)
                 current = ''
                 continue
+
             current += char
+
         if current.strip():
             parsed = self.parse_smart_tag(current)
             if parsed:
                 tags.append(parsed)
+
         return tags
 
     def tag(self, tags, **kwargs):
         tag_list = self.parse_tags_list(tags)
         outputs = []
+
         for i in range(1, MAX_TAGIF_SLOTS + 1):
             find_val = kwargs.get(f"find_{i}", "")
             out_val = kwargs.get(f"output_{i}", "")
+
             matched = bool(find_val.strip()) and (self.parse_smart_tag(find_val) in tag_list)
             outputs.append(out_val if matched else "")
+
         combined = ", ".join([o for o in outputs if o])
+
         return tuple(outputs + [combined])
 
 
@@ -747,6 +877,7 @@ class TagRemoverMika:
         tags = []
         current = ''
         depth = 0
+
         for char in text:
             if char == '(':
                 depth += 1
@@ -757,19 +888,25 @@ class TagRemoverMika:
                     tags.append(current.strip())
                 current = ''
                 continue
+
             current += char
+
         if current.strip():
             tags.append(current.strip())
+
         return tags
 
     @staticmethod
     def _normalize_for_compare(tag, case_sensitive=False, ignore_weight=True):
         tag = tag.strip()
+
         if not tag:
             return ""
+
         if ignore_weight:
             while tag.startswith('(') and tag.endswith(')'):
                 inner = tag[1:-1].strip()
+
                 if ':' in inner:
                     parts = inner.rsplit(':', 1)
                     try:
@@ -780,11 +917,14 @@ class TagRemoverMika:
                         tag = inner
                 else:
                     tag = inner
-        # Quitar backslashes de escape
+
         tag = tag.replace('\\(', '(').replace('\\)', ')').replace('\\,', ',').replace('\\:', ':')
+
         if not case_sensitive:
             tag = tag.lower()
+
         tag = tag.replace('-', '_').replace(' ', '_')
+
         return tag
 
     def tag(self, tags, exclude_tags, case_sensitive=False, ignore_weight=True):
@@ -798,6 +938,7 @@ class TagRemoverMika:
             return (tags_text, "", 0)
 
         exclude_set = set()
+
         for t in exclude_list:
             norm = self._normalize_for_compare(t, case_sensitive, ignore_weight)
             if norm:
@@ -805,8 +946,10 @@ class TagRemoverMika:
 
         kept = []
         removed = []
+
         for tag in tag_list:
             norm = self._normalize_for_compare(tag, case_sensitive, ignore_weight)
+
             if norm and norm in exclude_set:
                 removed.append(tag)
             else:
@@ -814,6 +957,7 @@ class TagRemoverMika:
 
         result = ", ".join(kept)
         removed_str = ", ".join(removed)
+
         return (result, removed_str, len(removed))
 
 
@@ -850,20 +994,27 @@ class FloatOutputList:
     def doit(self, separator, values):
         sep = self._decode_separator(separator) if separator else "\n"
         raw_items = values.strip("\r\n").split(sep)
+
         floats = []
+
         for raw in raw_items:
             item = raw.strip()
+
             if item == "":
                 continue
+
             try:
                 floats.append(float(item))
             except ValueError:
                 raise ValueError(
                     f"Float OutputList: no se pudo convertir '{item}' a un número decimal."
                 )
+
         if not floats:
             floats = [0.0]
+
         indices = list(range(len(floats)))
+
         return (floats, indices, len(floats))
 
 
@@ -898,6 +1049,7 @@ class ExecutionTimerConfig:
                     "decimals": int(decimales),
                 },
             )
+
         return {}
 
 
@@ -925,6 +1077,7 @@ class PromptEditLoopMika:
     def run(self, input_text, editable_text_widget):
         prompt_anterior = editable_text_widget
         prompt_actual = input_text
+
         return {
             "ui": {"text": [prompt_actual]},
             "result": (prompt_anterior, prompt_actual),
@@ -965,6 +1118,7 @@ class TextLineSelectorMika:
 
     def run(self, text, start_index, end_index, delete_selected_lines=True, skip_empty_lines=True):
         all_lines = text.split("\n")
+
         if skip_empty_lines:
             lines = [line for line in all_lines if line.strip() != ""]
         else:
@@ -1008,6 +1162,10 @@ class TextLineStepperMika:
     Text Line Stepper-Mika: selecciona líneas de forma ESCALONADA (auto-avanza).
     En cada ejecución selecciona el rango actual y avanza al siguiente bloque.
     Los índices se actualizan solos pero pueden editarse manualmente.
+
+    Salidas:
+    - selected_lines: LISTA de strings con las líneas del bloque actual.
+    - current_end: STRING con el índice final usado en esta ejecución.
     """
 
     @classmethod
@@ -1019,22 +1177,20 @@ class TextLineStepperMika:
                 "end_index": ("INT", {"default": 2, "min": 0, "max": 999999}),
             },
             "optional": {
-                "delete_selected_lines": ("BOOLEAN", {"default": False}),
-                "loop": ("BOOLEAN", {"default": False}),
                 "skip_empty_lines": ("BOOLEAN", {"default": True}),
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "INT", "INT")
-    RETURN_NAMES = ("selected_lines", "remaining_text", "current_start", "current_end")
-    OUTPUT_IS_LIST = (True, False, False, False)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("selected_lines", "current_end")
+    OUTPUT_IS_LIST = (True, False)
     FUNCTION = "run"
     CATEGORY = "Mika Utilidades/prompt"
     OUTPUT_NODE = True
 
-    def run(self, text, start_index, end_index,
-            delete_selected_lines=False, loop=False, skip_empty_lines=True):
+    def run(self, text, start_index, end_index, skip_empty_lines=True):
         all_lines = text.split("\n")
+
         if skip_empty_lines:
             lines = [line for line in all_lines if line.strip() != ""]
         else:
@@ -1044,8 +1200,12 @@ class TextLineStepperMika:
 
         if total_lines == 0:
             return {
-                "ui": {"text": [text], "start_index": [start_index], "end_index": [end_index]},
-                "result": ([], text, start_index, end_index),
+                "ui": {
+                    "text": [text],
+                    "start_index": [start_index],
+                    "end_index": [end_index],
+                },
+                "result": ([], str(end_index)),
             }
 
         start = min(start_index, end_index)
@@ -1053,36 +1213,35 @@ class TextLineStepperMika:
         chunk_size = end - start + 1
 
         if start >= total_lines:
-            next_start, next_end = self._next_range(end, chunk_size, total_lines, loop)
+            next_start, next_end = self._next_range(end, chunk_size, total_lines)
+
             return {
-                "ui": {"text": [text], "start_index": [next_start], "end_index": [next_end]},
-                "result": ([], text, start, end),
+                "ui": {
+                    "text": [text],
+                    "start_index": [next_start],
+                    "end_index": [next_end],
+                },
+                "result": ([], str(end)),
             }
 
         actual_end = min(end, total_lines - 1)
         selected = lines[start:actual_end + 1]
 
-        if delete_selected_lines:
-            remaining_lines = lines[:start] + lines[actual_end + 1:]
-            remaining_text = "\n".join(remaining_lines)
-            next_start = 0
-            next_end = min(chunk_size - 1, max(0, len(remaining_lines) - 1))
-        else:
-            remaining_text = text
-            next_start, next_end = self._next_range(actual_end, chunk_size, total_lines, loop)
+        next_start, next_end = self._next_range(actual_end, chunk_size, total_lines)
 
         return {
-            "ui": {"text": [remaining_text], "start_index": [next_start], "end_index": [next_end]},
-            "result": (selected, remaining_text, start, actual_end),
+            "ui": {
+                "text": [text],
+                "start_index": [next_start],
+                "end_index": [next_end],
+            },
+            "result": (selected, str(actual_end)),
         }
 
     @staticmethod
-    def _next_range(current_end, chunk_size, total_lines, loop):
+    def _next_range(current_end, chunk_size, total_lines):
         next_start = current_end + 1
         next_end = next_start + chunk_size - 1
-        if loop and next_start >= total_lines:
-            next_start = 0
-            next_end = min(chunk_size - 1, total_lines - 1)
         return next_start, next_end
 
     @classmethod
@@ -1111,6 +1270,7 @@ class ImagePreviewCleanMika:
 
     def preview(self, images):
         results = []
+
         for idx, image in enumerate(images):
             i = 255. * image.cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
@@ -1121,7 +1281,6 @@ class ImagePreviewCleanMika:
             output_dir = folder_paths.get_output_directory()
             filepath = os.path.join(output_dir, filename)
 
-            # Guardar como PNG limpio (sin metadata)
             img.save(filepath, 'PNG')
 
             results.append({
@@ -1139,9 +1298,7 @@ MAX_GROUP_SLOTS = 20
 class FastGroupsBypasserMika:
     """
     Fast Groups Bypasser-Mika: genera un toggle BOOLEAN linkeable por cada
-    grupo detectado en el grafo actual. Los slots BOOLEAN (group_1 a group_20)
-    son conectables y promocionables en subgrafos. Solo se muestran los
-    toggles de los grupos detectados.
+    grupo detectado. Soporta control desde FUERA del subgrafo vía WebSocket.
     """
 
     @classmethod
@@ -1149,12 +1306,14 @@ class FastGroupsBypasserMika:
         optional = {
             "groups_filter": ("STRING", {"default": "", "multiline": False}),
         }
+
         for i in range(1, MAX_GROUP_SLOTS + 1):
             optional[f"group_{i}"] = ("BOOLEAN", {"default": False})
 
         return {
             "required": {},
             "optional": optional,
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     RETURN_TYPES = ()
@@ -1162,21 +1321,375 @@ class FastGroupsBypasserMika:
     CATEGORY = "Mika Utilidades/utils"
     OUTPUT_NODE = True
 
-    def pass_through(self, groups_filter="", **kwargs):
+    def pass_through(self, groups_filter="", unique_id=None, **kwargs):
         bypass_state = {}
+
         for key, value in kwargs.items():
             if key.startswith("group_") and isinstance(value, bool):
                 bypass_state[key] = value
 
-        return {
-            "ui": {
-                "bypass_state": [bypass_state],
-            }
-        }
+        if PromptServer is not None and PromptServer.instance is not None:
+            PromptServer.instance.send_sync(
+                "mika-bypasser-state",
+                {
+                    "node_id": str(unique_id) if unique_id else None,
+                    "bypass_state": bypass_state,
+                },
+            )
+
+        return {"ui": {"bypass_state": [bypass_state]}}
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
+        state = str(sorted(
+            [(k, v) for k, v in kwargs.items() if k.startswith("group_")]
+        ))
+        return hashlib.md5(state.encode()).hexdigest()
+
+
+class FastGroupsMuterMika:
+    """
+    Fast Groups Muter-Mika: genera un toggle BOOLEAN linkeable por cada
+    grupo detectado. Al activarlo hace MUTE (mode=2 / Never) a todos los
+    nodos del grupo, en lugar de bypass. Soporta control desde FUERA del
+    subgrafo.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {
+            "groups_filter": ("STRING", {"default": "", "multiline": False}),
+        }
+
+        for i in range(1, MAX_GROUP_SLOTS + 1):
+            optional[f"group_{i}"] = ("BOOLEAN", {"default": False})
+
+        return {
+            "required": {},
+            "optional": optional,
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "pass_through"
+    CATEGORY = "Mika Utilidades/utils"
+    OUTPUT_NODE = True
+
+    def pass_through(self, groups_filter="", unique_id=None, **kwargs):
+        mute_state = {}
+
+        for key, value in kwargs.items():
+            if key.startswith("group_") and isinstance(value, bool):
+                mute_state[key] = value
+
+        if PromptServer is not None and PromptServer.instance is not None:
+            PromptServer.instance.send_sync(
+                "mika-muter-state",
+                {
+                    "node_id": str(unique_id) if unique_id else None,
+                    "mute_state": mute_state,
+                },
+            )
+
+        return {"ui": {"mute_state": [mute_state]}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
+MAX_NODE_SLOTS = 20
+
+
+def _mika_coerce_bool(value):
+    """
+    Convierte valores entrantes a bool de forma segura.
+    Útil si el toggle viene linkeado desde distintos tipos de nodos.
+    """
+    if isinstance(value, bool):
+        return value
+
+    if value is None:
         return False
+
+    if isinstance(value, (int, float)):
+        return value != 0
+
+    if isinstance(value, str):
+        return value.strip().lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+            "si",
+            "sí",
+            "enabled",
+        )
+
+    try:
+        return bool(value)
+    except Exception:
+        return False
+
+
+class FastNodesBypasserMika:
+    """
+    Fast Nodes Bypasser-Mika.
+    Los inputs input_i se declaran hasta MAX_NODE_SLOTS para que el backend
+    acepte conexiones dinámicas. El frontend muestra/oculta los slots.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+
+        for i in range(MAX_NODE_SLOTS):
+            optional[f"input_{i}"] = ("*", {"forceInput": True})
+
+        for i in range(MAX_NODE_SLOTS):
+            optional[f"toggle_{i}"] = ("BOOLEAN", {"default": False})
+
+        return {
+            "required": {},
+            "optional": optional,
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "pass_through"
+    CATEGORY = "Mika Utilidades/utils"
+    OUTPUT_NODE = True
+
+    def pass_through(self, unique_id=None, **kwargs):
+        toggle_state = {}
+
+        for i in range(MAX_NODE_SLOTS):
+            toggle_state[f"toggle_{i}"] = False
+
+        for key, value in kwargs.items():
+            if key.startswith("toggle_"):
+                toggle_state[key] = _mika_coerce_bool(value)
+
+        if PromptServer is not None and PromptServer.instance is not None:
+            PromptServer.instance.send_sync(
+                "mika-fast-nodes-bypasser",
+                {
+                    "node_id": str(unique_id) if unique_id is not None else None,
+                    "toggle_state": toggle_state,
+                },
+            )
+
+        return {"ui": {"toggle_state": [toggle_state]}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
+class FastNodesMuterMika:
+    """
+    Fast Nodes Muter-Mika.
+    Los inputs input_i se declaran hasta MAX_NODE_SLOTS para que el backend
+    acepte conexiones dinámicas. El frontend muestra/oculta los slots.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+
+        for i in range(MAX_NODE_SLOTS):
+            optional[f"input_{i}"] = ("*", {"forceInput": True})
+
+        for i in range(MAX_NODE_SLOTS):
+            optional[f"toggle_{i}"] = ("BOOLEAN", {"default": False})
+
+        return {
+            "required": {},
+            "optional": optional,
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "pass_through"
+    CATEGORY = "Mika Utilidades/utils"
+    OUTPUT_NODE = True
+
+    def pass_through(self, unique_id=None, **kwargs):
+        toggle_state = {}
+
+        for i in range(MAX_NODE_SLOTS):
+            toggle_state[f"toggle_{i}"] = False
+
+        for key, value in kwargs.items():
+            if key.startswith("toggle_"):
+                toggle_state[key] = _mika_coerce_bool(value)
+
+        if PromptServer is not None and PromptServer.instance is not None:
+            PromptServer.instance.send_sync(
+                "mika-fast-nodes-muter",
+                {
+                    "node_id": str(unique_id) if unique_id is not None else None,
+                    "toggle_state": toggle_state,
+                },
+            )
+
+        return {"ui": {"toggle_state": [toggle_state]}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
+MAX_UNPACK_SLOTS = 50
+
+
+class ListUnpackMika:
+    """
+    List Unpack-Mika: recibe una lista, tupla, batch o colección y la
+    separa en múltiples salidas.
+
+    IMPORTANTE: INPUT_IS_LIST = True evita que ComfyUI expanda la lista
+    y ejecute el nodo una vez por elemento (que era el bug).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "list_input": ("*", {"forceInput": True}),
+                "output_count": (
+                    "INT",
+                    {
+                        "default": 2,
+                        "min": 1,
+                        "max": MAX_UNPACK_SLOTS,
+                        "step": 1,
+                        "display": "number",
+                    },
+                ),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = tuple(["*"] * MAX_UNPACK_SLOTS)
+    RETURN_NAMES = tuple([f"output_{i}" for i in range(MAX_UNPACK_SLOTS)])
+
+    FUNCTION = "unpack"
+    CATEGORY = "Mika Utilidades/lista"
+    OUTPUT_NODE = False
+
+    # CLAVE: recibir la lista completa, sin expansión por elemento.
+    INPUT_IS_LIST = True
+
+    def unpack(self, list_input, output_count, unique_id=None):
+        # Con INPUT_IS_LIST, algunos valores pueden llegar envueltos en lista.
+        if isinstance(unique_id, (list, tuple)):
+            unique_id = unique_id[0] if unique_id else None
+
+        count = self._clamp_count(output_count)
+        items = self._normalize_to_list(list_input)
+
+        outputs = []
+
+        for i in range(MAX_UNPACK_SLOTS):
+            if i < count and i < len(items):
+                outputs.append(items[i])
+            else:
+                outputs.append(None)
+
+        if PromptServer is not None and PromptServer.instance is not None and unique_id is not None:
+            PromptServer.instance.send_sync(
+                "mika-list-unpack",
+                {
+                    "node_id": str(unique_id),
+                    "output_count": count,
+                },
+            )
+
+        return tuple(outputs)
+
+    def _clamp_count(self, value):
+        if isinstance(value, (list, tuple)):
+            value = value[0] if len(value) > 0 else 2
+
+        try:
+            count = int(value)
+        except Exception:
+            count = 2
+
+        return max(1, min(MAX_UNPACK_SLOTS, count))
+
+    def _normalize_to_list(self, value):
+        """
+        Con INPUT_IS_LIST, list_input siempre llega como lista.
+        Hay dos casos:
+        - Lista expandida (fuente OUTPUT_IS_LIST): [elem0, elem1, ...]
+        - Valor único envuelto: [valor]
+        """
+        if isinstance(value, (list, tuple)):
+            if len(value) == 1:
+                inner = value[0]
+
+                # Un solo objeto que a su vez es lista/tupla.
+                if isinstance(inner, (list, tuple)):
+                    return list(inner)
+
+                # Un solo objeto: puede ser batch, dict, tensor, string, etc.
+                return self._split_single(inner)
+
+            # Lista real con varios elementos.
+            return list(value)
+
+        return self._split_single(value)
+
+    def _split_single(self, value):
+        """
+        Convierte un objeto individual en lista de elementos.
+        Soporta LATENT batch, tensors 4D, numpy 4D, dict, list, etc.
+        """
+        if value is None:
+            return []
+
+        if isinstance(value, (list, tuple)):
+            return list(value)
+
+        if isinstance(value, set):
+            return list(value)
+
+        # Soporte para LATENT batch: {"samples": tensor, ...}
+        if isinstance(value, dict):
+            samples = value.get("samples", None)
+
+            if torch.is_tensor(samples) and samples.ndim == 4 and samples.shape[0] > 1:
+                unpacked = []
+
+                for i in range(samples.shape[0]):
+                    item = dict(value)
+                    item["samples"] = samples[i : i + 1]
+                    unpacked.append(item)
+
+                return unpacked
+
+            return [value]
+
+        # Tensors batch 4D, por ejemplo IMAGE: [B, H, W, C]
+        if isinstance(value, torch.Tensor):
+            if value.ndim == 4 and value.shape[0] > 1:
+                return [value[i : i + 1] for i in range(value.shape[0])]
+
+            return [value]
+
+        # Numpy arrays batch 4D.
+        if isinstance(value, np.ndarray):
+            if value.ndim == 4 and value.shape[0] > 1:
+                return [value[i : i + 1] for i in range(value.shape[0])]
+
+            return [value]
+
+        # Cualquier otra cosa es un único elemento.
+        return [value]
 
 
 # ======================================================================
@@ -1202,6 +1715,10 @@ NODE_CLASS_MAPPINGS = {
     "TextLineStepperMika": TextLineStepperMika,
     "ImagePreviewCleanMika": ImagePreviewCleanMika,
     "FastGroupsBypasserMika": FastGroupsBypasserMika,
+    "FastGroupsMuterMika": FastGroupsMuterMika,
+    "FastNodesBypasserMika": FastNodesBypasserMika,
+    "FastNodesMuterMika": FastNodesMuterMika,
+    "ListUnpackMika": ListUnpackMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1223,4 +1740,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TextLineStepperMika": "Text Line Stepper-Mika",
     "ImagePreviewCleanMika": "Image Preview Clean-Mika",
     "FastGroupsBypasserMika": "Fast Groups Bypasser-Mika",
+    "FastGroupsMuterMika": "Fast Groups Muter-Mika",
+    "FastNodesBypasserMika": "Fast Nodes Bypasser-Mika",
+    "FastNodesMuterMika": "Fast Nodes Muter-Mika",
+    "ListUnpackMika": "List Unpack-Mika",
 }
