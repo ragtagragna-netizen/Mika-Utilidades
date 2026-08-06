@@ -1163,6 +1163,9 @@ class TextLineStepperMika:
     En cada ejecución selecciona el rango actual y avanza al siguiente bloque.
     Los índices se actualizan solos pero pueden editarse manualmente.
 
+    Con auto_advance=False los índices quedan FIJOS en el rango elegido
+    (se detienen los saltos) y cada ejecución devuelve el mismo bloque.
+
     Salidas:
     - selected_lines: LISTA de strings con las líneas del bloque actual.
     - current_end: STRING con el índice final usado en esta ejecución.
@@ -1177,6 +1180,7 @@ class TextLineStepperMika:
                 "end_index": ("INT", {"default": 2, "min": 0, "max": 999999}),
             },
             "optional": {
+                "auto_advance": ("BOOLEAN", {"default": True}),
                 "skip_empty_lines": ("BOOLEAN", {"default": True}),
             },
         }
@@ -1188,7 +1192,8 @@ class TextLineStepperMika:
     CATEGORY = "Mika Utilidades/prompt"
     OUTPUT_NODE = True
 
-    def run(self, text, start_index, end_index, skip_empty_lines=True):
+    def run(self, text, start_index, end_index,
+            auto_advance=True, skip_empty_lines=True):
         all_lines = text.split("\n")
 
         if skip_empty_lines:
@@ -1212,8 +1217,13 @@ class TextLineStepperMika:
         end = max(start_index, end_index)
         chunk_size = end - start + 1
 
+        # Rango fuera del texto: sin líneas seleccionadas.
         if start >= total_lines:
-            next_start, next_end = self._next_range(end, chunk_size, total_lines)
+            if auto_advance:
+                next_start, next_end = self._next_range(end, chunk_size, total_lines)
+            else:
+                # Índices fijos: no tocar los widgets.
+                next_start, next_end = start_index, end_index
 
             return {
                 "ui": {
@@ -1227,7 +1237,11 @@ class TextLineStepperMika:
         actual_end = min(end, total_lines - 1)
         selected = lines[start:actual_end + 1]
 
-        next_start, next_end = self._next_range(actual_end, chunk_size, total_lines)
+        if auto_advance:
+            next_start, next_end = self._next_range(actual_end, chunk_size, total_lines)
+        else:
+            # Modo rango fijo: los índices NO saltan.
+            next_start, next_end = start_index, end_index
 
         return {
             "ui": {
