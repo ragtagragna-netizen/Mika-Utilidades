@@ -1706,6 +1706,97 @@ class ListUnpackMika:
         return [value]
 
 
+import random as random_module
+
+
+import random as random_module
+
+
+class AnimaResolutionsMika:
+    """
+    Anima Resolutions-Mika: selecciona resoluciones compatibles con Anima
+    en diferentes proporciones de aspecto.
+    
+    Basado en https://github.com/cyberdelailAI/ComfyUI-anima-Resolutions
+    
+    Con random=True, selecciona una resolución aleatoria de la lista.
+    Con random=False, usa el ratio seleccionado manualmente.
+    """
+
+    RESOLUTIONS = {
+        "1024": [
+            "1024x1024 (1:1)",
+            "1152x896 (9:7)",
+            "896x1152 (7:9)",
+            "1152x864 (4:3)",
+            "864x1152 (3:4)",
+            "1344x896 (3:2)",
+            "1248x832 (3:2)",
+            "896x1344 (2:3)",
+            "832x1248 (2:3)",
+            "1280x720 (16:9)",
+            "720x1280 (9:16)",
+            "1344x576 (21:9)",
+            "576x1344 (9:21)",
+        ],
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        ratios = list(cls.RESOLUTIONS["1024"])
+
+        return {
+            "required": {
+                "ratio": (ratios, {"default": "1024x1024 (1:1)"}),
+                "random": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("INT", "INT")
+    RETURN_NAMES = ("width", "height")
+    FUNCTION = "get_dimensions"
+    CATEGORY = "Mika Utilidades/resolucion"
+
+    def get_dimensions(self, ratio, random=False):
+        ratios = self.RESOLUTIONS["1024"]
+
+        # Lectura defensiva del boolean (por si viene linkeado como string)
+        if isinstance(random, str):
+            random = random.strip().lower() in ("true", "1", "yes", "on")
+        else:
+            random = bool(random)
+
+        if random:
+            selected_ratio = random_module.choice(ratios)
+        else:
+            selected_ratio = ratio
+
+        dimensions = selected_ratio.split(" ")[0]
+        width, height = dimensions.split("x")
+
+        return (int(width), int(height))
+
+    @classmethod
+    def IS_CHANGED(cls, ratio, random=False):
+        """
+        Cuando random=True, devuelve NaN para que ComfyUI NO cachee el
+        resultado y re-ejecute el nodo en cada generación, obteniendo
+        una resolución aleatoria nueva cada vez.
+        
+        Cuando random=False, el resultado es determinista y cacheable.
+        """
+        # Lectura defensiva del boolean
+        if isinstance(random, str):
+            random = random.strip().lower() in ("true", "1", "yes", "on")
+        else:
+            random = bool(random)
+
+        if random:
+            return float("nan")  # fuerza re-ejecución siempre
+
+        return ratio  # cacheable cuando random=False
+
+
 # ======================================================================
 # MAPPINGS
 # ======================================================================
@@ -1733,6 +1824,7 @@ NODE_CLASS_MAPPINGS = {
     "FastNodesBypasserMika": FastNodesBypasserMika,
     "FastNodesMuterMika": FastNodesMuterMika,
     "ListUnpackMika": ListUnpackMika,
+    "AnimaResolutionsMika": AnimaResolutionsMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1758,4 +1850,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FastNodesBypasserMika": "Fast Nodes Bypasser-Mika",
     "FastNodesMuterMika": "Fast Nodes Muter-Mika",
     "ListUnpackMika": "List Unpack-Mika",
+    "AnimaResolutionsMika": "Anima Resolutions-Mika",
 }
