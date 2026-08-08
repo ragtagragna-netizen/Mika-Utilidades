@@ -13,6 +13,8 @@ import requests
 import re
 import folder_paths
 import time
+import random as random_module
+import comfy.samplers
 
 
 # ======================================================================
@@ -218,6 +220,140 @@ def _mika_coerce_bool(value):
 
 
 # ======================================================================
+# SAMPLER NAMES — detección multi-fuente + fallback
+# ======================================================================
+
+_STANDARD_SAMPLERS = [
+    "euler", "euler_ancestral", "euler_ancestral_cfg_pp", "euler_cfg_pp",
+    "heun", "heunpp2",
+    "dpm_2", "dpm_2_ancestral", "dpm_fast", "dpm_adaptive",
+    "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp",
+    "dpmpp_sde", "dpmpp_sde_gpu",
+    "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu",
+    "dpmpp_3m_sde", "dpmpp_3m_sde_gpu",
+    "ddpm", "ddim", "uni_pc", "uni_pc_bh2",
+    "lcm", "ipndm", "ipndm_v", "deis",
+    "res_multistep", "res_multistep_cfg_pp",
+    "er_sde", "seeds_2", "seeds_3",
+]
+
+
+def _mika_sampler_names():
+    """
+    Lee todos los samplers instalados (nativos + los que agreguen
+    extensiones). Prueba varias fuentes según la versión de ComfyUI;
+    si todas fallan, usa la lista estándar de respaldo.
+    """
+    detected = []
+
+    # Fuente 1: KSampler.SAMPLERS (dict)
+    try:
+        d = getattr(comfy.samplers.KSampler, "SAMPLERS", None)
+        if isinstance(d, dict) and d:
+            detected = list(d.keys())
+    except Exception:
+        detected = []
+
+    # Fuente 2: comfy.samplers.samplers() -> [(nombre, fn), ...]
+    try:
+        if not detected:
+            fn = getattr(comfy.samplers, "samplers", None)
+            if callable(fn):
+                detected = [str(x[0]) for x in fn()]
+    except Exception:
+        pass
+
+    # Fuente 3: listas/dicts a nivel de módulo
+    try:
+        if not detected:
+            for attr in ("SAMPLER_NAMES", "KSAMPLER_NAMES", "SAMPLERS"):
+                obj = getattr(comfy.samplers, attr, None)
+                if isinstance(obj, dict) and obj:
+                    detected = list(obj.keys())
+                    break
+                if isinstance(obj, (list, tuple)) and obj:
+                    detected = [str(x) for x in obj]
+                    break
+    except Exception:
+        pass
+
+    if len(detected) > 1:
+        names = detected
+    else:
+        names = list(_STANDARD_SAMPLERS)
+        for n in detected:
+            if n not in names:
+                names.insert(0, n)
+
+    print(f"[Mika] Sampler Selector: {len(names)} samplers disponibles.")
+    return names
+
+
+# Lista de respaldo con los schedulers estándar de ComfyUI.
+_STANDARD_SCHEDULERS = [
+    "normal", "karras", "exponential", "sgdr_uniform", "simple",
+    "ddim_uniform", "beta", "normal_beta", "lcm", "clamped",
+    "linear_quadratic",
+]
+
+
+def _mika_scheduler_names():
+    """
+    Lee todos los schedulers instalados (nativos + los que agreguen
+    extensiones). Prueba varias fuentes según la versión de ComfyUI;
+    si todas fallan, usa la lista estándar de respaldo.
+    """
+    detected = []
+
+    # Fuente 1: KSampler.SCHEDULERS (lista o dict)
+    try:
+        d = getattr(comfy.samplers.KSampler, "SCHEDULERS", None)
+        if isinstance(d, dict) and d:
+            detected = list(d.keys())
+        elif isinstance(d, (list, tuple)) and d:
+            detected = [str(x) for x in d]
+    except Exception:
+        detected = []
+
+    # Fuente 2: comfy.samplers.schedulers() si existe como función
+    try:
+        if not detected:
+            fn = getattr(comfy.samplers, "schedulers", None)
+            if callable(fn):
+                detected = [
+                    str(x[0]) if isinstance(x, (list, tuple)) else str(x)
+                    for x in fn()
+                ]
+    except Exception:
+        pass
+
+    # Fuente 3: listas a nivel de módulo
+    try:
+        if not detected:
+            for attr in ("SCHEDULER_NAMES", "SCHEDULERS"):
+                obj = getattr(comfy.samplers, attr, None)
+                if isinstance(obj, dict) and obj:
+                    detected = list(obj.keys())
+                    break
+                if isinstance(obj, (list, tuple)) and obj:
+                    detected = [str(x) for x in obj]
+                    break
+    except Exception:
+        pass
+
+    if len(detected) > 1:
+        names = detected
+    else:
+        names = list(_STANDARD_SCHEDULERS)
+        for n in detected:
+            if n not in names:
+                names.insert(0, n)
+
+    print(f"[Mika] Scheduler Selector: {len(names)} schedulers disponibles.")
+    return names
+
+
+# ======================================================================
 # NODOS
 # ======================================================================
 
@@ -257,7 +393,9 @@ MAX_SCORES = 50
 class ScoreListExtendable:
     """
     Similar al nodo 'SCORE' de JPS-Nodes: filas numeradas con nombre y valor.
-    Filas dinámicas (1..50) con botones +/- en la UI.
+    Filas dinámicas (1..50) controladas por num_rows.
+    La UI (score_list_mika.js) dibuja nombre y valor en la misma fila,
+    con el valor ocupando 1/3 del ancho.
     """
 
     @classmethod
@@ -267,6 +405,8 @@ class ScoreListExtendable:
         for i in range(1, MAX_SCORES + 1):
             optional[f"nombre_{i}"] = ("STRING", {"default": f"Opción {i}", "multiline": False})
             optional[str(i)] = ("INT", {"default": 0, "min": -999999, "max": 999999, "step": 1})
+
+        optional["num_rows"] = ("INT", {"default": 5, "min": 1, "max": MAX_SCORES, "step": 1})
 
         return {
             "required": {},
@@ -278,13 +418,21 @@ class ScoreListExtendable:
     FUNCTION = "doit"
     CATEGORY = "Mika Utilidades/score"
 
-    def doit(self, **kwargs):
-        keys = sorted((k for k in kwargs if k.isdigit()), key=lambda k: int(k))
+    def doit(self, num_rows=5, **kwargs):
+        try:
+            rows = max(1, min(MAX_SCORES, int(num_rows)))
+        except Exception:
+            rows = MAX_SCORES
 
         total = 0
         details = []
 
-        for k in keys:
+        for i in range(1, rows + 1):
+            k = str(i)
+
+            if k not in kwargs:
+                continue
+
             value = int(kwargs[k])
             total += value
             label = str(kwargs.get(f"nombre_{k}", k)).strip() or k
@@ -318,11 +466,16 @@ class TextBoxClipboard:
 
 class TextBoxVisor:
     """
-    Text Box Visor-Mika: acepta CUALQUIER tipo de dato en 'valor' y muestra
-    una preview legible. Preview en vivo por websocket.
+    Text Box Visor-Mika: muestra CUALQUIER tipo de valor (str, int, float,
+    bool, list, tuple, set, dict, Tensor, ndarray, bytes) como una preview
+    legible. Botones en el header (copiar / seleccionar todo / pegar) vía
+    text_box_visor_mika.js. Preview en vivo por websocket.
+
+    El límite de elementos mostrados por lista es MAX_ITEMS (fijo, no
+    aparece en la interfaz).
     """
 
-    MAX_ITEMS = 50
+    MAX_ITEMS = 50  # ← límite interno, sin widget visible
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -341,57 +494,122 @@ class TextBoxVisor:
     OUTPUT_NODE = True
     CATEGORY = "Mika Utilidades/string"
 
+    # Recibir las listas COMPLETAS sin que ComfyUI las expanda.
+    INPUT_IS_LIST = True
+
     def doit(self, valor=None, text="", unique_id=None):
+        valor = self._unwrap_list_input(valor)
+        text = self._unwrap_scalar(text, "")
+        unique_id = self._unwrap_scalar(unique_id, None)
+
         if valor is not None:
-            preview = self._format(valor)
+            preview = self._format(valor, 0, self.MAX_ITEMS)
+        else:
+            preview = text if isinstance(text, str) else str(text)
 
-            if PromptServer is not None and PromptServer.instance is not None and unique_id is not None:
-                PromptServer.instance.send_sync(
-                    "mika-visor-preview",
-                    {"id": str(unique_id), "text": preview},
-                )
+        if PromptServer is not None and PromptServer.instance is not None and unique_id is not None:
+            PromptServer.instance.send_sync(
+                "mika-visor-preview",
+                {"id": str(unique_id), "text": preview},
+            )
 
-            return (preview,)
+        return (preview,)
 
-        return (text,)
+    @staticmethod
+    def _unwrap_scalar(v, default):
+        if isinstance(v, (list, tuple)):
+            return v[0] if len(v) > 0 else default
+        return v if v is not None else default
 
-    def _format(self, v):
+    @staticmethod
+    def _unwrap_list_input(v):
+        if v is None:
+            return None
+
+        if isinstance(v, (list, tuple)):
+            if len(v) == 0:
+                return None
+
+            if len(v) == 1:
+                inner = v[0]
+                if not isinstance(inner, (list, tuple)):
+                    return inner
+                return list(inner)
+
+            return list(v)
+
+        return v
+
+    def _format(self, v, depth=0, max_items=50):
+        pad = "    " * depth
+
         if v is None:
             return "None"
 
-        if isinstance(v, str):
-            return v
-
         if isinstance(v, bool):
-            return str(v)
+            return "True" if v else "False"
 
         if isinstance(v, (int, float)):
             return repr(v)
 
-        if isinstance(v, (list, tuple)):
-            if len(v) == 0:
-                return "[]" if isinstance(v, list) else "()"
+        if isinstance(v, str):
+            return v if depth == 0 else v.replace("\n", "\\n")
 
-            shown = v[: self.MAX_ITEMS]
-            lines = [f"[{i}] {self._format(item)}" for i, item in enumerate(shown)]
+        if isinstance(v, (list, tuple, set)):
+            items = list(v)
 
-            if len(v) > len(shown):
-                lines.append(f"... (+{len(v) - len(shown)} elementos más)")
+            if not items:
+                return "[]" if isinstance(v, list) else ("()" if isinstance(v, tuple) else "set()")
+
+            shown = items[:max_items]
+            lines = [
+                f"{pad}[{i}] {self._format(item, depth + 1, max_items)}"
+                for i, item in enumerate(shown)
+            ]
+
+            if len(items) > len(shown):
+                lines.append(f"{pad}... (+{len(items) - len(shown)} elementos más)")
+
+            if depth == 0 and isinstance(v, set):
+                return "set(\n" + "\n".join(lines) + "\n)"
 
             return "\n".join(lines)
 
         if isinstance(v, dict):
-            return "\n".join(f"{k}: {self._format(val)}" for k, val in v.items())
+            if not v:
+                return "{}"
+
+            items = list(v.items())
+            shown = items[:max_items]
+            lines = [
+                f"{pad}{k}: {self._format(val, depth + 1, max_items)}"
+                for k, val in shown
+            ]
+
+            if len(items) > len(shown):
+                lines.append(f"{pad}... (+{len(items) - len(shown)} más)")
+
+            return "\n".join(lines)
+
+        if isinstance(v, (bytes, bytearray)):
+            return f"bytes(len={len(v)})"
+
+        if isinstance(v, np.ndarray):
+            base = f"ndarray(shape={tuple(v.shape)}, dtype={v.dtype})"
+            try:
+                if v.size <= 12:
+                    base += f"\n{pad}{v.tolist()}"
+            except Exception:
+                pass
+            return base
 
         if hasattr(v, "shape") and hasattr(v, "dtype"):
             base = f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype})"
-
             try:
                 if hasattr(v, "numel") and callable(v.numel) and v.numel() <= 12:
-                    base += f"\n{v.tolist()}"
+                    base += f"\n{pad}{v.tolist()}"
             except Exception:
                 pass
-
             return base
 
         return str(v)
@@ -1217,12 +1435,10 @@ class TextLineStepperMika:
         end = max(start_index, end_index)
         chunk_size = end - start + 1
 
-        # Rango fuera del texto: sin líneas seleccionadas.
         if start >= total_lines:
             if auto_advance:
                 next_start, next_end = self._next_range(end, chunk_size, total_lines)
             else:
-                # Índices fijos: no tocar los widgets.
                 next_start, next_end = start_index, end_index
 
             return {
@@ -1240,7 +1456,6 @@ class TextLineStepperMika:
         if auto_advance:
             next_start, next_end = self._next_range(actual_end, chunk_size, total_lines)
         else:
-            # Modo rango fijo: los índices NO saltan.
             next_start, next_end = start_index, end_index
 
         return {
@@ -1415,42 +1630,12 @@ class FastGroupsMuterMika:
 MAX_NODE_SLOTS = 20
 
 
-def _mika_coerce_bool(value):
-    """
-    Convierte valores entrantes a bool de forma segura.
-    Útil si el toggle viene linkeado desde distintos tipos de nodos.
-    """
-    if isinstance(value, bool):
-        return value
-
-    if value is None:
-        return False
-
-    if isinstance(value, (int, float)):
-        return value != 0
-
-    if isinstance(value, str):
-        return value.strip().lower() in (
-            "true",
-            "1",
-            "yes",
-            "on",
-            "si",
-            "sí",
-            "enabled",
-        )
-
-    try:
-        return bool(value)
-    except Exception:
-        return False
-
-
 class FastNodesBypasserMika:
     """
     Fast Nodes Bypasser-Mika.
     Los inputs input_i se declaran hasta MAX_NODE_SLOTS para que el backend
     acepte conexiones dinámicas. El frontend muestra/oculta los slots.
+    Los toggle_i tienen defaultInput=True para poder ser promovidos en subgrafos.
     """
 
     @classmethod
@@ -1461,7 +1646,15 @@ class FastNodesBypasserMika:
             optional[f"input_{i}"] = ("*", {"forceInput": True})
 
         for i in range(MAX_NODE_SLOTS):
-            optional[f"toggle_{i}"] = ("BOOLEAN", {"default": False})
+            optional[f"toggle_{i}"] = (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "defaultInput": True,
+                    "label_on": "bypass",
+                    "label_off": "off",
+                }
+            )
 
         return {
             "required": {},
@@ -1505,6 +1698,7 @@ class FastNodesMuterMika:
     Fast Nodes Muter-Mika.
     Los inputs input_i se declaran hasta MAX_NODE_SLOTS para que el backend
     acepte conexiones dinámicas. El frontend muestra/oculta los slots.
+    Los toggle_i tienen defaultInput=True para poder ser promovidos en subgrafos.
     """
 
     @classmethod
@@ -1515,7 +1709,15 @@ class FastNodesMuterMika:
             optional[f"input_{i}"] = ("*", {"forceInput": True})
 
         for i in range(MAX_NODE_SLOTS):
-            optional[f"toggle_{i}"] = ("BOOLEAN", {"default": False})
+            optional[f"toggle_{i}"] = (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "defaultInput": True,
+                    "label_on": "mute",
+                    "label_off": "off",
+                }
+            )
 
         return {
             "required": {},
@@ -1645,11 +1847,9 @@ class ListUnpackMika:
         if isinstance(value, (list, tuple)):
             if len(value) == 1:
                 inner = value[0]
-
                 # Un solo objeto que a su vez es lista/tupla.
                 if isinstance(inner, (list, tuple)):
                     return list(inner)
-
                 # Un solo objeto: puede ser batch, dict, tensor, string, etc.
                 return self._split_single(inner)
 
@@ -1706,19 +1906,12 @@ class ListUnpackMika:
         return [value]
 
 
-import random as random_module
-
-
-import random as random_module
-
-
 class AnimaResolutionsMika:
     """
     Anima Resolutions-Mika: selecciona resoluciones compatibles con Anima
     en diferentes proporciones de aspecto.
-    
     Basado en https://github.com/cyberdelailAI/ComfyUI-anima-Resolutions
-    
+
     Con random=True, selecciona una resolución aleatoria de la lista.
     Con random=False, usa el ratio seleccionado manualmente.
     """
@@ -1782,19 +1975,255 @@ class AnimaResolutionsMika:
         Cuando random=True, devuelve NaN para que ComfyUI NO cachee el
         resultado y re-ejecute el nodo en cada generación, obteniendo
         una resolución aleatoria nueva cada vez.
-        
+
         Cuando random=False, el resultado es determinista y cacheable.
         """
-        # Lectura defensiva del boolean
         if isinstance(random, str):
             random = random.strip().lower() in ("true", "1", "yes", "on")
         else:
             random = bool(random)
 
         if random:
-            return float("nan")  # fuerza re-ejecución siempre
+            return float("nan")
 
-        return ratio  # cacheable cuando random=False
+        return ratio
+
+
+class SamplerSelectorMika:
+    """
+    Sampler Selector-Mika: lista todos los samplers instalados en ComfyUI
+    y permite seleccionar uno.
+
+    Salidas:
+    - sampler_name: nombre del sampler elegido. Es tipo "*" (wildcard) para
+      que conecte SIEMPRE al sampler_name del KSampler, aunque otras
+      extensiones agreguen samplers y las listas combo no coincidan.
+    - sampler: objeto SAMPLER, conectable a SamplerCustomAdvanced /
+      custom sampling.
+    - sampler_name_text: el nombre del sampler elegido como STRING.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        names = _mika_sampler_names()
+        return {
+            "required": {
+                "sampler_name": (names, {"default": names[0]}),
+            },
+        }
+
+    # CLAVE: la primera salida es "*" (comodín). Si acá congeláramos la
+    # lista combo exacta, ComfyUI tira "Invalid connection" cuando alguna
+    # extensión registra samplers nuevos después de nuestro import.
+    RETURN_TYPES = ("*", "SAMPLER", "STRING")
+    RETURN_NAMES = ("sampler_name", "sampler", "sampler_name_text")
+    FUNCTION = "get_sampler"
+    CATEGORY = "Mika Utilidades/sampling"
+
+    def get_sampler(self, sampler_name):
+        sampler_obj = self._get_sampler_object(sampler_name)
+        return (sampler_name, sampler_obj, str(sampler_name))
+
+    def _get_sampler_object(self, sampler_name):
+        """
+        Obtiene el objeto SAMPLER de forma compatible con diferentes
+        versiones de ComfyUI. En versiones modernas KSampler() requiere
+        más argumentos (steps, device...), por eso NO instanciamos directo.
+        """
+        # Intento 1: KSampler.SAMPLERS como diccionario de funciones/objetos
+        try:
+            samplers_dict = getattr(comfy.samplers.KSampler, "SAMPLERS", {})
+            if sampler_name in samplers_dict:
+                sampler_fn = samplers_dict[sampler_name]
+
+                if callable(sampler_fn):
+                    try:
+                        return sampler_fn()
+                    except TypeError:
+                        return sampler_fn
+                else:
+                    return sampler_fn
+        except Exception as e:
+            print(f"[Mika] Sampler Selector: error desde KSampler.SAMPLERS: {e}")
+
+        # Intento 2: función sampler_object si existe
+        try:
+            if hasattr(comfy.samplers, "sampler_object"):
+                return comfy.samplers.sampler_object(sampler_name)
+        except Exception as e:
+            print(f"[Mika] Sampler Selector: error desde sampler_object: {e}")
+
+        # Intento 3: buscar en otras ubicaciones comunes del módulo
+        try:
+            for attr in ("samplers", "SAMPLERS"):
+                obj = getattr(comfy.samplers, attr, None)
+                if isinstance(obj, dict) and sampler_name in obj:
+                    sampler_fn = obj[sampler_name]
+                    if callable(sampler_fn):
+                        try:
+                            return sampler_fn()
+                        except TypeError:
+                            return sampler_fn
+                    return sampler_fn
+        except Exception as e:
+            print(f"[Mika] Sampler Selector: error desde módulo: {e}")
+
+        # Fallback: devolver el nombre como string
+        print(f"[Mika] Sampler Selector: no se pudo obtener objeto SAMPLER para '{sampler_name}', devolviendo nombre")
+        return sampler_name
+
+
+class SchedulerSelectorMika:
+    """
+    Scheduler Selector-Mika: lista todos los schedulers instalados en
+    ComfyUI y permite seleccionar uno.
+
+    Salidas:
+    - scheduler: nombre del scheduler elegido. Es tipo "*" (wildcard) para
+      que conecte SIEMPRE al input scheduler del KSampler, aunque otras
+      extensiones agreguen schedulers y las listas combo no coincidan.
+    - scheduler_name_text: el nombre del scheduler elegido como STRING.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        names = _mika_scheduler_names()
+        return {
+            "required": {
+                "scheduler_name": (names, {"default": names[0]}),
+            },
+        }
+
+    # CLAVE: la primera salida es "*" (comodín) por la misma razón que en
+    # el Sampler Selector: evita "Invalid connection" por listas combo
+    # desactualizadas entre nuestro nodo y el KSampler.
+    RETURN_TYPES = ("*", "STRING")
+    RETURN_NAMES = ("scheduler", "scheduler_name_text")
+    FUNCTION = "get_scheduler"
+    CATEGORY = "Mika Utilidades/sampling"
+
+    def get_scheduler(self, scheduler_name):
+        # En ComfyUI el scheduler es un string: no hay objeto que crear,
+        # así que no puede fallar como KSampler().
+        return (scheduler_name, str(scheduler_name))
+
+
+class ImageSaveAutoMika:
+    """
+    Image Save Auto-Mika: igual que Image Preview Clean-Mika (preview
+    limpio SIN metadata), pero además guarda AUTOMÁTICAMENTE las imágenes
+    en la ruta local que indiques en save_path. Si la carpeta no existe,
+    la crea. Devuelve la lista de rutas guardadas.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "save_path": ("STRING", {"default": "./ComfyUI/output/mika_autosave", "multiline": False}),
+            },
+            "optional": {
+                "filename_prefix": ("STRING", {"default": "mika_img"}),
+                "format": (["png", "jpg", "webp"], {"default": "png"}),
+                "add_counter": ("BOOLEAN", {"default": True}),
+                "add_timestamp": ("BOOLEAN", {"default": False}),
+                "show_preview": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "INT")
+    RETURN_NAMES = ("saved_paths", "saved_count")
+    OUTPUT_IS_LIST = (True, False)
+    FUNCTION = "save_auto"
+    CATEGORY = "Mika Utilidades/image"
+    OUTPUT_NODE = True
+
+    def save_auto(self, images, save_path, filename_prefix="mika_img",
+                  format="png", add_counter=True, add_timestamp=False,
+                  show_preview=True):
+
+        # Resolver ruta: ~ → home; relativa → relativa al directorio de ComfyUI.
+        save_path = os.path.abspath(os.path.expanduser((save_path or "").strip()))
+        if not save_path:
+            save_path = folder_paths.get_output_directory()
+
+        try:
+            os.makedirs(save_path, exist_ok=True)
+        except Exception as e:
+            print(f"Image Save Auto-Mika: no se pudo crear la carpeta '{save_path}': {e}")
+            save_path = folder_paths.get_output_directory()
+            os.makedirs(save_path, exist_ok=True)
+
+        prefix = (filename_prefix or "mika_img").strip() or "mika_img"
+        ext = (format or "png").strip().lower()
+        if ext not in ("png", "jpg", "webp"):
+            ext = "png"
+
+        save_fmt = {"png": "PNG", "jpg": "JPEG", "webp": "WEBP"}[ext]
+
+        counter = self._next_counter(save_path, prefix, ext) if add_counter else None
+
+        saved_paths = []
+        preview_results = []
+
+        for idx, image in enumerate(images):
+            arr = 255. * image.cpu().numpy()
+            img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+            if ext == "jpg":
+                img = img.convert("RGB")
+
+            name = prefix
+            if add_counter:
+                name += f"_{counter:05d}"
+                counter += 1
+            if add_timestamp:
+                name += f"_{int(time.time())}"
+            if len(images) > 1:
+                name += f"_{idx:02d}"
+            name += f".{ext}"
+
+            filepath = os.path.join(save_path, name)
+            img.save(filepath, save_fmt)
+            saved_paths.append(filepath)
+
+            # Copia limpia para el preview de la UI de ComfyUI (sin metadata).
+            if show_preview:
+                image_hash = hashlib.sha256(image.cpu().numpy().tobytes()).hexdigest()[:16]
+                prev_name = f"mika_preview_{image_hash}_{int(time.time())}.png"
+                prev_path = os.path.join(folder_paths.get_output_directory(), prev_name)
+                Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)).save(prev_path, "PNG")
+                preview_results.append({
+                    "filename": prev_name,
+                    "subfolder": "",
+                    "type": "output",
+                })
+
+        print(f"Image Save Auto-Mika: {len(saved_paths)} imagen(es) guardadas en '{save_path}'.")
+
+        if show_preview and preview_results:
+            return {
+                "ui": {"images": preview_results},
+                "result": (saved_paths, len(saved_paths)),
+            }
+
+        return (saved_paths, len(saved_paths))
+
+    @staticmethod
+    def _next_counter(directory, prefix, ext):
+        """Busca el mayor contador existente en la carpeta y devuelve el siguiente."""
+        max_n = 0
+        pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)")
+        try:
+            for f in os.listdir(directory):
+                if f.lower().endswith(f".{ext}"):
+                    m = pattern.match(f)
+                    if m:
+                        max_n = max(max_n, int(m.group(1)))
+        except Exception:
+            pass
+        return max_n + 1
 
 
 # ======================================================================
@@ -1825,6 +2254,9 @@ NODE_CLASS_MAPPINGS = {
     "FastNodesMuterMika": FastNodesMuterMika,
     "ListUnpackMika": ListUnpackMika,
     "AnimaResolutionsMika": AnimaResolutionsMika,
+    "SamplerSelectorMika": SamplerSelectorMika,
+    "SchedulerSelectorMika": SchedulerSelectorMika,
+    "ImageSaveAutoMika": ImageSaveAutoMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1851,4 +2283,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FastNodesMuterMika": "Fast Nodes Muter-Mika",
     "ListUnpackMika": "List Unpack-Mika",
     "AnimaResolutionsMika": "Anima Resolutions-Mika",
+    "SamplerSelectorMika": "Sampler Selector-Mika",
+    "SchedulerSelectorMika": "Scheduler Selector-Mika",
+    "ImageSaveAutoMika": "Image Save Auto-Mika",
 }
