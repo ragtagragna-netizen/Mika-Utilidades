@@ -1,191 +1,110 @@
-# Mika Utilidades
+# Mika Utilidades — Paquete de nodos para ComfyUI
 
-Paquete de nodos personalizados para ComfyUI:
-
-- **String Selector (Cut First Line)** — selector de líneas de texto, con
-  botón para ir cortando la primera línea.
-- **Score List** — lista de puntajes numerados y renombrables, con filas
-  que se pueden agregar o quitar.
-- **Text Box Editor-Mika** — caja de texto con copiar / seleccionar
-  todo / pegar (pegado real en el cursor, con saltos de línea), disponibles
-  incluso con el nodo colapsado.
-- **Float OutputList** — separa un texto con números en una OutputList de
-  valores FLOAT (compatible con ComfyUI-outputlists-combiner).
-- **⏱ Tiempos de Ejecución** — mide y muestra visualmente, dentro del propio
-  workflow, cuánto tarda en ejecutarse cada nodo.
+Colección personal de nodos de utilidad para ComfyUI: manejo de texto/prompts,
+tags, listas, índices, imágenes, sampling, resoluciones, control de
+bypass/mute y medición de tiempos. Incluye extensiones JavaScript que
+mejoran la UI (botones en headers, filas compactas, panel de tiempos, etc.).
 
 ## Instalación
 
-1. Copia toda la carpeta `Mika-Utilidades` dentro de:
-   `ComfyUI/custom_nodes/`
-2. Reinicia ComfyUI.
+1. Copiá/cloná la carpeta como `ComfyUI/custom_nodes/Mika-Utilidades`.
+2. Los archivos `.js` deben quedar en la carpeta de extensiones web que
+   carga tu ComfyUI (junto al resto de extensiones del paquete).
+3. Reiniciá ComfyUI y recargá el navegador con `Ctrl + F5`.
+
+No requiere dependencias extra: usa lo que ComfyUI ya trae
+(`Pillow`, `requests`, `numpy`, `torch`).
 
 ---
 
-## String Selector (Cut First Line)
+## 📄 String / Texto
 
-Nodo basado en el "String Selector" de Impact-Pack, con un botón extra para
-cortar la primera línea del texto (todo hasta el primer salto de renglón).
+| Nodo | Clase | Descripción |
+|---|---|---|
+| **String Selector (Cut First Line)** | `StringSelectorCut` | Selecciona una línea por índice con wraparound. La UI agrega botón para cortar la primera línea. |
+| **Text Box Editor-Mika** | `TextBoxClipboard` | Caja de texto multilinea con botones de **copiar / seleccionar todo / pegar** en el header (expandido y colapsado). |
+| **Text Box Visor-Mika** | `TextBoxVisor` | Muestra **cualquier tipo de valor** (str, int, float, bool, list, tuple, set, dict, Tensor, ndarray, bytes) como preview legible. Botones en header y preview en vivo por websocket. Lista de hasta 50 elementos. |
+| **Tag Filter-Mika** | `TagFilter` | Conserva solo los primeros N segmentos de un texto separado por comas. |
+| **Text Replace Dynamic-Mika** | `TextReplaceDynamic` | Reemplaza texto con hasta 30 pares find/replace dinámicos. Regex opcional. |
+| **Text Concatenate Dynamic-Mika** | `TextConcatenateDynamic` | Concatena hasta 30 textos con separador configurable y limpieza opcional (`clean_output`). |
+| **Prompt Edit (Loop)-Mika** | `PromptEditLoopMika` | Edición de prompt con memoria entre ejecuciones. Devuelve el prompt anterior y el actual. |
+| **Text Line Selector-Mika** | `TextLineSelectorMika` | Selecciona un rango de líneas como LISTA, con opción de eliminarlas del cuadro (`delete_selected_lines`). |
+| **Text Line Stepper-Mika** | `TextLineStepperMika` | Recorrido **escalonado** de líneas: en cada ejecución avanza al siguiente bloque. `auto_advance=False` fija el rango. Salidas: `selected_lines` (lista) y `current_end` (string). |
 
-Búscalo como **"String Selector (Cut First Line)"** (categoría
-`Mika Utilidades/string`).
+## 🧮 Score / Listas
 
-- **strings**: campo multilinea, igual que el original (una entrada por línea).
-- **select**: índice de la línea a devolver como salida `STRING` (con
-  wraparound, igual que las flechas ◀ ▶ del nodo de Impact-Pack).
-- **✂ Cortar primera línea** (botón nuevo): al hacer click, elimina la
-  primera línea del campo `strings` junto con su salto de línea, dejando el
-  resto del texto listo para seguir trabajando (útil por ejemplo para ir
-  consumiendo un listado línea por línea).
+| Nodo | Clase | Descripción |
+|---|---|---|
+| **Score List** | `ScoreListExtendable` | Filas numeradas nombre+valor (hasta 50) con `num_rows` visible. UI compacta: nombre y valor en la misma fila (valor = 1/3 del ancho). Suma solo las filas visibles. |
+| **Float OutputList** | `FloatOutputList` | Convierte una lista de números en texto a una OutputList de FLOAT (`OUTPUT_IS_LIST`). |
+| **List Unpack-Mika** | `ListUnpackMika` | **Unpack** de listas/tuplas/batches: separa la entrada en hasta 50 salidas según `output_count`. Soporta batches de IMAGE/LATENT (tensor 4D) y listas anidadas. |
 
----
+## 🖼️ Imagen
 
-## Score List
+| Nodo | Clase | Descripción |
+|---|---|---|
+| **Load Image-Mika** | `LoadImageMika` | Carga imagen desde ruta local o URL. Opción RGBA, máscara de alfa, dimensiones y nombre de archivo. |
+| **Image Preview Clean-Mika** | `ImagePreviewCleanMika` | Preview de imagen **sin metadata ni workflow** (PNG limpio). |
+| **Image Save Auto-Mika** | `ImageSaveAutoMika` | Guarda **automáticamente** cada imagen en la ruta local indicada (`save_path`, crea la carpeta si no existe). Prefijo, contador, timestamp, formato (png/jpg/webp) y preview limpio opcional. Salidas: `saved_paths`, `saved_count`. |
 
-Nodo similar al "SCORE" de JPS-Nodes: una fila por cada valor, con flechas
-◀ ▶ para ajustar el número. A diferencia del original, la cantidad de filas
-no es fija: se pueden agregar manualmente con un botón, y **cada fila tiene
-un nombre editable**.
+## 🏷️ Tags
 
-Búscalo como **"Score List"** (categoría `Mika Utilidades/score`).
+| Nodo | Clase | Descripción |
+|---|---|---|
+| **Smart Tag Filter-Mika** | `SmartTagFilterMika` | Filtrado de tags con soporte de pesos `(tag:1.2)`, caracteres escapados (emoticones) y prefijos de color. Modos include/exclude. |
+| **Tag If-Mika** | `TagIfMika` | Condicional por presencia de tags: hasta 6 pares find/output + salida `combined`. |
+| **Tag Remover-Mika** | `TagRemoverMika` | Remueve tags de un prompt (compatible con pesos, paréntesis anidados y escapes). |
 
-> Nota: si ya tenés este nodo puesto en un workflow viejo (con el título
-> "Score List (Extendable)"), el nombre no cambia solo — hay que borrarlo y
-> poner uno nuevo desde el buscador de nodos, o renombrarlo a mano
-> (doble click sobre el título).
+## ️ Tiempos de ejecución
 
-- Empieza con 6 filas (1 a 6), igual que el nodo original.
-- Cada fila tiene un campo de texto arriba del número, con un nombre por
-  defecto ("Opción 1", "Opción 2", ...). Se puede **renombrar con un click**,
-  igual que cualquier otro campo de texto de ComfyUI.
-- **+ Agregar opción**: agrega una fila nueva al final (hasta 50).
-- **− Quitar opción**: quita la última fila (deja mínimo 1). Al ocultarla
-  se reinicia (nombre y valor por defecto), así si se vuelve a agregar
-  arranca limpia.
-- **int_out**: suma de todos los valores de todas las filas presentes.
-- **detalle**: texto con "nombre: valor" de cada fila, uno por renglón —
-  útil para loguear o mostrar el desglose de puntajes.
-- Las filas, sus nombres y sus valores se guardan y se recuperan
-  correctamente al guardar/recargar el workflow.
+| Nodo | Clase | Descripción |
+|---|---|---|
+| **⏱ Tiempos de Ejecución (config)** | `ExecutionTimerConfig` | Configura el panel flotante y las etiquetas de tiempo por nodo (`execution_timer.js`): mostrar/ocultar panel, badges y decimales. Arranca **minimizado**. No hace falta agregarlo: el timer funciona solo; este nodo solo ajusta la configuración. |
 
----
+## 🔀 Utils — Bypass / Mute
 
-## ⏱ Tiempos de Ejecución
+| Nodo | Clase | Descripción |
+|---|---|---|
+| **Fast Groups Bypasser-Mika** | `FastGroupsBypasserMika` | Un toggle BOOLEAN por grupo para hacer **bypass** (mode 4). Controlable desde fuera de subgrafos vía websocket. |
+| **Fast Groups Muter-Mika** | `FastGroupsMuterMika` | Igual pero con **mute** (mode 2 / Never). |
+| **Fast Nodes Bypasser-Mika** | `FastNodesBypasserMika` | Conectás nodos a slots dinámicos y los bypasseás con toggles que aparecen por nodo conectado. Inputs dinámicos y promoción de toggles en subgrafos. |
+| **Fast Nodes Muter-Mika** | `FastNodesMuterMika` | Igual pero con mute. |
 
-Mide automáticamente cuánto tarda cada nodo en ejecutarse, **sin necesidad
-de agregar nada al workflow**: se activa solo apenas instalás el paquete.
+## 🎯 Resolución / Sampling
 
-- **Etiqueta sobre cada nodo**: muestra el tiempo de su última corrida, en
-  la esquina superior derecha del nodo.
-  - 🟢 verde = rápido · 🟡 amarillo = medio · 🔴 rojo = lento (relativo al
-    total de la corrida)
-  - 🔵 azul = resultado tomado de caché (no se volvió a ejecutar)
-- **Panel flotante** (esquina inferior derecha, se puede arrastrar desde el
-  título y colapsar con el botón "–"): lista todos los nodos de la corrida
-  actual ordenados de más lento a más rápido, con una mini barra de tiempo
-  relativo, y el total general abajo de todo.
-- **Contraído**, el panel se achica a solo el título y funciona como un
-  cronómetro en vivo: muestra el tiempo transcurrido de la corrida actual,
-  actualizándose solo mientras el workflow está corriendo, y se detiene al
-  terminar.
-- El puntito junto al título del panel se pone verde mientras el workflow
-  está corriendo, y gris cuando termina.
+| Nodo | Clase | Descripción |
+|---|---|---|
+| **Anima Resolutions-Mika** | `AnimaResolutionsMika` | Resoluciones Anima (base 1024) en varias proporciones. `random=True` sortea resolución en cada ejecución (no cacheable). |
+| **Sampler Selector-Mika** | `SamplerSelectorMika` | Lista **todos los samplers instalados** (nativos + extensiones) con fallback estándar. Salidas: nombre (wildcard, conectable al KSampler), objeto `SAMPLER` y nombre como STRING. |
+| **Scheduler Selector-Mika** | `SchedulerSelectorMika` | Igual pero para **schedulers**: salida wildcard conectable al input `scheduler` del KSampler + nombre como STRING. |
 
-### Nodo de configuración (opcional)
+## 🔢 Índices
 
-Si querés cambiar el comportamiento por defecto, agregá al workflow el nodo
-**"⏱ Tiempos de Ejecución (config)"** (categoría `Mika Utilidades/tiempos`).
-No hace falta conectarlo a nada: se ejecuta igual porque es un nodo de
-salida (`OUTPUT_NODE`).
-
-- `mostrar_panel_flotante`: muestra u oculta el panel de la esquina.
-- `mostrar_etiquetas_en_nodos`: muestra u oculta las etiquetas sobre cada nodo.
-- `decimales`: cantidad de decimales al mostrar segundos (0 a 4).
+| Nodo | Clase | Descripción |
+|---|---|---|
+| **Index Int-Mika** | `IndexIntMika` | Índice INT con 3 modos: **fixed** (fijo), **increment** (suma `step` por ejecución, con `wrap` opcional entre min/max) y **random** (sorteo entre min/max). Salidas: `index` e `index_text`. |
+| **Index Stepper-Mika** | `IndexStepperMika` | Escalona un **rango** `[start..end]` en bloques. `auto_advance` detiene o permite el avance; `loop` + `max_index` para recorrido cíclico. Salidas: `index_list` (LISTA con cada int del rango), `current_start`, `current_end` y `range_text`. |
 
 ---
 
-## Text Box Editor-Mika
+## Extensiones JavaScript incluidas
 
-Caja de texto, con 3 funciones portadas y adaptadas de
-[ComfyUI_Text_Tools_SG (nodo "Text Tools 🪶 Editor-SG")](https://github.com/ShammiG/ComfyUI_Text_Tools_SG):
+| Archivo | Qué hace |
+|---|---|
+| `text_box_editor_mika.js` | Botones copiar/seleccionar/pegar en el header del Editor, dibujo propio colapsado y link estable. |
+| `text_box_visor_mika.js` | Lo mismo para el Visor + preview en vivo por websocket (`mika-visor-preview`). |
+| `text_line_stepper_mika.js` | Refleja el auto-avance en los widgets `start_index`/`end_index` tras cada ejecución. |
+| `fast_nodes_bypasser_mika.js` / `fast_nodes_muter_mika.js` | Inputs dinámicos, toggles por nodo conectado y soporte de subgrafos. |
+| `score_list_mika.js` | Filas compactas del Score List (nombre 2/3 + valor 1/3) y control de filas con `num_rows`. |
+| `execution_timer.js` | Panel flotante arrastrable/colapsable con tiempos por nodo y total, + badges de tiempo sobre cada nodo. |
+| `index_int_mika.js` | Actualiza el widget `value` tras cada ejecución (increment/random). |
+| `index_stepper_mika.js` | Actualiza `start_index`/`end_index` tras cada ejecución del stepper de índices. |
+| `list_unpack_mika.js` | Sincroniza las salidas visibles del List Unpack con `output_count`. |
 
-- 📋 **Copiar** al portapapeles. Si hay texto seleccionado dentro del
-  cuadro, copia solo la selección; si no, copia todo.
-- ☑ **Seleccionar todo** el texto (para copiarlo/cortarlo a mano).
-- 📄 **Pegar** el contenido del portapapeles **en la posición del cursor**
-  (como un paste normal, no reemplaza todo el texto).
+## Notas
 
-Búscalo como **"Text Box Editor-Mika"** (categoría `Mika Utilidades/string`).
-El tipo interno del nodo (`TextBoxClipboard`) no cambió, así que los
-workflows viejos que ya lo tenían siguen funcionando igual, solo que ahora
-el pegado es más confiable.
-
-**La diferencia con el original:** estas 3 funciones siguen disponibles
-**aunque el nodo esté colapsado** — se dibujan como iconos chiquitos al
-lado del título, son clickeables, y al pasar el mouse por encima muestran
-un tooltip con su nombre (igual que los botones del modo expandido, que
-usan el tooltip nativo del navegador). Además, las mismas 3 acciones
-también están siempre en el **menú del click derecho** sobre el nodo,
-como respaldo.
-
-**Arreglos sobre la versión anterior ("Text Box (Portapapeles)"):**
-
-- El botón 📄 **insertaba mal el texto y a veces parecía no hacer nada**:
-  ahora inserta en la posición del cursor y, sobre todo, avisa a ComfyUI
-  del cambio (dispara los eventos `input`/`change` sobre el textarea real),
-  que es lo que hace que el cuadro se actualice y crezca correctamente con
-  texto de varias líneas.
-- Los saltos de línea del texto pegado se normalizan (`\r\n` → `\n`), para
-  que el contenido pegado desde Windows no se vea raro.
-- Si el navegador no permite leer el portapapeles con el botón (pasa en
-  Firefox, o si no se otorgó el permiso), **pegar con Ctrl+V directo en el
-  cuadro de texto siempre funciona igual de bien**, gracias a un listener
-  nativo de "paste" agregado sobre el textarea — no depende de la Clipboard
-  API ni de sus permisos.
-- El botón 📋 ahora también respeta la selección de texto (si seleccionás
-  una parte del texto y copiás, copia solo eso).
-
-> Nota: "Pegar" con el botón usa el portapapeles del sistema a través del
-> navegador — la primera vez puede pedir permiso para leer el portapapeles.
-> Si tu navegador no lo permite, usá Ctrl+V directo sobre el cuadro de
-> texto: funciona siempre, con o sin ese permiso.
-
----
-
-## Float OutputList
-
-Igual que **"String OutputList"** de la extensión de terceros
-[ComfyUI-outputlists-combiner](https://github.com/geroldmeisinger/ComfyUI-outputlists-combiner),
-pero convierte cada elemento a **FLOAT** en vez de dejarlo como texto. Es
-compatible con los demás nodos de esa extensión (`OutputLists Combinations`,
-`XYZ-GridPlot`, `Formatted String`, etc.) porque sigue el mismo patrón de
-OutputList.
-
-Búscalo como **"Float OutputList"** (categoría `Mika Utilidades/lista`).
-
-- **separator**: texto usado para separar los valores (por defecto `\n`,
-  o sea uno por línea).
-- **values**: campo multilinea con un número por línea (o separados por
-  `separator`). Las líneas vacías se ignoran.
-- **value** (`FLOAT` 𝌠): cada número de la lista, uno por vez — los nodos
-  conectados acá se ejecutan una vez por cada valor, en orden.
-- **index** (`INT` 𝌠): posición de cada valor (0, 1, 2, ...).
-- **count** (`INT`): cantidad total de valores.
-
-Si algún renglón no se puede convertir a número, el nodo tira un error
-claro indicando cuál fue.
-
----
-
-## Estructura
-
-```
-Mika-Utilidades/
-├── __init__.py              # registra los nodos y la carpeta web
-├── nodes.py                 # lógica Python de los 5 nodos
-└── web/
-    ├── cut_first_line.js       # botón de cortar primera línea (String Selector)
-    ├── score_list.js           # botones +/- y nombres editables (Score List)
-    ├── text_box_editor_mika.js # copiar/seleccionar/pegar, incluso colapsado
-    └── execution_timer.js      # etiquetas + panel de tiempos de ejecución
-```
+- Todos los nodos aparecen bajo la categoría **`Mika Utilidades/...`**.
+- Los nodos con estado que avanza (steppers, index increment, random) usan
+  `IS_CHANGED = nan` y mensajes `ui` + JS para persistir el avance en el workflow.
+- Si agregás extensiones que suman samplers/schedulers nuevos, reiniciá
+  ComfyUI para que los selectores los detecten.
