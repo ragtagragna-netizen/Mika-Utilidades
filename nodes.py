@@ -2226,6 +2226,163 @@ class ImageSaveAutoMika:
         return max_n + 1
 
 
+class IndexIntMika:
+    """
+    Index Int-Mika: índice INT con 3 modos de operación.
+
+    - fixed:     devuelve siempre el valor de 'value' (cacheable).
+    - increment: devuelve 'value' y luego lo auto-incrementa en 'step'
+                 para la próxima ejecución (con wrap opcional entre
+                 min_value y max_value).
+    - random:    sortea un valor entre min_value y max_value en cada
+                 ejecución.
+
+    El avance se refleja en el widget 'value' vía index_int_mika.js,
+    así el estado queda guardado en el workflow.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mode": (["fixed", "increment", "random"], {"default": "fixed"}),
+                "value": ("INT", {"default": 0, "min": -9999999, "max": 9999999, "step": 1}),
+                "step": ("INT", {"default": 1, "min": -999999, "max": 999999, "step": 1}),
+                "min_value": ("INT", {"default": 0, "min": -9999999, "max": 9999999, "step": 1}),
+                "max_value": ("INT", {"default": 999999, "min": -9999999, "max": 9999999, "step": 1}),
+            },
+            "optional": {
+                "wrap": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("INT", "STRING")
+    RETURN_NAMES = ("index", "index_text")
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/index"
+    OUTPUT_NODE = True
+
+    def run(self, mode, value, step, min_value, max_value, wrap=False):
+        value = int(value)
+        step = int(step)
+        lo = min(int(min_value), int(max_value))
+        hi = max(int(min_value), int(max_value))
+
+        # Lectura defensiva del boolean
+        if isinstance(wrap, str):
+            wrap = wrap.strip().lower() in ("true", "1", "yes", "on")
+        else:
+            wrap = bool(wrap)
+
+        if mode == "random":
+            out = random_module.randint(lo, hi)
+            next_value = out
+
+        elif mode == "increment":
+            out = value
+            nxt = value + step
+            if wrap:
+                if nxt > hi:
+                    nxt = lo
+                elif nxt < lo:
+                    nxt = hi
+            next_value = nxt
+
+        else:  # fixed
+            out = value
+            next_value = value
+
+        return {
+            "ui": {"value": [next_value]},
+            "result": (out, str(out)),
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, mode="fixed", value=0, **kwargs):
+        # fixed → cacheable; increment/random → re-ejecuta siempre.
+        if mode in ("increment", "random"):
+            return float("nan")
+        return value
+
+
+class IndexStepperMika:
+    """
+    Index Stepper-Mika: escalona un rango de índices [start..end] en cada
+    ejecución, igual que el Text Line Stepper pero SIN texto.
+
+    - auto_advance=True:  avanza al siguiente bloque (tamaño = end-start+1).
+    - auto_advance=False: el rango queda FIJO (se detiene el escalonado).
+    - loop=True: al pasarse de max_index vuelve a 0.
+    - max_index: tope superior del rango.
+
+    Salidas:
+    - index_list: LISTA de INT con cada índice entre start y end (inclusive).
+    - current_start / current_end: INT con los límites del bloque actual.
+    - range_text: STRING "4-7".
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 999999}),
+                "end_index": ("INT", {"default": 2, "min": 0, "max": 999999}),
+            },
+            "optional": {
+                "auto_advance": ("BOOLEAN", {"default": True}),
+                "max_index": ("INT", {"default": 999999, "min": 0, "max": 999999, "step": 1}),
+                "loop": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("INT", "INT", "INT", "STRING")
+    RETURN_NAMES = ("index_list", "current_start", "current_end", "range_text")
+    OUTPUT_IS_LIST = (True, False, False, False)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/index"
+    OUTPUT_NODE = True
+
+    def run(self, start_index, end_index,
+            auto_advance=True, max_index=999999, loop=False):
+
+        auto_advance = _mika_coerce_bool(auto_advance)
+        loop = _mika_coerce_bool(loop)
+
+        start = min(int(start_index), int(end_index))
+        end = max(int(start_index), int(end_index))
+        chunk = end - start + 1
+        top = max(0, int(max_index))
+
+        # Clamp del bloque actual al tope.
+        actual_start = min(start, top)
+        actual_end = min(end, top)
+
+        if auto_advance:
+            next_start = actual_end + 1
+            next_end = next_start + chunk - 1
+            if loop and next_start > top:
+                next_start = 0
+                next_end = min(chunk - 1, top)
+        else:
+            # Rango fijo: no tocar los widgets.
+            next_start, next_end = int(start_index), int(end_index)
+
+        # Lista con CADA int del rango seleccionado (inclusive).
+        index_list = list(range(actual_start, actual_end + 1))
+
+        return {
+            "ui": {
+                "start_index": [next_start],
+                "end_index": [next_end],
+            },
+            "result": (index_list, actual_start, actual_end, f"{actual_start}-{actual_end}"),
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
 # ======================================================================
 # MAPPINGS
 # ======================================================================
@@ -2257,6 +2414,8 @@ NODE_CLASS_MAPPINGS = {
     "SamplerSelectorMika": SamplerSelectorMika,
     "SchedulerSelectorMika": SchedulerSelectorMika,
     "ImageSaveAutoMika": ImageSaveAutoMika,
+    "IndexIntMika": IndexIntMika,
+    "IndexStepperMika": IndexStepperMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -2286,4 +2445,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SamplerSelectorMika": "Sampler Selector-Mika",
     "SchedulerSelectorMika": "Scheduler Selector-Mika",
     "ImageSaveAutoMika": "Image Save Auto-Mika",
+    "IndexIntMika": "Index Int-Mika",
+    "IndexStepperMika": "Index Stepper-Mika",
 }
