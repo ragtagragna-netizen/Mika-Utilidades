@@ -1,41 +1,10 @@
 import { app } from "/scripts/app.js";
-import { api } from "/scripts/api.js";
 
 const DEFAULT_VISIBLE = 3;
 const MAX_SLOTS = 30;
 
-let listenerRegistered = false;
-
 app.registerExtension({
   name: "Comfy.TextConcatenateDynamic",
-
-  async setup() {
-    if (listenerRegistered) return;
-    listenerRegistered = true;
-
-    try {
-      api.addEventListener("mika-text-concat-count", (event) => {
-        const data = event.detail;
-
-        if (!data || !data.id) return;
-
-        let node = app.graph.getNodeById(data.id);
-
-        if (!node && !Number.isNaN(Number(data.id))) {
-          node = app.graph.getNodeById(Number(data.id));
-        }
-
-        if (!node || typeof node._mikaSetTextCount !== "function") return;
-
-        node._mikaSetTextCount(data.count);
-      });
-    } catch (e) {
-      console.warn(
-        "TextConcatenateDynamic: no se pudo registrar el listener de websocket.",
-        e
-      );
-    }
-  },
 
   async beforeRegisterNodeDef(nodeType, nodeData, app) {
     if (nodeData.name !== "TextConcatenateDynamic") return;
@@ -93,191 +62,75 @@ app.registerExtension({
       }
     }
 
-    function isTextInput(input) {
-      return Boolean(input && /^text_\d+$/.test(input.name || ""));
+    function sortPool(node) {
+      if (!Array.isArray(node.hiddenTextSlots)) return;
+      node.hiddenTextSlots.sort((a, b) => a.index - b.index);
     }
 
-    function textInputIndex(node, i) {
-      if (!Array.isArray(node.inputs)) return -1;
+    function anchorIndex(node) {
+      if (node.visibleTextSlots.length) {
+        const last =
+          node.visibleTextSlots[node.visibleTextSlots.length - 1].widget;
 
-      return node.inputs.findIndex(
-        (input) => input && input.name === `text_${i}`
-      );
-    }
+        const idx = node.widgets.indexOf(last);
 
-    function sortTextInputs(node) {
-      if (!Array.isArray(node.inputs) || node.inputs.length <= 1) return;
-
-      const textInputs = node.inputs.filter((input) => isTextInput(input));
-
-      if (textInputs.length <= 1) return;
-
-      textInputs.sort((a, b) => {
-        const ai = parseInt((a.name || "").split("_")[1], 10);
-        const bi = parseInt((b.name || "").split("_")[1], 10);
-        return ai - bi;
-      });
-
-      const firstTextIndex = node.inputs.findIndex((input) =>
-        isTextInput(input)
-      );
-
-      const before = [];
-      const after = [];
-
-      node.inputs.forEach((input, idx) => {
-        if (isTextInput(input)) return;
-
-        if (firstTextIndex === -1 || idx < firstTextIndex) {
-          before.push(input);
-        } else {
-          after.push(input);
-        }
-      });
-
-      const newInputs = [...before, ...textInputs, ...after];
-
-      node.inputs = newInputs;
-
-      newInputs.forEach((input, slot) => {
-        if (
-          input &&
-          input.link != null &&
-          node.graph &&
-          node.graph.links
-        ) {
-          const link = node.graph.links[input.link];
-
-          if (link) {
-            link.target_slot = slot;
-          }
-        }
-      });
-    }
-
-    function saveInputLink(node, name) {
-      if (!Array.isArray(node.inputs)) return;
-
-      const idx = node.inputs.findIndex(
-        (input) => input && input.name === name
-      );
-
-      if (idx === -1) return;
-
-      const input = node.inputs[idx];
-
-      if (!input || input.link == null) return;
-
-      const link = node.graph?.links?.[input.link];
-
-      if (!link) return;
-
-      node._mikaSavedLinks = node._mikaSavedLinks || {};
-
-      node._mikaSavedLinks[name] = {
-        origin_id: link.origin_id,
-        origin_slot: link.origin_slot,
-      };
-    }
-
-    function restoreInputLink(node, name) {
-      const saved = node._mikaSavedLinks?.[name];
-
-      if (!saved) return;
-
-      if (!Array.isArray(node.inputs)) return;
-
-      const idx = node.inputs.findIndex(
-        (input) => input && input.name === name
-      );
-
-      if (idx === -1) return;
-
-      const input = node.inputs[idx];
-
-      if (!input) return;
-
-      if (input.link != null) {
-        delete node._mikaSavedLinks[name];
-        return;
+        if (idx !== -1) return idx + 1;
       }
 
-      const origin = node.graph?.getNodeById(saved.origin_id);
+      const sepIdx = node.widgets.indexOf(node.separatorWidget);
 
-      if (!origin) return;
+      if (sepIdx !== -1) return sepIdx;
 
-      try {
-        origin.connect(saved.origin_slot, node, idx);
-        delete node._mikaSavedLinks[name];
-      } catch (e) {
-        /* no-op */
-      }
-    }
-
-    function removeLegacyTextWidgets(node) {
-      if (!Array.isArray(node.widgets)) return;
-
-      for (let i = node.widgets.length - 1; i >= 0; i--) {
-        const w = node.widgets[i];
-
-        if (w && /^text_\d+$/.test(w.name || "")) {
-          node.widgets.splice(i, 1);
-        }
-      }
+      return node.widgets.length;
     }
 
     function setVisibleCount(node, target, syncWidget = true) {
       target = clampCount(target);
 
-      if (!Array.isArray(node.inputs)) {
-        node.inputs = [];
+      if (!Array.isArray(node.visibleTextSlots)) node.visibleTextSlots = [];
+      if (!Array.isArray(node.hiddenTextSlots)) node.hiddenTextSlots = [];
+
+      sortPool(node);
+
+      // Mostrar slots.
+      while (
+        node.visibleTextSlots.length < target &&
+        node.hiddenTextSlots.length > 0
+      ) {
+        const slot = node.hiddenTextSlots.shift();
+
+        node.widgets.splice(anchorIndex(node), 0, slot.widget);
+        node.visibleTextSlots.push(slot);
       }
 
-      removeLegacyTextWidgets(node);
+      // Ocultar slots.
+      while (
+        node.visibleTextSlots.length > target &&
+        node.visibleTextSlots.length > 1
+      ) {
+        const slot = node.visibleTextSlots.pop();
 
-      // Quito inputs por encima del índice deseado.
-      for (let i = MAX_SLOTS; i > target; i--) {
-        const name = `text_${i}`;
-        const idx = node.inputs.findIndex(
-          (input) => input && input.name === name
-        );
+        const idx = node.widgets.indexOf(slot.widget);
 
         if (idx !== -1) {
-          saveInputLink(node, name);
-
-          try {
-            node.removeInput(idx);
-          } catch (e) {
-            /* no-op */
-          }
+          node.widgets.splice(idx, 1);
         }
+
+        node.hiddenTextSlots.push(slot);
       }
 
-      // Creo los inputs faltantes hasta el índice deseado.
-      for (let i = 1; i <= target; i++) {
-        const name = `text_${i}`;
-        const idx = node.inputs.findIndex(
-          (input) => input && input.name === name
-        );
-
-        if (idx === -1) {
-          try {
-            node.addInput(name, "STRING");
-          } catch (e) {
-            /* no-op */
-          }
-        }
-      }
-
-      sortTextInputs(node);
-
-      // Restauro conexiones guardadas si corresponde.
-      for (let i = 1; i <= target; i++) {
-        restoreInputLink(node, `text_${i}`);
-      }
+      sortPool(node);
 
       if (syncWidget && node.countWidget) {
-        node.countWidget.value = target;
+        node._mikaCountChanging = true;
+
+        try {
+          if (node.countWidget.value !== target) {
+            node.countWidget.value = target;
+          }
+        } finally {
+          node._mikaCountChanging = false;
+        }
       }
 
       relayout(node);
@@ -322,7 +175,32 @@ app.registerExtension({
         }
       );
 
-      const initial = clampCount(this.countWidget.value ?? DEFAULT_VISIBLE);
+      const textWidgets = this.widgets.filter(
+        (w) => w.name && /^text_\d+$/.test(w.name)
+      );
+
+      const slots = textWidgets
+        .map((widget) => ({
+          index: parseInt(widget.name.split("_")[1], 10),
+          widget,
+        }))
+        .filter((slot) => !Number.isNaN(slot.index))
+        .sort((a, b) => a.index - b.index);
+
+      const initial = clampCount(
+        this.countWidget ? this.countWidget.value : DEFAULT_VISIBLE
+      );
+
+      this.visibleTextSlots = slots.slice(0, initial);
+      this.hiddenTextSlots = slots.slice(initial);
+
+      for (const slot of this.hiddenTextSlots) {
+        const idx = this.widgets.indexOf(slot.widget);
+
+        if (idx !== -1) {
+          this.widgets.splice(idx, 1);
+        }
+      }
 
       const oldCallback = this.countWidget.callback;
 
@@ -354,22 +232,6 @@ app.registerExtension({
         }
       };
 
-      nodeType.prototype._mikaSetTextCount = function (count) {
-        const c = clampCount(count);
-
-        this._mikaCountChanging = true;
-
-        try {
-          if (this.countWidget && this.countWidget.value !== c) {
-            this.countWidget.value = c;
-          }
-
-          setVisibleCount(this, c, false);
-        } finally {
-          this._mikaCountChanging = false;
-        }
-      };
-
       setVisibleCount(this, initial, true);
 
       return r;
@@ -382,16 +244,22 @@ app.registerExtension({
         ? onSerialize.apply(this, arguments)
         : undefined;
 
-      const visibleInputs = Array.isArray(this.inputs)
-        ? this.inputs.filter((input) => isTextInput(input)).length
-        : 0;
-
       const count = this.countWidget
         ? clampCount(this.countWidget.value)
-        : clampCount(visibleInputs);
+        : this.visibleTextSlots.length;
 
       o.text_count = count;
       o.visibleTextCount = count;
+
+      const vals = {};
+
+      const allSlots = [...this.visibleTextSlots, ...this.hiddenTextSlots];
+
+      for (const slot of allSlots) {
+        vals[`text_${slot.index}`] = slot.widget.value;
+      }
+
+      o.mikaTextValues = vals;
 
       if (this.separatorWidget) {
         o.mikaSeparator = this.separatorWidget.value;
@@ -407,17 +275,52 @@ app.registerExtension({
         ? onConfigure.apply(this, arguments)
         : undefined;
 
-      if (this.separatorWidget && info.mikaSeparator !== undefined) {
-        this.separatorWidget.value = info.mikaSeparator;
+      const allSlots = [...this.visibleTextSlots, ...this.hiddenTextSlots];
+
+      if (info.mikaTextValues) {
+        for (const slot of allSlots) {
+          const key = `text_${slot.index}`;
+          const oldKey = `text_${slot.index}_text`;
+
+          if (key in info.mikaTextValues) {
+            slot.widget.value = info.mikaTextValues[key];
+          } else if (oldKey in info.mikaTextValues) {
+            slot.widget.value = info.mikaTextValues[oldKey];
+          }
+        }
+
+        if (
+          this.separatorWidget &&
+          info.mikaSeparator !== undefined
+        ) {
+          this.separatorWidget.value = info.mikaSeparator;
+        }
+      } else {
+        const sv = info.widgets_values || [];
+
+        for (
+          let i = 0;
+          i < this.widgets.length && i < sv.length;
+          i++
+        ) {
+          this.widgets[i].value = sv[i];
+        }
       }
 
       const target =
         info.text_count ??
         info.visibleTextCount ??
-        this.countWidget?.value ??
-        DEFAULT_VISIBLE;
+        (this.countWidget ? this.countWidget.value : DEFAULT_VISIBLE);
 
       setVisibleCount(this, target, true);
+
+      setTimeout(() => {
+        try {
+          setVisibleCount(this, target, true);
+        } catch (e) {
+          /* no-op */
+        }
+      }, 0);
 
       return r;
     };

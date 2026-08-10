@@ -785,22 +785,24 @@ DEFAULT_CONCAT_SLOTS = 3
 
 class TextConcatenateDynamic:
     """
-    Text Concatenate Dynamic-Mika: concatena múltiples textos con separador
-    configurable. Slots dinámicos controlados por text_count.
+    Text Concatenate Dynamic-Mika.
 
-    Los slots text_i son INPUTS REALES para poder linkearlos.
+    Slots dinámicos controlados por text_count.
+
+    Cada slot es una caja de texto editable:
+    - text_1
+    - text_2
+    - text_3
+    ...
 
     separator acepta escapes:
-    - \n  → salto de línea
-    - \t  → tabulación
-    - \r  → retorno de carro
-    - \r\n → salto de línea Windows
-    - /n  → alias opcional para salto de línea
+    - \n
+    - \t
+    - \r
+    - \r\n
+    - /n alias opcional
 
-    clean_output=True  → recorta textos, descarta vacíos y limpia duplicados.
-    clean_output=False → concatena tal cual.
-
-    Si hay un solo texto no vacío, igualmente agrega el separador al final.
+    clean_output=True limpia textos vacíos, espacios y duplicados.
     """
 
     @staticmethod
@@ -827,7 +829,8 @@ class TextConcatenateDynamic:
 
     @staticmethod
     def _coerce_bool(value, default=False):
-        value = TextConcatenateDynamic._scalar(value, default)
+        if isinstance(value, (list, tuple)):
+            value = value[0] if len(value) > 0 else default
 
         if isinstance(value, bool):
             return value
@@ -859,12 +862,7 @@ class TextConcatenateDynamic:
         optional = {}
 
         for i in range(1, MAX_CONCAT_SLOTS + 1):
-            optional[f"text_{i}"] = (
-                "STRING",
-                {
-                    "forceInput": True,
-                },
-            )
+            optional[f"text_{i}"] = ("STRING", {"default": "", "multiline": False})
 
         optional["separator"] = ("STRING", {"default": ", "})
         optional["clean_output"] = ("BOOLEAN", {"default": True})
@@ -883,9 +881,6 @@ class TextConcatenateDynamic:
         return {
             "required": {},
             "optional": optional,
-            "hidden": {
-                "unique_id": "UNIQUE_ID",
-            },
         }
 
     RETURN_TYPES = ("STRING",)
@@ -898,10 +893,8 @@ class TextConcatenateDynamic:
         separator=", ",
         clean_output=True,
         text_count=DEFAULT_CONCAT_SLOTS,
-        unique_id=None,
         **kwargs,
     ):
-        unique_id = self._scalar(unique_id, None)
         separator = self._scalar(separator, "")
         text_count = self._scalar(text_count, DEFAULT_CONCAT_SLOTS)
         clean_output = self._coerce_bool(clean_output, True)
@@ -913,35 +906,23 @@ class TextConcatenateDynamic:
 
         count = max(1, min(MAX_CONCAT_SLOTS, count))
 
-        if (
-            PromptServer is not None
-            and PromptServer.instance is not None
-            and unique_id is not None
-        ):
-            PromptServer.instance.send_sync(
-                "mika-text-concat-count",
-                {
-                    "id": str(unique_id),
-                    "count": count,
-                },
-            )
-
         sep = self._decode_separator(separator)
-
-        keys = sorted(
-            (k for k in kwargs if re.fullmatch(r"text_\d+", k)),
-            key=lambda k: int(k.split("_")[1]),
-        )
 
         texts = []
 
-        for key in keys:
-            idx = int(key.split("_")[1])
+        for i in range(1, count + 1):
+            value = None
 
-            if idx > count:
-                break
+            # Compatibilidad con versiones previas que hayan usado text_i_text.
+            for key in (f"text_{i}", f"text_{i}_text"):
+                if key in kwargs:
+                    candidate = self._scalar(kwargs.get(key), None)
+                    if candidate is not None:
+                        value = candidate
+                        break
 
-            value = self._scalar(kwargs.get(key, ""), "")
+            if value is None:
+                value = ""
 
             if not isinstance(value, str):
                 value = str(value)
@@ -969,7 +950,7 @@ class TextConcatenateDynamic:
 
                 result = re.sub(r" {2,}", " ", result)
 
-        # Si hay un solo texto, igualmente aplico el separador al final.
+        # Con un solo texto también aplico el separador.
         if len(texts) == 1 and sep:
             result = result + sep
 
