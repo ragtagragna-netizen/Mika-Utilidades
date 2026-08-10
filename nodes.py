@@ -648,13 +648,24 @@ class TagFilter:
 
 
 MAX_REPLACES = 30
+DEFAULT_REPLACES_VISIBLE = 3
 
 
 class TextReplaceDynamic:
     """
     Text Replace Dynamic-Mika: reemplaza texto con pares dinámicos
-    find/replace (botones +/-, hasta 30 pares). Regex opcional.
+    find/replace, controlados por pair_count.
+
+    - text entra por SLOT (forceInput), no como caja de texto.
+    - pair_count controla cuántos pares find/replace se usan.
+    - find_i y replace_i mantienen el mismo comportamiento.
     """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -664,13 +675,26 @@ class TextReplaceDynamic:
             optional[f"find_{i}"] = ("STRING", {"default": "", "multiline": False})
             optional[f"replace_{i}"] = ("STRING", {"default": "", "multiline": False})
 
+        optional["use_regex"] = ("BOOLEAN", {"default": False})
+
+        optional["pair_count"] = (
+            "INT",
+            {
+                "default": DEFAULT_REPLACES_VISIBLE,
+                "min": 1,
+                "max": MAX_REPLACES,
+                "step": 1,
+                "display": "number",
+            },
+        )
+
         return {
             "required": {
-                "text": ("STRING", {"multiline": True, "default": ""}),
+                "text": ("STRING", {"forceInput": True}),
             },
-            "optional": {
-                **optional,
-                "use_regex": ("BOOLEAN", {"default": False}),
+            "optional": optional,
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -679,18 +703,67 @@ class TextReplaceDynamic:
     FUNCTION = "doit"
     CATEGORY = "Mika Utilidades/string"
 
-    def doit(self, text, use_regex=False, **kwargs):
-        result = text or ""
+    def doit(
+        self,
+        text="",
+        use_regex=False,
+        pair_count=DEFAULT_REPLACES_VISIBLE,
+        unique_id=None,
+        **kwargs,
+    ):
+        text = self._scalar(text, "")
+
+        if not isinstance(text, str):
+            text = str(text)
+
+        use_regex = self._scalar(use_regex, False)
+        use_regex = _mika_coerce_bool(use_regex)
+
+        pair_count = self._scalar(pair_count, DEFAULT_REPLACES_VISIBLE)
+
+        try:
+            count = int(pair_count)
+        except Exception:
+            count = DEFAULT_REPLACES_VISIBLE
+
+        count = max(1, min(MAX_REPLACES, count))
+
+        unique_id = self._scalar(unique_id, None)
+
+        if (
+            PromptServer is not None
+            and PromptServer.instance is not None
+            and unique_id is not None
+        ):
+            PromptServer.instance.send_sync(
+                "mika-text-replace-count",
+                {
+                    "id": str(unique_id),
+                    "count": count,
+                },
+            )
+
+        result = text
 
         keys = sorted(
-            (k for k in kwargs if k.startswith("find_")),
-            key=lambda k: int(k.split("_")[1])
+            (k for k in kwargs if re.fullmatch(r"find_\d+", k)),
+            key=lambda k: int(k.split("_")[1]),
         )
 
         for find_key in keys:
-            idx = find_key.split("_")[1]
-            find_str = kwargs.get(find_key, "")
-            replace_str = kwargs.get(f"replace_{idx}", "")
+            idx = int(find_key.split("_")[1])
+
+            if idx > count:
+                break
+
+            find_str = self._scalar(kwargs.get(find_key, ""), "")
+            replace_str = self._scalar(kwargs.get(f"replace_{idx}", ""), "")
+
+            if not isinstance(find_str, str):
+                find_str = str(find_str)
+
+            if not isinstance(replace_str, str):
+                replace_str = str(replace_str)
 
             if not find_str:
                 continue
@@ -707,32 +780,111 @@ class TextReplaceDynamic:
 
 
 MAX_CONCAT_SLOTS = 30
+DEFAULT_CONCAT_SLOTS = 3
 
 
 class TextConcatenateDynamic:
     """
     Text Concatenate Dynamic-Mika: concatena múltiples textos con separador
-    configurable. Slots dinámicos (hasta 30) con botones +/-.
+    configurable. Slots dinámicos controlados por text_count.
 
-    clean_output=True  → recorta cada texto, descarta vacíos, colapsa
-                          separadores duplicados y espacios múltiples.
+    Los slots text_i son INPUTS REALES para poder linkearlos.
 
-    clean_output=False → concatena tal cual, sin modificar nada.
+    separator acepta escapes:
+    - \n  → salto de línea
+    - \t  → tabulación
+    - \r  → retorno de carro
+    - \r\n → salto de línea Windows
+    - /n  → alias opcional para salto de línea
+
+    clean_output=True  → recorta textos, descarta vacíos y limpia duplicados.
+    clean_output=False → concatena tal cual.
+
+    Si hay un solo texto no vacío, igualmente agrega el separador al final.
     """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _decode_separator(separator):
+        separator = TextConcatenateDynamic._scalar(separator, "")
+
+        if not isinstance(separator, str):
+            separator = str(separator)
+
+        return (
+            separator
+            .replace("\\r\\n", "\n")
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace("\\r", "\r")
+            .replace("/n", "\n")
+        )
+
+    @staticmethod
+    def _coerce_bool(value, default=False):
+        value = TextConcatenateDynamic._scalar(value, default)
+
+        if isinstance(value, bool):
+            return value
+
+        if value is None:
+            return default
+
+        if isinstance(value, (int, float)):
+            return value != 0
+
+        if isinstance(value, str):
+            return value.strip().lower() in (
+                "true",
+                "1",
+                "yes",
+                "on",
+                "si",
+                "sí",
+                "enabled",
+            )
+
+        try:
+            return bool(value)
+        except Exception:
+            return default
 
     @classmethod
     def INPUT_TYPES(cls):
         optional = {}
 
         for i in range(1, MAX_CONCAT_SLOTS + 1):
-            optional[f"text_{i}"] = ("STRING", {"default": "", "multiline": False})
+            optional[f"text_{i}"] = (
+                "STRING",
+                {
+                    "forceInput": True,
+                },
+            )
+
+        optional["separator"] = ("STRING", {"default": ", "})
+        optional["clean_output"] = ("BOOLEAN", {"default": True})
+
+        optional["text_count"] = (
+            "INT",
+            {
+                "default": DEFAULT_CONCAT_SLOTS,
+                "min": 1,
+                "max": MAX_CONCAT_SLOTS,
+                "step": 1,
+                "display": "number",
+            },
+        )
 
         return {
             "required": {},
-            "optional": {
-                **optional,
-                "separator": ("STRING", {"default": ", "}),
-                "clean_output": ("BOOLEAN", {"default": True}),
+            "optional": optional,
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -741,24 +893,58 @@ class TextConcatenateDynamic:
     FUNCTION = "doit"
     CATEGORY = "Mika Utilidades/string"
 
-    def doit(self, separator=", ", clean_output=True, **kwargs):
-        if isinstance(clean_output, str):
-            clean_output = clean_output.strip().lower() in ("true", "1", "yes", "on")
-        else:
-            clean_output = bool(clean_output)
+    def doit(
+        self,
+        separator=", ",
+        clean_output=True,
+        text_count=DEFAULT_CONCAT_SLOTS,
+        unique_id=None,
+        **kwargs,
+    ):
+        unique_id = self._scalar(unique_id, None)
+        separator = self._scalar(separator, "")
+        text_count = self._scalar(text_count, DEFAULT_CONCAT_SLOTS)
+        clean_output = self._coerce_bool(clean_output, True)
+
+        try:
+            count = int(text_count)
+        except Exception:
+            count = DEFAULT_CONCAT_SLOTS
+
+        count = max(1, min(MAX_CONCAT_SLOTS, count))
+
+        if (
+            PromptServer is not None
+            and PromptServer.instance is not None
+            and unique_id is not None
+        ):
+            PromptServer.instance.send_sync(
+                "mika-text-concat-count",
+                {
+                    "id": str(unique_id),
+                    "count": count,
+                },
+            )
+
+        sep = self._decode_separator(separator)
 
         keys = sorted(
-            (k for k in kwargs if k.startswith("text_")),
-            key=lambda k: int(k.split("_")[1])
+            (k for k in kwargs if re.fullmatch(r"text_\d+", k)),
+            key=lambda k: int(k.split("_")[1]),
         )
 
         texts = []
 
         for key in keys:
-            value = kwargs.get(key, "")
+            idx = int(key.split("_")[1])
 
-            if value is None:
-                value = ""
+            if idx > count:
+                break
+
+            value = self._scalar(kwargs.get(key, ""), "")
+
+            if not isinstance(value, str):
+                value = str(value)
 
             if clean_output:
                 value = value.strip()
@@ -768,15 +954,24 @@ class TextConcatenateDynamic:
 
             texts.append(value)
 
-        result = separator.join(texts)
+        if not texts:
+            result = ""
+        elif len(texts) == 1:
+            result = texts[0]
+        else:
+            result = sep.join(texts)
 
-        if clean_output and result:
-            if separator:
-                parts = [p.strip() for p in result.split(separator)]
-                parts = [p for p in parts if p]
-                result = separator.join(parts)
+            if clean_output and result:
+                if sep:
+                    parts = [p.strip() for p in result.split(sep)]
+                    parts = [p for p in parts if p != ""]
+                    result = sep.join(parts)
 
-            result = re.sub(r' {2,}', ' ', result)
+                result = re.sub(r" {2,}", " ", result)
+
+        # Si hay un solo texto, igualmente aplico el separador al final.
+        if len(texts) == 1 and sep:
+            result = result + sep
 
         return (result,)
 

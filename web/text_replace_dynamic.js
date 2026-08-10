@@ -1,167 +1,383 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 
 const DEFAULT_VISIBLE = 3;
+const MAX_PAIRS = 30;
+
+let listenerRegistered = false;
 
 app.registerExtension({
   name: "Comfy.TextReplaceDynamic",
+
+  async setup() {
+    if (listenerRegistered) return;
+    listenerRegistered = true;
+
+    try {
+      api.addEventListener("mika-text-replace-count", (event) => {
+        const data = event.detail;
+
+        if (!data || !data.id) return;
+
+        let node = app.graph.getNodeById(data.id);
+
+        if (!node && !Number.isNaN(Number(data.id))) {
+          node = app.graph.getNodeById(Number(data.id));
+        }
+
+        if (!node || typeof node._mikaSetPairCount !== "function") return;
+
+        node._mikaSetPairCount(data.count);
+      });
+    } catch (e) {
+      console.warn(
+        "TextReplaceDynamic: no se pudo registrar el listener de websocket.",
+        e
+      );
+    }
+  },
+
   async beforeRegisterNodeDef(nodeType, nodeData, app) {
     if (nodeData.name !== "TextReplaceDynamic") return;
 
-    function resize(node) {
-      const size = node.computeSize();
-      node.setSize([node.size[0], size[1]]);
-      node.setDirtyCanvas(true, true);
+    function clampCount(value) {
+      if (Array.isArray(value)) {
+        value = value.length ? value[0] : DEFAULT_VISIBLE;
+      }
+
+      let n = parseInt(value, 10);
+
+      if (Number.isNaN(n)) {
+        n = DEFAULT_VISIBLE;
+      }
+
+      return Math.max(1, Math.min(MAX_PAIRS, n));
+    }
+
+    function relayout(node) {
+      try {
+        const size = node.computeSize();
+        node.setSize([node.size[0], size[1]]);
+      } catch (e) {
+        /* no-op */
+      }
+
+      try {
+        if (typeof node.onResize === "function") node.onResize(node.size);
+      } catch (e) {
+        /* no-op */
+      }
+
+      try {
+        node.setDirtyCanvas(true, true);
+      } catch (e) {
+        /* no-op */
+      }
+
+      try {
+        app.graph?.setDirtyCanvas?.(true, true);
+      } catch (e) {
+        /* no-op */
+      }
+
+      try {
+        app.canvas?.setDirty?.(true, true);
+      } catch (e) {
+        /* no-op */
+      }
+
+      try {
+        node.graph?.change?.();
+      } catch (e) {
+        /* no-op */
+      }
     }
 
     function sortPool(node) {
       node.hiddenReplacePairs.sort((a, b) => a.index - b.index);
     }
 
-    // FIX: los pares nuevos se insertan ANTES de use_regex, así el
-    // checkbox queda siempre al final de los pares visibles y se
-    // mueve con los botones +/-.
     function anchorIndex(node) {
-      const regexIdx = node.widgets.indexOf(node.useRegexWidget);
-      if (regexIdx !== -1) return regexIdx;
-      const btnIdx = node.widgets.indexOf(node.addButtonWidget);
-      return btnIdx === -1 ? node.widgets.length : btnIdx;
-    }
+      if (node.visibleReplacePairs.length) {
+        const last =
+          node.visibleReplacePairs[node.visibleReplacePairs.length - 1].replace;
 
-    function showNext(node) {
-      sortPool(node);
-      const pair = node.hiddenReplacePairs.shift();
-      if (!pair) return null;
-      node.widgets.splice(anchorIndex(node), 0, pair.find, pair.replace);
-      node.visibleReplacePairs.push(pair);
-      return pair;
-    }
+        const idx = node.widgets.indexOf(last);
 
-    function hideLast(node) {
-      if (node.visibleReplacePairs.length <= 1) return;
-      const pair = node.visibleReplacePairs.pop();
-      for (const w of [pair.find, pair.replace]) {
-        const idx = node.widgets.indexOf(w);
-        if (idx !== -1) node.widgets.splice(idx, 1);
+        if (idx !== -1) return idx + 1;
       }
-      pair.find.value = "";
-      pair.replace.value = "";
-      node.hiddenReplacePairs.push(pair);
+
+      const regexIdx = node.widgets.indexOf(node.useRegexWidget);
+
+      if (regexIdx !== -1) return regexIdx;
+
+      const countIdx = node.widgets.indexOf(node.pairCountWidget);
+
+      if (countIdx !== -1) return countIdx;
+
+      return node.widgets.length;
+    }
+
+    function setVisibleCount(node, target, syncWidget = true) {
+      target = clampCount(target);
+
+      sortPool(node);
+
+      while (
+        node.visibleReplacePairs.length < target &&
+        node.hiddenReplacePairs.length > 0
+      ) {
+        const pair = node.hiddenReplacePairs.shift();
+
+        node.widgets.splice(anchorIndex(node), 0, pair.find, pair.replace);
+        node.visibleReplacePairs.push(pair);
+      }
+
+      while (
+        node.visibleReplacePairs.length > target &&
+        node.visibleReplacePairs.length > 1
+      ) {
+        const pair = node.visibleReplacePairs.pop();
+
+        for (const w of [pair.find, pair.replace]) {
+          const idx = node.widgets.indexOf(w);
+
+          if (idx !== -1) {
+            node.widgets.splice(idx, 1);
+          }
+        }
+
+        node.hiddenReplacePairs.push(pair);
+      }
+
+      sortPool(node);
+
+      if (syncWidget && node.pairCountWidget) {
+        node.pairCountWidget.value = node.visibleReplacePairs.length;
+      }
+
+      relayout(node);
     }
 
     const onNodeCreated = nodeType.prototype.onNodeCreated;
+
     nodeType.prototype.onNodeCreated = function () {
-      const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
+      const r = onNodeCreated
+        ? onNodeCreated.apply(this, arguments)
+        : undefined;
 
-      this.useRegexWidget = this.widgets.find((w) => w.name === "use_regex") ?? null;
+      this.useRegexWidget =
+        this.widgets.find((w) => w.name === "use_regex") ?? null;
 
-      const findWidgets = this.widgets.filter((w) => w.name.startsWith("find_"));
+      this.pairCountWidget =
+        this.widgets.find((w) => w.name === "pair_count") ?? null;
+
+      if (!this.pairCountWidget) {
+        this.pairCountWidget = this.addWidget(
+          "number",
+          "pair_count",
+          DEFAULT_VISIBLE,
+          null,
+          {
+            min: 1,
+            max: MAX_PAIRS,
+            step: 1,
+          }
+        );
+      }
+
+      this.pairCountWidget.label = "pair_count";
+
+      this.pairCountWidget.options = Object.assign(
+        {},
+        this.pairCountWidget.options,
+        {
+          min: 1,
+          max: MAX_PAIRS,
+          step: 1,
+        }
+      );
+
+      const findWidgets = this.widgets.filter(
+        (w) => w.name && /^find_\d+$/.test(w.name)
+      );
+
       const pairs = findWidgets
         .map((findWidget) => {
           const index = parseInt(findWidget.name.split("_")[1], 10);
-          const replaceWidget = this.widgets.find((w) => w.name === `replace_${index}`);
-          return replaceWidget ? { index, find: findWidget, replace: replaceWidget } : null;
+
+          const replaceWidget = this.widgets.find(
+            (w) => w.name === `replace_${index}`
+          );
+
+          return replaceWidget
+            ? {
+                index,
+                find: findWidget,
+                replace: replaceWidget,
+              }
+            : null;
         })
         .filter(Boolean)
         .sort((a, b) => a.index - b.index);
 
-      this.visibleReplacePairs = pairs.slice(0, DEFAULT_VISIBLE);
-      this.hiddenReplacePairs = pairs.slice(DEFAULT_VISIBLE);
+      const initial = clampCount(
+        this.pairCountWidget.value ?? DEFAULT_VISIBLE
+      );
+
+      this.visibleReplacePairs = pairs.slice(0, initial);
+      this.hiddenReplacePairs = pairs.slice(initial);
 
       for (const pair of this.hiddenReplacePairs) {
         for (const w of [pair.find, pair.replace]) {
           const idx = this.widgets.indexOf(w);
-          if (idx !== -1) this.widgets.splice(idx, 1);
+
+          if (idx !== -1) {
+            this.widgets.splice(idx, 1);
+          }
         }
       }
 
-      this.addButtonWidget = this.addWidget("button", "+ Agregar reemplazo", null, () => {
-        showNext(this);
-        resize(this);
-      });
+      const oldCallback = this.pairCountWidget.callback;
 
-      this.removeButtonWidget = this.addWidget("button", "− Quitar reemplazo", null, () => {
-        hideLast(this);
-        resize(this);
-      });
+      this._mikaPairChanging = false;
 
-      resize(this);
+      this.pairCountWidget.callback = (value) => {
+        if (oldCallback) {
+          try {
+            oldCallback(value);
+          } catch (e) {
+            /* no-op */
+          }
+        }
+
+        if (this._mikaPairChanging) return;
+
+        this._mikaPairChanging = true;
+
+        try {
+          const count = clampCount(value);
+
+          if (this.pairCountWidget.value !== count) {
+            this.pairCountWidget.value = count;
+          }
+
+          setVisibleCount(this, count, false);
+        } finally {
+          this._mikaPairChanging = false;
+        }
+      };
+
+      nodeType.prototype._mikaSetPairCount = function (count) {
+        const c = clampCount(count);
+
+        this._mikaPairChanging = true;
+
+        try {
+          if (this.pairCountWidget && this.pairCountWidget.value !== c) {
+            this.pairCountWidget.value = c;
+          }
+
+          setVisibleCount(this, c, false);
+        } finally {
+          this._mikaPairChanging = false;
+        }
+      };
+
+      setVisibleCount(this, initial, true);
+
       return r;
     };
 
     const onSerialize = nodeType.prototype.onSerialize;
+
     nodeType.prototype.onSerialize = function (o) {
-      const r = onSerialize ? onSerialize.apply(this, arguments) : undefined;
-      o.visibleReplaceCount = this.visibleReplacePairs.length;
-      // Guardado por nombre: red de seguridad para que los valores no
-      // se desordenen al recargar (independiente del orden de widgets).
+      const r = onSerialize
+        ? onSerialize.apply(this, arguments)
+        : undefined;
+
+      sortPool(this);
+
+      const count = this.pairCountWidget
+        ? clampCount(this.pairCountWidget.value)
+        : this.visibleReplacePairs.length;
+
+      o.pair_count = count;
+      o.visibleReplaceCount = count;
+
       const vals = {};
-      for (const pair of this.visibleReplacePairs) {
+
+      const allPairs = [
+        ...this.visibleReplacePairs,
+        ...this.hiddenReplacePairs,
+      ];
+
+      for (const pair of allPairs) {
         vals[`find_${pair.index}`] = pair.find.value;
         vals[`replace_${pair.index}`] = pair.replace.value;
       }
+
       o.mikaReplaceValues = vals;
-      if (this.useRegexWidget) o.mikaUseRegex = this.useRegexWidget.value;
+
+      if (this.useRegexWidget) {
+        o.mikaUseRegex = this.useRegexWidget.value;
+      }
+
       return r;
     };
 
     const onConfigure = nodeType.prototype.onConfigure;
+
     nodeType.prototype.onConfigure = function (info) {
-      const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
-
-      const target = info.visibleReplaceCount ?? DEFAULT_VISIBLE;
-      while (this.visibleReplacePairs.length < target && this.hiddenReplacePairs.length > 0) {
-        showNext(this);
-      }
-      while (this.visibleReplacePairs.length > target && this.visibleReplacePairs.length > 1) {
-        hideLast(this);
-      }
-
-      const sv = info.widgets_values || [];
+      const r = onConfigure
+        ? onConfigure.apply(this, arguments)
+        : undefined;
 
       if (info.mikaReplaceValues) {
-        // Formato nuevo: restaurar por nombre.
-        for (const pair of this.visibleReplacePairs) {
-          if (`find_${pair.index}` in info.mikaReplaceValues) {
-            pair.find.value = info.mikaReplaceValues[`find_${pair.index}`];
+        const allPairs = [
+          ...this.visibleReplacePairs,
+          ...this.hiddenReplacePairs,
+        ];
+
+        for (const pair of allPairs) {
+          const findKey = `find_${pair.index}`;
+          const replaceKey = `replace_${pair.index}`;
+
+          if (findKey in info.mikaReplaceValues) {
+            pair.find.value = info.mikaReplaceValues[findKey];
           }
-          if (`replace_${pair.index}` in info.mikaReplaceValues) {
-            pair.replace.value = info.mikaReplaceValues[`replace_${pair.index}`];
+
+          if (replaceKey in info.mikaReplaceValues) {
+            pair.replace.value = info.mikaReplaceValues[replaceKey];
           }
         }
-        if (this.useRegexWidget && info.mikaUseRegex !== undefined) {
+
+        if (
+          this.useRegexWidget &&
+          info.mikaUseRegex !== undefined
+        ) {
           this.useRegexWidget.value = info.mikaUseRegex;
         }
-      } else if (sv.length) {
-        // Archivos guardados con la versión con bug: el checkbox quedaba
-        // en el índice 7 ([text, p1..p3, use_regex, p4..]). Detectarlo y
-        // reasignar bien para no perder valores.
-        const oldLayout = sv.length > 7 && typeof sv[7] === "boolean";
-        if (oldLayout) {
-          this.widgets[0].value = sv[0];
-          if (this.useRegexWidget) this.useRegexWidget.value = sv[7];
-          let s = 1;
-          for (const pair of this.visibleReplacePairs) {
-            if (pair.index <= 3) {
-              pair.find.value = sv[s++] ?? "";
-              pair.replace.value = sv[s++] ?? "";
-            }
-          }
-          s = 8;
-          for (const pair of this.visibleReplacePairs) {
-            if (pair.index > 3) {
-              pair.find.value = sv[s++] ?? "";
-              pair.replace.value = sv[s++] ?? "";
-            }
-          }
-        } else {
-          // Layout nuevo: [text, pares..., use_regex]
-          for (let i = 0; i < this.widgets.length && i < sv.length; i++) {
-            this.widgets[i].value = sv[i];
-          }
+      } else {
+        const sv = info.widgets_values || [];
+
+        for (
+          let i = 0;
+          i < this.widgets.length && i < sv.length;
+          i++
+        ) {
+          this.widgets[i].value = sv[i];
         }
       }
 
-      resize(this);
+      const target =
+        info.pair_count ??
+        info.visibleReplaceCount ??
+        this.pairCountWidget?.value ??
+        DEFAULT_VISIBLE;
+
+      setVisibleCount(this, target, true);
+
       return r;
     };
   },
