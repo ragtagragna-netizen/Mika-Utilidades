@@ -350,6 +350,24 @@ app.registerExtension({
     if (nodeData.name !== "TextBoxVisor") return;
     const FLAG = "_mikaIsTextBoxVisor";
 
+    // FIX LINK: el cable usa NUESTRO ancho cacheado (constante), así el
+    // ancla coincide con la barra dibujada y no oscila nunca. Se define UNA
+    // sola vez: re-envolverlo dentro de onDrawCollapsed acumulaba una capa
+    // por redibujado y degradaba el rendimiento.
+    const origGetConnectionPos = nodeType.prototype.getConnectionPos;
+    nodeType.prototype.getConnectionPos = function (is_input, slot_number, out) {
+      const res = origGetConnectionPos
+        ? origGetConnectionPos.apply(this, arguments)
+        : (out || [0, 0]);
+      if (this.flags?.collapsed && !is_input && this._mikaCollapsedWidth && res) {
+        const LG = window.LiteGraph ?? {};
+        const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
+        res[0] = this.pos[0] + this._mikaCollapsedWidth;
+        res[1] = this.pos[1] - titleHeight * 0.5;
+      }
+      return res;
+    };
+
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
@@ -434,22 +452,6 @@ app.registerExtension({
       return true; // nosotros dibujamos todo; LiteGraph no pisa nada.
     };
 
-    // FIX LINK definitivo: el cable usa NUESTRO ancho cacheado (constante),
-    // así el ancla coincide con la barra dibujada y no oscila nunca.
-    const origGetConnectionPos = nodeType.prototype.getConnectionPos;
-    nodeType.prototype.getConnectionPos = function (is_input, slot_number, out) {
-      const res = origGetConnectionPos
-        ? origGetConnectionPos.apply(this, arguments)
-        : (out || [0, 0]);
-      if (this.flags?.collapsed && !is_input && this._mikaCollapsedWidth && res) {
-        const LG = window.LiteGraph ?? {};
-        const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
-        res[0] = this.pos[0] + this._mikaCollapsedWidth;
-        res[1] = this.pos[1] - titleHeight * 0.5;
-      }
-      return res;
-    };
-	
     const origGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
     nodeType.prototype.getExtraMenuOptions = function (_graph, options) {
       const r = origGetExtraMenuOptions ? origGetExtraMenuOptions.apply(this, arguments) : undefined;

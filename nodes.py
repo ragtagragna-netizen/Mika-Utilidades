@@ -104,7 +104,7 @@ def _parse_smart_tag(tag_text, case_sensitive=False):
                 try:
                     weight = float(parts[1])
                     base_tag = parts[0].strip()
-                    normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
+                    normalized = base_tag.lower().replace(' ', '_').replace('-', '_') if not case_sensitive else base_tag.replace(' ', '_').replace('-', '_')
 
                     return {
                         'original': original,
@@ -121,7 +121,7 @@ def _parse_smart_tag(tag_text, case_sensitive=False):
     paren_pairs = min(opening_parens, closing_parens)
     weight = 1.0 + (paren_pairs * 0.1) if paren_pairs > 0 else 1.0
     base_tag = stripped
-    normalized = base_tag.lower().replace(' ', '_') if not case_sensitive else base_tag.replace(' ', '_')
+    normalized = base_tag.lower().replace(' ', '_').replace('-', '_') if not case_sensitive else base_tag.replace(' ', '_').replace('-', '_')
 
     return {
         'original': original,
@@ -141,21 +141,29 @@ def _parse_prompt(prompt, case_sensitive=False):
     tags = []
     current = ''
     paren_depth = 0
+    escaped = False
 
     for char in prompt:
-        if char == '(':
+        if escaped:
+            current += char
+            escaped = False
+        elif char == '\\':
+            current += char
+            escaped = True
+        elif char == '(':
             paren_depth += 1
-        elif char == ')':
+            current += char
+        elif char == ')' and paren_depth > 0:
             paren_depth -= 1
+            current += char
         elif char == ',' and paren_depth == 0:
             if current.strip():
                 parsed = _parse_smart_tag(current, case_sensitive)
                 if parsed:
                     tags.append(parsed)
             current = ''
-            continue
-
-        current += char
+        else:
+            current += char
 
     if current.strip():
         parsed = _parse_smart_tag(current, case_sensitive)
@@ -188,16 +196,19 @@ def _tags_match(tag1, tag2, ignore_weight=False, ignore_color_prefix=False):
     return False
 
 
-def _mika_coerce_bool(value):
+def _mika_coerce_bool(value, default=False):
     """
     Convierte valores entrantes a bool de forma segura.
     Útil cuando los toggles vienen linkeados desde distintos tipos de nodos.
     """
+    if isinstance(value, (list, tuple)):
+        value = value[0] if len(value) > 0 else default
+
     if isinstance(value, bool):
         return value
 
     if value is None:
-        return False
+        return default
 
     if isinstance(value, (int, float)):
         return value != 0
@@ -216,7 +227,90 @@ def _mika_coerce_bool(value):
     try:
         return bool(value)
     except Exception:
-        return False
+        return default
+
+
+def _mika_decode_separator(separator):
+    """Decodifica escapes del separador (\\n, \\t, \\r, \\r\\n y /n)."""
+    if isinstance(separator, (list, tuple)):
+        separator = separator[0] if len(separator) > 0 else ""
+
+    if not isinstance(separator, str):
+        separator = str(separator)
+
+    return (
+        separator
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace("\\r", "\r")
+        .replace("/n", "\n")
+    )
+
+
+# Cache de hashes de archivos: evita re-leer imágenes grandes en cada
+# validación de prompt. La clave incluye mtime+size, así un cambio real
+# del archivo invalida la entrada.
+_FILE_HASH_CACHE = {}
+
+
+def _mika_hash_file(path):
+    """Hash sha256 de un archivo, cacheado por (path, mtime_ns, size)."""
+    if not os.path.exists(path):
+        return None
+
+    try:
+        st = os.stat(path)
+        key = (os.path.normcase(path), st.st_mtime_ns, st.st_size)
+        h = _FILE_HASH_CACHE.get(key)
+
+        if h is None:
+            sha = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    sha.update(chunk)
+            h = sha.hexdigest()
+
+            if len(_FILE_HASH_CACHE) > 128:
+                _FILE_HASH_CACHE.clear()
+            _FILE_HASH_CACHE[key] = h
+
+        return h
+    except Exception:
+        return None
+
+
+# Contador de guardado por (carpeta, prefijo, extensión). Evita escanear el
+# directorio en cada ejecución; el valor cae solo si pasan 60s sin guardar.
+_SAVE_COUNTERS = {}
+
+
+def _mika_next_counter(directory, prefix, ext):
+    key = (os.path.normcase(directory), prefix, ext)
+    now = time.time()
+    entry = _SAVE_COUNTERS.get(key)
+
+    if entry is not None and now - entry[0] < 60:
+        return entry[1]
+
+    max_n = 0
+    pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)")
+    try:
+        for f in os.listdir(directory):
+            if f.lower().endswith(f".{ext}"):
+                m = pattern.match(f)
+                if m:
+                    max_n = max(max_n, int(m.group(1)))
+    except Exception:
+        pass
+
+    _SAVE_COUNTERS[key] = (now, max_n + 1)
+    return max_n + 1
+
+
+def _mika_bump_counter(directory, prefix, ext, value):
+    key = (os.path.normcase(directory), prefix, ext)
+    _SAVE_COUNTERS[key] = (time.time(), value)
 
 
 # ======================================================================
@@ -238,35 +332,41 @@ _STANDARD_SAMPLERS = [
 ]
 
 
-def _mika_sampler_names():
-    """
-    Lee todos los samplers instalados (nativos + los que agreguen
-    extensiones). Prueba varias fuentes según la versión de ComfyUI;
-    si todas fallan, usa la lista estándar de respaldo.
-    """
+# Cache de nombres detectados: la detección consulta comfy.samplers, que no
+# cambia en caliente; hacerlo una sola vez evita trabajo repetido por nodo.
+_DETECTED_NAMES = {}
+
+
+def _mika_detect_names(label, fallback, sampler_attrs, scheduler_attrs):
+    """Detecta samplers o schedulers instalados y cachea el resultado."""
+    if label in _DETECTED_NAMES:
+        return _DETECTED_NAMES[label]
+
     detected = []
 
-    # Fuente 1: KSampler.SAMPLERS (dict)
     try:
-        d = getattr(comfy.samplers.KSampler, "SAMPLERS", None)
+        d = getattr(comfy.samplers.KSampler, sampler_attrs[0], None)
         if isinstance(d, dict) and d:
             detected = list(d.keys())
+        elif isinstance(d, (list, tuple)) and d:
+            detected = [str(x) for x in d]
     except Exception:
         detected = []
 
-    # Fuente 2: comfy.samplers.samplers() -> [(nombre, fn), ...]
     try:
         if not detected:
-            fn = getattr(comfy.samplers, "samplers", None)
+            fn = getattr(comfy.samplers, sampler_attrs[1], None)
             if callable(fn):
-                detected = [str(x[0]) for x in fn()]
+                detected = [
+                    str(x[0]) if isinstance(x, (list, tuple)) else str(x)
+                    for x in fn()
+                ]
     except Exception:
         pass
 
-    # Fuente 3: listas/dicts a nivel de módulo
     try:
         if not detected:
-            for attr in ("SAMPLER_NAMES", "KSAMPLER_NAMES", "SAMPLERS"):
+            for attr in sampler_attrs[2:]:
                 obj = getattr(comfy.samplers, attr, None)
                 if isinstance(obj, dict) and obj:
                     detected = list(obj.keys())
@@ -280,13 +380,23 @@ def _mika_sampler_names():
     if len(detected) > 1:
         names = detected
     else:
-        names = list(_STANDARD_SAMPLERS)
+        names = list(fallback)
         for n in detected:
             if n not in names:
                 names.insert(0, n)
 
-    print(f"[Mika] Sampler Selector: {len(names)} samplers disponibles.")
+    print(f"[Mika] {label}: {len(names)} disponibles.")
+    _DETECTED_NAMES[label] = names
     return names
+
+
+def _mika_sampler_names():
+    return _mika_detect_names(
+        "Sampler Selector",
+        _STANDARD_SAMPLERS,
+        ("SAMPLERS", "samplers", "SAMPLER_NAMES", "KSAMPLER_NAMES"),
+        (),
+    )
 
 
 # Lista de respaldo con los schedulers estándar de ComfyUI.
@@ -298,59 +408,12 @@ _STANDARD_SCHEDULERS = [
 
 
 def _mika_scheduler_names():
-    """
-    Lee todos los schedulers instalados (nativos + los que agreguen
-    extensiones). Prueba varias fuentes según la versión de ComfyUI;
-    si todas fallan, usa la lista estándar de respaldo.
-    """
-    detected = []
-
-    # Fuente 1: KSampler.SCHEDULERS (lista o dict)
-    try:
-        d = getattr(comfy.samplers.KSampler, "SCHEDULERS", None)
-        if isinstance(d, dict) and d:
-            detected = list(d.keys())
-        elif isinstance(d, (list, tuple)) and d:
-            detected = [str(x) for x in d]
-    except Exception:
-        detected = []
-
-    # Fuente 2: comfy.samplers.schedulers() si existe como función
-    try:
-        if not detected:
-            fn = getattr(comfy.samplers, "schedulers", None)
-            if callable(fn):
-                detected = [
-                    str(x[0]) if isinstance(x, (list, tuple)) else str(x)
-                    for x in fn()
-                ]
-    except Exception:
-        pass
-
-    # Fuente 3: listas a nivel de módulo
-    try:
-        if not detected:
-            for attr in ("SCHEDULER_NAMES", "SCHEDULERS"):
-                obj = getattr(comfy.samplers, attr, None)
-                if isinstance(obj, dict) and obj:
-                    detected = list(obj.keys())
-                    break
-                if isinstance(obj, (list, tuple)) and obj:
-                    detected = [str(x) for x in obj]
-                    break
-    except Exception:
-        pass
-
-    if len(detected) > 1:
-        names = detected
-    else:
-        names = list(_STANDARD_SCHEDULERS)
-        for n in detected:
-            if n not in names:
-                names.insert(0, n)
-
-    print(f"[Mika] Scheduler Selector: {len(names)} schedulers disponibles.")
-    return names
+    return _mika_detect_names(
+        "Scheduler Selector",
+        _STANDARD_SCHEDULERS,
+        ("SCHEDULERS", "schedulers", "SCHEDULER_NAMES"),
+        (),
+    )
 
 
 # ======================================================================
@@ -811,52 +874,6 @@ class TextConcatenateDynamic:
             return value[0] if len(value) > 0 else default
         return value if value is not None else default
 
-    @staticmethod
-    def _decode_separator(separator):
-        separator = TextConcatenateDynamic._scalar(separator, "")
-
-        if not isinstance(separator, str):
-            separator = str(separator)
-
-        return (
-            separator
-            .replace("\\r\\n", "\n")
-            .replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace("\\r", "\r")
-            .replace("/n", "\n")
-        )
-
-    @staticmethod
-    def _coerce_bool(value, default=False):
-        if isinstance(value, (list, tuple)):
-            value = value[0] if len(value) > 0 else default
-
-        if isinstance(value, bool):
-            return value
-
-        if value is None:
-            return default
-
-        if isinstance(value, (int, float)):
-            return value != 0
-
-        if isinstance(value, str):
-            return value.strip().lower() in (
-                "true",
-                "1",
-                "yes",
-                "on",
-                "si",
-                "sí",
-                "enabled",
-            )
-
-        try:
-            return bool(value)
-        except Exception:
-            return default
-
     @classmethod
     def INPUT_TYPES(cls):
         optional = {}
@@ -864,8 +881,8 @@ class TextConcatenateDynamic:
         for i in range(1, MAX_CONCAT_SLOTS + 1):
             optional[f"text_{i}"] = ("STRING", {"default": "", "multiline": False})
 
-        optional["separator"] = ("STRING", {"default": ", "})
-        optional["clean_output"] = ("BOOLEAN", {"default": True})
+        optional["separator"] = ("STRING", {"default": ""})
+        optional["clean_output"] = ("BOOLEAN", {"default": False})
 
         optional["text_count"] = (
             "INT",
@@ -890,14 +907,14 @@ class TextConcatenateDynamic:
 
     def doit(
         self,
-        separator=", ",
-        clean_output=True,
+        separator="",
+        clean_output=False,
         text_count=DEFAULT_CONCAT_SLOTS,
         **kwargs,
     ):
         separator = self._scalar(separator, "")
         text_count = self._scalar(text_count, DEFAULT_CONCAT_SLOTS)
-        clean_output = self._coerce_bool(clean_output, True)
+        clean_output = _mika_coerce_bool(clean_output, False)
 
         try:
             count = int(text_count)
@@ -906,7 +923,7 @@ class TextConcatenateDynamic:
 
         count = max(1, min(MAX_CONCAT_SLOTS, count))
 
-        sep = self._decode_separator(separator)
+        sep = _mika_decode_separator(separator)
 
         texts = []
 
@@ -950,8 +967,8 @@ class TextConcatenateDynamic:
 
                 result = re.sub(r" {2,}", " ", result)
 
-        # Con un solo texto también aplico el separador.
-        if len(texts) == 1 and sep:
+        # El separador también se agrega al final del último tag.
+        if texts and sep:
             result = result + sep
 
         return (result,)
@@ -1026,14 +1043,22 @@ class LoadImageMika:
 
     def download_image(self, url):
         try:
-            response = requests.get(url)
+            response = requests.get(url, timeout=30)
             response.raise_for_status()
+
+            if len(response.content) > 200 * 1024 * 1024:
+                print(f"Load Image-Mika: descarga demasiado grande ({url}): {len(response.content)} bytes")
+                return None
+
             img = Image.open(BytesIO(response.content))
+            img.load()
             return img
         except requests.exceptions.HTTPError as errh:
             print(f"Load Image-Mika HTTP Error ({url}): {errh}")
         except requests.exceptions.ConnectionError as errc:
             print(f"Load Image-Mika Connection Error ({url}): {errc}")
+        except requests.exceptions.Timeout as errt:
+            print(f"Load Image-Mika Timeout ({url}): {errt}")
         except Exception as e:
             print(f"Load Image-Mika Error: {e}")
 
@@ -1063,6 +1088,10 @@ class SmartTagFilterMika:
     r"""
     Smart Tag Filter-Mika: filtra tags con soporte de pesos, caracteres
     especiales y prefijos de color. Modo include/exclude.
+
+    Opción nueva:
+    - add_comma_space_end: si está activa, agrega ", " al final del
+      texto filtrado.
     """
 
     @classmethod
@@ -1077,6 +1106,7 @@ class SmartTagFilterMika:
                 "case_sensitive": ("BOOLEAN", {"default": False}),
                 "ignore_weight": ("BOOLEAN", {"default": False}),
                 "ignore_color_prefix": ("BOOLEAN", {"default": False}),
+                "add_comma_space_end": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -1093,10 +1123,57 @@ class SmartTagFilterMika:
             return value
         return str(value)
 
-    def filter_tags(self, prompt, filter_tags, mode="include", case_sensitive=False,
-                    ignore_weight=False, ignore_color_prefix=False):
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _ensure_trailing_comma_space(text):
+        """
+        Agrega ', ' al final del texto, normalizando si ya termina
+        con coma, espacios o coma+espacio.
+        """
+        if not isinstance(text, str):
+            text = str(text)
+
+        if not text.strip():
+            return text
+
+        # Elimina comas y espacios sobrantes al final.
+        clean = re.sub(r"[,\s]*$", "", text.rstrip())
+
+        if not clean:
+            return ""
+
+        return clean + ", "
+
+    def filter_tags(
+        self,
+        prompt,
+        filter_tags,
+        mode="include",
+        case_sensitive=False,
+        ignore_weight=False,
+        ignore_color_prefix=False,
+        add_comma_space_end=False,
+    ):
         prompt = self._to_text(prompt)
         filter_tags = self._to_text(filter_tags)
+
+        mode = self._scalar(mode, "include")
+        if mode not in ("include", "exclude"):
+            mode = "include"
+
+        case_sensitive = _mika_coerce_bool(self._scalar(case_sensitive, False))
+        ignore_weight = _mika_coerce_bool(self._scalar(ignore_weight, False))
+        ignore_color_prefix = _mika_coerce_bool(
+            self._scalar(ignore_color_prefix, False)
+        )
+        add_comma_space_end = _mika_coerce_bool(
+            self._scalar(add_comma_space_end, False)
+        )
 
         prompt_tags = _parse_prompt(prompt, case_sensitive)
         filter_list = _parse_prompt(filter_tags, case_sensitive)
@@ -1121,9 +1198,12 @@ class SmartTagFilterMika:
 
         result_tags = matched if mode == "include" else unmatched
 
-        filtered = ", ".join([t['original'] for t in result_tags])
-        matched_str = ", ".join([t['original'] for t in matched])
-        unmatched_str = ", ".join([t['original'] for t in unmatched])
+        filtered = ", ".join([t["original"] for t in result_tags])
+        matched_str = ", ".join([t["original"] for t in matched])
+        unmatched_str = ", ".join([t["original"] for t in unmatched])
+
+        if add_comma_space_end:
+            filtered = self._ensure_trailing_comma_space(filtered)
 
         return (filtered, matched_str, unmatched_str)
 
@@ -1193,21 +1273,29 @@ class TagIfMika:
         tags = []
         current = ''
         paren_depth = 0
+        escaped = False
 
         for char in tag_string:
-            if char == '(':
+            if escaped:
+                current += char
+                escaped = False
+            elif char == '\\':
+                current += char
+                escaped = True
+            elif char == '(':
                 paren_depth += 1
-            elif char == ')':
+                current += char
+            elif char == ')' and paren_depth > 0:
                 paren_depth -= 1
+                current += char
             elif char == ',' and paren_depth == 0:
                 if current.strip():
                     parsed = self.parse_smart_tag(current)
                     if parsed:
                         tags.append(parsed)
                 current = ''
-                continue
-
-            current += char
+            else:
+                current += char
 
         if current.strip():
             parsed = self.parse_smart_tag(current)
@@ -1271,19 +1359,27 @@ class TagRemoverMika:
         tags = []
         current = ''
         depth = 0
+        escaped = False
 
         for char in text:
-            if char == '(':
+            if escaped:
+                current += char
+                escaped = False
+            elif char == '\\':
+                current += char
+                escaped = True
+            elif char == '(':
                 depth += 1
-            elif char == ')':
+                current += char
+            elif char == ')' and depth > 0:
                 depth -= 1
+                current += char
             elif char == ',' and depth == 0:
                 if current.strip():
                     tags.append(current.strip())
                 current = ''
-                continue
-
-            current += char
+            else:
+                current += char
 
         if current.strip():
             tags.append(current.strip())
@@ -1376,17 +1472,8 @@ class FloatOutputList:
     FUNCTION = "doit"
     CATEGORY = "Mika Utilidades/lista"
 
-    @staticmethod
-    def _decode_separator(separator):
-        return (
-            separator.replace("\\r\\n", "\n")
-            .replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace("\\r", "\r")
-        )
-
     def doit(self, separator, values):
-        sep = self._decode_separator(separator) if separator else "\n"
+        sep = _mika_decode_separator(separator) if separator else "\n"
         raw_items = values.strip("\r\n").split(sep)
 
         floats = []
@@ -1645,8 +1732,12 @@ class TextLineStepperMika:
 
     @staticmethod
     def _next_range(current_end, chunk_size, total_lines):
-        next_start = current_end + 1
-        next_end = next_start + chunk_size - 1
+        # Al llegar al final se da la vuelta (wrap) en vez de seguir
+        # avanzando hacia adelante para siempre.
+        if total_lines <= 0:
+            return 0, 0
+        next_start = (current_end + 1) % total_lines
+        next_end = min(next_start + chunk_size - 1, total_lines - 1)
         return next_start, next_end
 
     @classmethod
@@ -1676,22 +1767,25 @@ class ImagePreviewCleanMika:
     def preview(self, images):
         results = []
 
-        for idx, image in enumerate(images):
-            i = 255. * image.cpu().numpy()
-            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+        array = 255. * images.cpu().numpy()
+        array = np.clip(array, 0, 255).astype(np.uint8)
 
-            image_hash = hashlib.sha256(image.cpu().numpy().tobytes()).hexdigest()[:16]
-            filename = f"mika_preview_{image_hash}_{int(time.time())}.png"
+        image_hash = hashlib.sha256(array.tobytes()).hexdigest()[:16]
 
-            output_dir = folder_paths.get_output_directory()
-            filepath = os.path.join(output_dir, filename)
+        for idx in range(array.shape[0]):
+            img = Image.fromarray(array[idx])
+
+            filename = f"mika_preview_{image_hash}_{idx}_{int(time.time())}.png"
+
+            temp_dir = folder_paths.get_temp_directory()
+            filepath = os.path.join(temp_dir, filename)
 
             img.save(filepath, 'PNG')
 
             results.append({
                 "filename": filename,
                 "subfolder": "",
-                "type": "output"
+                "type": "temp"
             })
 
         return {"ui": {"images": results}}
@@ -1800,7 +1894,11 @@ class FastGroupsMuterMika:
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
-        return float("nan")
+        parts = []
+        for key, value in kwargs.items():
+            if key.startswith("group_") or key == "groups_filter":
+                parts.append(f"{key}={value}")
+        return hashlib.md5("|".join(sorted(parts)).encode("utf-8")).hexdigest()
 
 
 MAX_NODE_SLOTS = 20
@@ -1811,7 +1909,8 @@ class FastNodesBypasserMika:
     Fast Nodes Bypasser-Mika.
     Los inputs input_i se declaran hasta MAX_NODE_SLOTS para que el backend
     acepte conexiones dinámicas. El frontend muestra/oculta los slots.
-    Los toggle_i tienen defaultInput=True para poder ser promovidos en subgrafos.
+    Los toggle_i son widgets BOOLEAN que el frontend muestra con el nombre
+    del nodo conectado en cada input_i.
     """
 
     @classmethod
@@ -1826,7 +1925,6 @@ class FastNodesBypasserMika:
                 "BOOLEAN",
                 {
                     "default": False,
-                    "defaultInput": True,
                     "label_on": "bypass",
                     "label_off": "off",
                 }
@@ -1874,7 +1972,8 @@ class FastNodesMuterMika:
     Fast Nodes Muter-Mika.
     Los inputs input_i se declaran hasta MAX_NODE_SLOTS para que el backend
     acepte conexiones dinámicas. El frontend muestra/oculta los slots.
-    Los toggle_i tienen defaultInput=True para poder ser promovidos en subgrafos.
+    Los toggle_i son widgets BOOLEAN que el frontend muestra con el nombre
+    del nodo conectado en cada input_i.
     """
 
     @classmethod
@@ -1889,7 +1988,6 @@ class FastNodesMuterMika:
                 "BOOLEAN",
                 {
                     "default": False,
-                    "defaultInput": True,
                     "label_on": "mute",
                     "label_off": "off",
                 }
@@ -2206,45 +2304,18 @@ class SamplerSelectorMika:
         versiones de ComfyUI. En versiones modernas KSampler() requiere
         más argumentos (steps, device...), por eso NO instanciamos directo.
         """
-        # Intento 1: KSampler.SAMPLERS como diccionario de funciones/objetos
-        try:
-            samplers_dict = getattr(comfy.samplers.KSampler, "SAMPLERS", {})
-            if sampler_name in samplers_dict:
-                sampler_fn = samplers_dict[sampler_name]
+        samplers_dict = getattr(comfy.samplers.KSampler, "SAMPLERS", {})
+        if sampler_name in samplers_dict:
+            sampler_fn = samplers_dict[sampler_name]
+            try:
+                return sampler_fn()
+            except TypeError:
+                return sampler_fn
 
-                if callable(sampler_fn):
-                    try:
-                        return sampler_fn()
-                    except TypeError:
-                        return sampler_fn
-                else:
-                    return sampler_fn
-        except Exception as e:
-            print(f"[Mika] Sampler Selector: error desde KSampler.SAMPLERS: {e}")
+        sampler_object = getattr(comfy.samplers, "sampler_object", None)
+        if callable(sampler_object):
+            return sampler_object(sampler_name)
 
-        # Intento 2: función sampler_object si existe
-        try:
-            if hasattr(comfy.samplers, "sampler_object"):
-                return comfy.samplers.sampler_object(sampler_name)
-        except Exception as e:
-            print(f"[Mika] Sampler Selector: error desde sampler_object: {e}")
-
-        # Intento 3: buscar en otras ubicaciones comunes del módulo
-        try:
-            for attr in ("samplers", "SAMPLERS"):
-                obj = getattr(comfy.samplers, attr, None)
-                if isinstance(obj, dict) and sampler_name in obj:
-                    sampler_fn = obj[sampler_name]
-                    if callable(sampler_fn):
-                        try:
-                            return sampler_fn()
-                        except TypeError:
-                            return sampler_fn
-                    return sampler_fn
-        except Exception as e:
-            print(f"[Mika] Sampler Selector: error desde módulo: {e}")
-
-        # Fallback: devolver el nombre como string
         print(f"[Mika] Sampler Selector: no se pudo obtener objeto SAMPLER para '{sampler_name}', devolviendo nombre")
         return sampler_name
 
@@ -2338,14 +2409,18 @@ class ImageSaveAutoMika:
 
         save_fmt = {"png": "PNG", "jpg": "JPEG", "webp": "WEBP"}[ext]
 
-        counter = self._next_counter(save_path, prefix, ext) if add_counter else None
+        counter = _mika_next_counter(save_path, prefix, ext) if add_counter else None
 
         saved_paths = []
         preview_results = []
 
-        for idx, image in enumerate(images):
-            arr = 255. * image.cpu().numpy()
-            img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+        array = 255. * images.cpu().numpy()
+        array = np.clip(array, 0, 255).astype(np.uint8)
+
+        preview_hash = hashlib.sha256(array.tobytes()).hexdigest()[:16]
+
+        for idx in range(array.shape[0]):
+            img = Image.fromarray(array[idx])
 
             if ext == "jpg":
                 img = img.convert("RGB")
@@ -2366,15 +2441,17 @@ class ImageSaveAutoMika:
 
             # Copia limpia para el preview de la UI de ComfyUI (sin metadata).
             if show_preview:
-                image_hash = hashlib.sha256(image.cpu().numpy().tobytes()).hexdigest()[:16]
-                prev_name = f"mika_preview_{image_hash}_{int(time.time())}.png"
-                prev_path = os.path.join(folder_paths.get_output_directory(), prev_name)
-                Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)).save(prev_path, "PNG")
+                prev_name = f"mika_preview_{preview_hash}_{idx}_{int(time.time())}.png"
+                prev_path = os.path.join(folder_paths.get_temp_directory(), prev_name)
+                img.save(prev_path, "PNG")
                 preview_results.append({
                     "filename": prev_name,
                     "subfolder": "",
-                    "type": "output",
+                    "type": "temp",
                 })
+
+        if add_counter:
+            _mika_bump_counter(save_path, prefix, ext, counter)
 
         print(f"Image Save Auto-Mika: {len(saved_paths)} imagen(es) guardadas en '{save_path}'.")
 
@@ -2385,21 +2462,6 @@ class ImageSaveAutoMika:
             }
 
         return (saved_paths, len(saved_paths))
-
-    @staticmethod
-    def _next_counter(directory, prefix, ext):
-        """Busca el mayor contador existente en la carpeta y devuelve el siguiente."""
-        max_n = 0
-        pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)")
-        try:
-            for f in os.listdir(directory):
-                if f.lower().endswith(f".{ext}"):
-                    m = pattern.match(f)
-                    if m:
-                        max_n = max(max_n, int(m.group(1)))
-        except Exception:
-            pass
-        return max_n + 1
 
 
 class IndexIntMika:
@@ -2559,6 +2621,583 @@ class IndexStepperMika:
         return float("nan")
 
 
+class LoadImageNameMika:
+    """
+    Load Image + Name-Mika: similar al Load Image nativo de ComfyUI,
+    pero además devuelve el nombre de la imagen seleccionada.
+
+    Compatible con imágenes editadas en inpaint / mask editor,
+    que suelen usar rutas temporales o anotadas.
+    """
+
+    @staticmethod
+    def _get_image_list():
+        files = []
+
+        # ComfyUI moderno.
+        try:
+            files = folder_paths.get_filename_list("input")
+        except TypeError:
+            try:
+                files = folder_paths.get_filename_list()
+            except Exception:
+                files = []
+        except Exception:
+            files = []
+
+        # Fallback manual por si get_filename_list falla.
+        if not files:
+            try:
+                input_dir = folder_paths.get_input_directory()
+                files = [
+                    f
+                    for f in os.listdir(input_dir)
+                    if os.path.isfile(os.path.join(input_dir, f))
+                ]
+            except Exception:
+                files = []
+
+        if not files:
+            return [""]
+
+        return sorted(files)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": (cls._get_image_list(), {"image_upload": True}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("image", "mask", "image_name")
+    FUNCTION = "load_image"
+    CATEGORY = "Mika Utilidades/image"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        """
+        Evita que ComfyUI rechaze valores temporales/anotados que
+        pueden aparecer al usar inpaint o mask editor.
+        """
+        return True
+
+    @staticmethod
+    def _unwrap_scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @classmethod
+    def _resolve_path(cls, image):
+        image = cls._unwrap_scalar(image, "")
+
+        if not isinstance(image, str):
+            image = str(image)
+
+        image = image.strip()
+
+        if not image:
+            return None, ""
+
+        path = None
+
+        # 1) Intentar resolución anotada. Ej:
+        #    "foto.png [input]"
+        #    "clipspace/clipspace-mask.png [temp]"
+        try:
+            path = folder_paths.get_annotated_filepath(image)
+            if path and os.path.exists(path):
+                return path, os.path.basename(path)
+        except TypeError:
+            try:
+                path = folder_paths.get_annotated_filepath(
+                    image,
+                    folder_paths.get_input_directory()
+                )
+                if path and os.path.exists(path):
+                    return path, os.path.basename(path)
+            except Exception:
+                path = None
+        except Exception:
+            path = None
+
+        # 2) Intentar resolución anotada usando input como carpeta default.
+        try:
+            path = folder_paths.get_annotated_filepath(
+                image,
+                folder_paths.get_input_directory()
+            )
+            if path and os.path.exists(path):
+                return path, os.path.basename(path)
+        except Exception:
+            pass
+
+        # 3) Buscar como input normal.
+        try:
+            path = folder_paths.get_full_path("input", image)
+            if path and os.path.exists(path):
+                return path, os.path.basename(path)
+        except Exception:
+            pass
+
+        # 4) Por si ya viene como ruta directa.
+        if os.path.exists(image):
+            return image, os.path.basename(image)
+
+        # 5) Buscar por nombre base en input/temp/output.
+        base_clean = image.split(" [")[0].strip()
+        base = os.path.basename(base_clean)
+
+        search_dirs = []
+
+        for fn in ("get_input_directory", "get_temp_directory", "get_output_directory"):
+            try:
+                d = getattr(folder_paths, fn)()
+                if d:
+                    search_dirs.append(d)
+            except Exception:
+                pass
+
+        for d in search_dirs:
+            candidate = os.path.join(d, base)
+            if os.path.exists(candidate):
+                return candidate, base
+
+            candidate2 = os.path.join(d, base_clean)
+            if os.path.exists(candidate2):
+                return candidate2, os.path.basename(candidate2)
+
+        return None, base
+
+    def load_image(self, image):
+        image_path, filename = self._resolve_path(image)
+
+        # Nombre sin extensión.
+        image_name = os.path.splitext(filename)[0]
+
+        if not image_path or not os.path.exists(image_path):
+            print(f"Load Image + Name-Mika: no se encontró la imagen '{image}'.")
+
+            black = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            mask = torch.zeros((1, 64, 64), dtype=torch.float32)
+
+            return (black, mask, image_name)
+
+        try:
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+
+            # Modo 1-bit / máscara simple.
+            try:
+                if img.getbands()[0] == "M":
+                    img = img.convert("RGB")
+            except Exception:
+                img = img.convert("RGB")
+
+            # Convierto a RGBA para extraer alpha.
+            # Si la imagen no tiene alpha, el canal A queda todo en 255,
+            # por lo tanto la máscara queda en 0.
+            try:
+                rgba = img.convert("RGBA")
+            except Exception:
+                rgba = img.convert("RGB").convert("RGBA")
+
+            alpha_np = np.array(rgba.getchannel("A")).astype(np.float32) / 255.0
+            mask = 1.0 - torch.from_numpy(alpha_np)
+
+            # La máscara queda batcheada: (1, H, W)
+            mask = mask.unsqueeze(0)
+
+            rgb = rgba.convert("RGB")
+            image_np = np.array(rgb).astype(np.float32) / 255.0
+            image_tensor = torch.from_numpy(image_np)[None, ]
+
+            return (image_tensor, mask, image_name)
+
+        except Exception as e:
+            print(f"Load Image + Name-Mika: error cargando '{image_path}': {e}")
+
+            black = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            mask = torch.zeros((1, 64, 64), dtype=torch.float32)
+
+            return (black, mask, image_name)
+
+    @classmethod
+    def IS_CHANGED(cls, image):
+        """
+        Hash del archivo para detectar cambios, útil cuando el inpaint
+        sobreescribe o reemplaza una imagen temporal.
+        """
+        image_path, _ = cls._resolve_path(image)
+
+        if not image_path:
+            return None
+
+        return _mika_hash_file(image_path) or None
+
+
+class IfAnyMika:
+    """
+    If Any-Mika: evalúa una entrada ANY y devuelve un valor/texto si
+    cumple la condición, u otro valor/texto si no cumple.
+
+    Modos:
+    - auto:
+        * Si "find" está vacío → detecta que exista un valor no vacío.
+        * Si "find" tiene texto → busca ese texto dentro del input.
+    - exists:
+        * True si el input no es None.
+    - not_empty:
+        * True si el input no está vacío.
+    - boolean_true:
+        * True si el input se puede interpretar como verdadero.
+    - contains:
+        * True si el input contiene el texto de "find".
+    - equals:
+        * True si el input es igual al texto de "find".
+    - starts_with:
+        * True si el input empieza con el texto de "find".
+    - ends_with:
+        * True si el input termina con el texto de "find".
+    - regex:
+        * True si el input matchea la expresión regular de "find".
+    """
+
+    INPUT_IS_LIST = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "input": ("*", {"forceInput": True}),
+                "mode": (
+                    [
+                        "auto",
+                        "exists",
+                        "not_empty",
+                        "boolean_true",
+                        "contains",
+                        "equals",
+                        "starts_with",
+                        "ends_with",
+                        "regex",
+                    ],
+                    {"default": "auto"},
+                ),
+            },
+            "optional": {
+                "find": ("STRING", {"default": "", "multiline": False}),
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+                "value_if_found": ("*", {"forceInput": True}),
+                "value_if_not_found": ("*", {"forceInput": True}),
+                "text_if_found": ("STRING", {"default": "true", "multiline": True}),
+                "text_if_not_found": ("STRING", {"default": "false", "multiline": True}),
+            },
+        }
+
+    RETURN_TYPES = ("*", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("result", "matched", "result_text")
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/condicional"
+
+    def doit(
+        self,
+        input=None,
+        mode="auto",
+        find="",
+        case_sensitive=False,
+        value_if_found=None,
+        value_if_not_found=None,
+        text_if_found="true",
+        text_if_not_found="false",
+    ):
+        input_value = self._unwrap_any(input)
+        mode = self._unwrap_scalar(mode, "auto")
+        find = self._unwrap_scalar(find, "")
+        case_sensitive = _mika_coerce_bool(self._unwrap_scalar(case_sensitive, False))
+
+        value_if_found = self._unwrap_any(value_if_found)
+        value_if_not_found = self._unwrap_any(value_if_not_found)
+
+        text_if_found = self._unwrap_scalar(text_if_found, "")
+        text_if_not_found = self._unwrap_scalar(text_if_not_found, "")
+
+        matched = self._matches(
+            value=input_value,
+            mode=mode,
+            find=find,
+            case_sensitive=case_sensitive,
+        )
+
+        if matched:
+            if value_if_found is not None:
+                result = value_if_found
+            else:
+                result = text_if_found
+        else:
+            if value_if_not_found is not None:
+                result = value_if_not_found
+            else:
+                result = text_if_not_found
+
+        result_text = self._to_text(result)
+
+        return (result, matched, result_text)
+
+    @staticmethod
+    def _unwrap_scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _unwrap_any(value):
+        if value is None:
+            return None
+
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return None
+            if len(value) == 1:
+                return value[0]
+            return list(value)
+
+        return value
+
+    @staticmethod
+    def _is_empty(value):
+        if value is None:
+            return True
+
+        if isinstance(value, str):
+            return value.strip() == ""
+
+        if isinstance(value, bool):
+            return False
+
+        if isinstance(value, (int, float)):
+            return False
+
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value) == 0
+
+        if torch.is_tensor(value):
+            try:
+                return value.numel() == 0
+            except Exception:
+                return True
+
+        if isinstance(value, np.ndarray):
+            try:
+                return value.size == 0
+            except Exception:
+                return True
+
+        return False
+
+    def _collect_texts(self, value, depth=0):
+        """
+        Junta representaciones de texto del valor para poder buscar
+        texto dentro de strings, listas, dicts, tensors simples, etc.
+        """
+        if depth > 3:
+            return [str(value)]
+
+        if value is None:
+            return [""]
+
+        if isinstance(value, str):
+            return [value]
+
+        if isinstance(value, bool):
+            return ["true" if value else "false"]
+
+        if isinstance(value, (int, float)):
+            return [str(value)]
+
+        if isinstance(value, (list, tuple, set)):
+            out = []
+            try:
+                items = list(value)[:200]
+            except Exception:
+                items = []
+
+            for item in items:
+                out.extend(self._collect_texts(item, depth + 1))
+
+            return out if out else [""]
+
+        if isinstance(value, dict):
+            out = []
+            try:
+                items = list(value.items())[:200]
+            except Exception:
+                items = []
+
+            for k, v in items:
+                out.extend(self._collect_texts(k, depth + 1))
+                out.extend(self._collect_texts(v, depth + 1))
+
+            return out if out else [""]
+
+        if torch.is_tensor(value):
+            try:
+                if value.numel() == 1:
+                    return [str(value.item())]
+
+                if value.numel() <= 16:
+                    return [str(value.tolist())]
+
+                return [f"Tensor(shape={tuple(value.shape)}, dtype={value.dtype})"]
+            except Exception:
+                return [str(value)]
+
+        if isinstance(value, np.ndarray):
+            try:
+                if value.size == 1:
+                    return [str(value.item())]
+
+                if value.size <= 16:
+                    return [str(value.tolist())]
+
+                return [f"ndarray(shape={tuple(value.shape)}, dtype={value.dtype})"]
+            except Exception:
+                return [str(value)]
+
+        return [str(value)]
+
+    def _to_text(self, value, depth=0):
+        """
+        Convierte el resultado a texto legible para la salida STRING.
+        """
+        if depth > 3:
+            return str(value)
+
+        if value is None:
+            return ""
+
+        if isinstance(value, str):
+            return value
+
+        if isinstance(value, bool):
+            return "true" if value else "false"
+
+        if isinstance(value, (int, float)):
+            return str(value)
+
+        if torch.is_tensor(value):
+            try:
+                if value.numel() == 1:
+                    return str(value.item())
+
+                if value.numel() <= 16:
+                    return str(value.tolist())
+
+                return f"Tensor(shape={tuple(value.shape)}, dtype={value.dtype})"
+            except Exception:
+                return str(value)
+
+        if isinstance(value, np.ndarray):
+            try:
+                if value.size == 1:
+                    return str(value.item())
+
+                if value.size <= 16:
+                    return str(value.tolist())
+
+                return f"ndarray(shape={tuple(value.shape)}, dtype={value.dtype})"
+            except Exception:
+                return str(value)
+
+        if isinstance(value, (list, tuple, set)):
+            try:
+                items = list(value)
+            except Exception:
+                items = []
+
+            shown = items[:20]
+            parts = [self._to_text(x, depth + 1) for x in shown]
+
+            if len(items) > len(shown):
+                parts.append(f"... +{len(items) - len(shown)} elementos")
+
+            return "[" + ", ".join(parts) + "]"
+
+        if isinstance(value, dict):
+            try:
+                items = list(value.items())
+            except Exception:
+                items = []
+
+            shown = items[:20]
+            parts = [
+                f"{self._to_text(k, depth + 1)}: {self._to_text(v, depth + 1)}"
+                for k, v in shown
+            ]
+
+            if len(items) > len(shown):
+                parts.append(f"... +{len(items) - len(shown)} elementos")
+
+            return "{" + ", ".join(parts) + "}"
+
+        return str(value)
+
+    def _matches(self, value, mode, find, case_sensitive):
+        if mode == "exists":
+            return value is not None
+
+        if mode == "not_empty":
+            return not self._is_empty(value)
+
+        if mode == "boolean_true":
+            return _mika_coerce_bool(value)
+
+        find_text = "" if find is None else str(find)
+
+        if mode == "auto":
+            if find_text.strip() == "":
+                return not self._is_empty(value)
+            mode = "contains"
+
+        texts = self._collect_texts(value)
+
+        if mode == "regex":
+            flags = 0 if case_sensitive else re.IGNORECASE
+
+            for text in texts:
+                try:
+                    if re.search(find_text, text, flags) is not None:
+                        return True
+                except re.error:
+                    return False
+
+            return False
+
+        if case_sensitive:
+            find_cmp = find_text
+            texts_cmp = texts
+        else:
+            find_cmp = find_text.lower()
+            texts_cmp = [t.lower() for t in texts]
+
+        if mode == "equals":
+            return any(t == find_cmp for t in texts_cmp)
+
+        if mode == "contains":
+            return any(find_cmp in t for t in texts_cmp)
+
+        if mode == "starts_with":
+            return any(t.startswith(find_cmp) for t in texts_cmp)
+
+        if mode == "ends_with":
+            return any(t.endswith(find_cmp) for t in texts_cmp)
+
+        # Fallback.
+        return not self._is_empty(value)
+
+
 # ======================================================================
 # MAPPINGS
 # ======================================================================
@@ -2592,6 +3231,8 @@ NODE_CLASS_MAPPINGS = {
     "ImageSaveAutoMika": ImageSaveAutoMika,
     "IndexIntMika": IndexIntMika,
     "IndexStepperMika": IndexStepperMika,
+    "LoadImageNameMika": LoadImageNameMika,
+    "IfAnyMika": IfAnyMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -2623,4 +3264,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageSaveAutoMika": "Image Save Auto-Mika",
     "IndexIntMika": "Index Int-Mika",
     "IndexStepperMika": "Index Stepper-Mika",
+    "LoadImageNameMika": "Load Image + Name-Mika",
+    "IfAnyMika": "If Any-Mika",
 }

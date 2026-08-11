@@ -260,6 +260,8 @@ app.registerExtension({
 
 			const showInputs = showW ? Boolean(showW.value) : true;
 
+			node._mikaHideInputs = !showInputs;
+
 			let lastConnected = -1;
 
 			for (let i = 0; i < MAX_SLOTS; i++) {
@@ -414,6 +416,33 @@ app.registerExtension({
 
 				if (widget) widget.value = targetState;
 			}
+		}
+
+		// ------------------------------------------------------------
+		// Ocultar sockets de entrada cuando show_inputs está apagado
+		// ------------------------------------------------------------
+
+		const baseDrawSlots = nodeType.prototype.drawSlots;
+		if (typeof baseDrawSlots === "function") {
+			nodeType.prototype.drawSlots = function (ctx, opts) {
+				if (!this._mikaHideInputs) {
+					return baseDrawSlots.call(this, ctx, opts);
+				}
+
+				const inputSlots = this._concreteInputs;
+
+				if (Array.isArray(inputSlots) && inputSlots.length) {
+					this._concreteInputs = [];
+
+					try {
+						return baseDrawSlots.call(this, ctx, opts);
+					} finally {
+						this._concreteInputs = inputSlots;
+					}
+				}
+
+				return baseDrawSlots.call(this, ctx, opts);
+			};
 		}
 
 		// ------------------------------------------------------------

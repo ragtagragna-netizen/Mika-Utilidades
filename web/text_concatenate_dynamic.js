@@ -62,74 +62,113 @@ app.registerExtension({
       }
     }
 
-    function sortPool(node) {
-      if (!Array.isArray(node.hiddenTextSlots)) return;
-      node.hiddenTextSlots.sort((a, b) => a.index - b.index);
+    function isTextSlotWidget(widget) {
+      return (
+        widget &&
+        widget.name &&
+        /^text_\d+$/.test(widget.name)
+      );
     }
 
-    function anchorIndex(node) {
-      if (node.visibleTextSlots.length) {
-        const last =
-          node.visibleTextSlots[node.visibleTextSlots.length - 1].widget;
+    function getTextSlots(node) {
+      if (!Array.isArray(node.widgets)) return [];
 
-        const idx = node.widgets.indexOf(last);
+      return node.widgets
+        .filter((w) => isTextSlotWidget(w))
+        .map((widget) => ({
+          index: parseInt(widget.name.split("_")[1], 10),
+          widget,
+        }))
+        .filter((slot) => !Number.isNaN(slot.index))
+        .sort((a, b) => a.index - b.index);
+    }
 
-        if (idx !== -1) return idx + 1;
+    function hasBackendCount(node) {
+      const hasWidget =
+        Array.isArray(node.widgets) &&
+        node.widgets.some((w) => w && w.name === "text_count");
+
+      const hasInput =
+        Array.isArray(node.inputs) &&
+        node.inputs.some((inp) => inp && inp.name === "text_count");
+
+      return hasWidget || hasInput;
+    }
+
+    function getCountWidget(node) {
+      if (!Array.isArray(node.widgets)) return null;
+
+      return (
+        node.widgets.find((w) => w && w.name === "text_count") ??
+        node.widgets.find((w) => w && w.name === "visible_count") ??
+        null
+      );
+    }
+
+    function ensureCountWidget(node) {
+      let countWidget = getCountWidget(node);
+
+      if (!countWidget) {
+        countWidget = node.addWidget(
+          "number",
+          "visible_count",
+          DEFAULT_VISIBLE,
+          null,
+          {
+            min: 1,
+            max: MAX_SLOTS,
+            step: 1,
+          }
+        );
       }
 
-      const sepIdx = node.widgets.indexOf(node.separatorWidget);
+      countWidget.label = countWidget.name;
 
-      if (sepIdx !== -1) return sepIdx;
+      countWidget.options = Object.assign(
+        {},
+        countWidget.options,
+        {
+          min: 1,
+          max: MAX_SLOTS,
+          step: 1,
+        }
+      );
 
-      return node.widgets.length;
+      return countWidget;
     }
 
     function setVisibleCount(node, target, syncWidget = true) {
       target = clampCount(target);
 
-      if (!Array.isArray(node.visibleTextSlots)) node.visibleTextSlots = [];
-      if (!Array.isArray(node.hiddenTextSlots)) node.hiddenTextSlots = [];
+      const slots = getTextSlots(node);
 
-      sortPool(node);
+      // Si el backend no tiene text_count, limpiamos los slots ocultos
+      // para que el backend original no los concatene.
+      const clearHidden = !hasBackendCount(node);
 
-      // Mostrar slots.
-      while (
-        node.visibleTextSlots.length < target &&
-        node.hiddenTextSlots.length > 0
-      ) {
-        const slot = node.hiddenTextSlots.shift();
+      for (const slot of slots) {
+        const visible = slot.index <= target;
 
-        node.widgets.splice(anchorIndex(node), 0, slot.widget);
-        node.visibleTextSlots.push(slot);
-      }
+        slot.widget.hidden = !visible;
 
-      // Ocultar slots.
-      while (
-        node.visibleTextSlots.length > target &&
-        node.visibleTextSlots.length > 1
-      ) {
-        const slot = node.visibleTextSlots.pop();
-
-        const idx = node.widgets.indexOf(slot.widget);
-
-        if (idx !== -1) {
-          node.widgets.splice(idx, 1);
+        if (!visible && clearHidden) {
+          slot.widget.value = "";
         }
-
-        node.hiddenTextSlots.push(slot);
       }
 
-      sortPool(node);
+      if (syncWidget) {
+        const countWidget = getCountWidget(node);
 
-      if (syncWidget && node.countWidget) {
-        node._mikaCountChanging = true;
+        if (countWidget) {
+          node._mikaCountChanging = true;
 
-        try {
-          if (node.countWidget.value !== target) {
-            node.countWidget.value = target;
+          try {
+            if (countWidget.value !== target) {
+              countWidget.value = target;
+            }
+          } finally {
+            node._mikaCountChanging = false;
           }
-        } finally {
-          node._mikaCountChanging = false;
         }
       }
 
@@ -146,67 +185,13 @@ app.registerExtension({
       this.separatorWidget =
         this.widgets.find((w) => w.name === "separator") ?? null;
 
-      this.countWidget =
-        this.widgets.find((w) => w.name === "text_count") ?? null;
+      const countWidget = ensureCountWidget(this);
 
-      if (!this.countWidget) {
-        this.countWidget = this.addWidget(
-          "number",
-          "text_count",
-          DEFAULT_VISIBLE,
-          null,
-          {
-            min: 1,
-            max: MAX_SLOTS,
-            step: 1,
-          }
-        );
-      }
-
-      this.countWidget.label = "text_count";
-
-      this.countWidget.options = Object.assign(
-        {},
-        this.countWidget.options,
-        {
-          min: 1,
-          max: MAX_SLOTS,
-          step: 1,
-        }
-      );
-
-      const textWidgets = this.widgets.filter(
-        (w) => w.name && /^text_\d+$/.test(w.name)
-      );
-
-      const slots = textWidgets
-        .map((widget) => ({
-          index: parseInt(widget.name.split("_")[1], 10),
-          widget,
-        }))
-        .filter((slot) => !Number.isNaN(slot.index))
-        .sort((a, b) => a.index - b.index);
-
-      const initial = clampCount(
-        this.countWidget ? this.countWidget.value : DEFAULT_VISIBLE
-      );
-
-      this.visibleTextSlots = slots.slice(0, initial);
-      this.hiddenTextSlots = slots.slice(initial);
-
-      for (const slot of this.hiddenTextSlots) {
-        const idx = this.widgets.indexOf(slot.widget);
-
-        if (idx !== -1) {
-          this.widgets.splice(idx, 1);
-        }
-      }
-
-      const oldCallback = this.countWidget.callback;
+      const oldCallback = countWidget.callback;
 
       this._mikaCountChanging = false;
 
-      this.countWidget.callback = (value) => {
+      countWidget.callback = (value) => {
         if (oldCallback) {
           try {
             oldCallback(value);
@@ -222,8 +207,8 @@ app.registerExtension({
         try {
           const count = clampCount(value);
 
-          if (this.countWidget.value !== count) {
-            this.countWidget.value = count;
+          if (countWidget.value !== count) {
+            countWidget.value = count;
           }
 
           setVisibleCount(this, count, false);
@@ -231,6 +216,8 @@ app.registerExtension({
           this._mikaCountChanging = false;
         }
       };
+
+      const initial = clampCount(countWidget.value ?? DEFAULT_VISIBLE);
 
       setVisibleCount(this, initial, true);
 
@@ -244,18 +231,28 @@ app.registerExtension({
         ? onSerialize.apply(this, arguments)
         : undefined;
 
-      const count = this.countWidget
-        ? clampCount(this.countWidget.value)
-        : this.visibleTextSlots.length;
+      const countWidget = getCountWidget(this);
+      const slots = getTextSlots(this);
 
-      o.text_count = count;
+      let count = DEFAULT_VISIBLE;
+
+      if (countWidget) {
+        count = clampCount(countWidget.value);
+      } else {
+        const visibleCount = slots.filter(
+          (slot) => !slot.widget.hidden
+        ).length;
+
+        count = clampCount(visibleCount || DEFAULT_VISIBLE);
+      }
+
       o.visibleTextCount = count;
+      o.mikaVisibleCount = count;
+      o.text_count = count;
 
       const vals = {};
 
-      const allSlots = [...this.visibleTextSlots, ...this.hiddenTextSlots];
-
-      for (const slot of allSlots) {
+      for (const slot of slots) {
         vals[`text_${slot.index}`] = slot.widget.value;
       }
 
@@ -275,17 +272,20 @@ app.registerExtension({
         ? onConfigure.apply(this, arguments)
         : undefined;
 
-      const allSlots = [...this.visibleTextSlots, ...this.hiddenTextSlots];
+      this.separatorWidget =
+        this.widgets.find((w) => w.name === "separator") ?? null;
 
+      const countWidget = ensureCountWidget(this);
+
+      // Restaurar valores guardados antes de aplicar visibilidad.
       if (info.mikaTextValues) {
-        for (const slot of allSlots) {
+        const slots = getTextSlots(this);
+
+        for (const slot of slots) {
           const key = `text_${slot.index}`;
-          const oldKey = `text_${slot.index}_text`;
 
           if (key in info.mikaTextValues) {
             slot.widget.value = info.mikaTextValues[key];
-          } else if (oldKey in info.mikaTextValues) {
-            slot.widget.value = info.mikaTextValues[oldKey];
           }
         }
 
@@ -295,28 +295,45 @@ app.registerExtension({
         ) {
           this.separatorWidget.value = info.mikaSeparator;
         }
-      } else {
-        const sv = info.widgets_values || [];
-
+      } else if (
+        Array.isArray(info.widgets_values) &&
+        info.widgets_values.length === this.widgets.length
+      ) {
+        // Solo usar widgets_values si coincide exactamente con la cantidad
+        // actual de widgets; evita desfases con versiones viejas con botones.
         for (
           let i = 0;
-          i < this.widgets.length && i < sv.length;
+          i < this.widgets.length && i < info.widgets_values.length;
           i++
         ) {
-          this.widgets[i].value = sv[i];
+          this.widgets[i].value = info.widgets_values[i];
         }
       }
 
-      const target =
+      const target = clampCount(
         info.text_count ??
-        info.visibleTextCount ??
-        (this.countWidget ? this.countWidget.value : DEFAULT_VISIBLE);
+          info.mikaVisibleCount ??
+          info.visibleTextCount ??
+          countWidget.value ??
+          DEFAULT_VISIBLE
+      );
 
-      setVisibleCount(this, target, true);
+      this._mikaCountChanging = true;
 
+      try {
+        if (countWidget.value !== target) {
+          countWidget.value = target;
+        }
+      } finally {
+        this._mikaCountChanging = false;
+      }
+
+      setVisibleCount(this, target, false);
+
+      // Refuerzo para subgrafos / cambio de pestaña.
       setTimeout(() => {
         try {
-          setVisibleCount(this, target, true);
+          setVisibleCount(this, target, false);
         } catch (e) {
           /* no-op */
         }

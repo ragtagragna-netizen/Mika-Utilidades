@@ -109,5 +109,3 @@ app.registerExtension({
     extendNodeColors();
   },
 });
-
-extendNodeColors();
