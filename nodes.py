@@ -1809,11 +1809,13 @@ class TextLineSelectorMika:
 class TextLineStepperMika:
     """
     Text Line Stepper-Mika: selecciona líneas de forma ESCALONADA (auto-avanza).
-    En cada ejecución selecciona el rango actual y avanza al siguiente bloque.
-    Los índices se actualizan solos pero pueden editarse manualmente.
+    En cada ejecución selecciona `steps` líneas empezando en `start_index`
+    (índice base) y avanza ese mismo bloque hacia el siguiente.
+    `start_index` se actualiza solo tras cada ejecución; `steps` (cantidad de
+    líneas por generación) queda FIJO.
 
-    Con auto_advance=False los índices quedan FIJOS en el rango elegido
-    (se detienen los saltos) y cada ejecución devuelve el mismo bloque.
+    Con auto_advance=False `start_index` queda FIJO (se detiene el avance) y
+    cada ejecución devuelve el mismo bloque.
 
     Salidas:
     - selected_lines: LISTA de strings con las líneas del bloque actual.
@@ -1826,7 +1828,7 @@ class TextLineStepperMika:
             "required": {
                 "text": ("STRING", {"multiline": True, "default": ""}),
                 "start_index": ("INT", {"default": 0, "min": 0, "max": 999999}),
-                "end_index": ("INT", {"default": 2, "min": 0, "max": 999999}),
+                "steps": ("INT", {"default": 1, "min": 1, "max": 999999}),
             },
             "optional": {
                 "auto_advance": ("BOOLEAN", {"default": True}),
@@ -1841,7 +1843,7 @@ class TextLineStepperMika:
     CATEGORY = "Mika Utilidades/prompt"
     OUTPUT_NODE = True
 
-    def run(self, text, start_index, end_index,
+    def run(self, text, start_index, steps,
             auto_advance=True, skip_empty_lines=True):
         all_lines = text.split("\n")
 
@@ -1857,56 +1859,27 @@ class TextLineStepperMika:
                 "ui": {
                     "text": [text],
                     "start_index": [start_index],
-                    "end_index": [end_index],
                 },
-                "result": ([], str(end_index)),
+                "result": ([], str(start_index)),
             }
 
-        start = min(start_index, end_index)
-        end = max(start_index, end_index)
-        chunk_size = end - start + 1
-
-        if start >= total_lines:
-            if auto_advance:
-                next_start, next_end = self._next_range(end, chunk_size, total_lines)
-            else:
-                next_start, next_end = start_index, end_index
-
-            return {
-                "ui": {
-                    "text": [text],
-                    "start_index": [next_start],
-                    "end_index": [next_end],
-                },
-                "result": ([], str(end)),
-            }
-
-        actual_end = min(end, total_lines - 1)
-        selected = lines[start:actual_end + 1]
+        start = start_index % total_lines
+        count = min(steps, total_lines)
+        selected = [lines[(start + i) % total_lines] for i in range(count)]
+        current_end = (start + count - 1) % total_lines
 
         if auto_advance:
-            next_start, next_end = self._next_range(actual_end, chunk_size, total_lines)
+            next_start = (start + count) % total_lines
         else:
-            next_start, next_end = start_index, end_index
+            next_start = start_index
 
         return {
             "ui": {
                 "text": [text],
                 "start_index": [next_start],
-                "end_index": [next_end],
             },
-            "result": (selected, str(actual_end)),
+            "result": (selected, str(current_end)),
         }
-
-    @staticmethod
-    def _next_range(current_end, chunk_size, total_lines):
-        # Al llegar al final se da la vuelta (wrap) en vez de seguir
-        # avanzando hacia adelante para siempre.
-        if total_lines <= 0:
-            return 0, 0
-        next_start = (current_end + 1) % total_lines
-        next_end = min(next_start + chunk_size - 1, total_lines - 1)
-        return next_start, next_end
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):

@@ -29,7 +29,7 @@ No requiere dependencias extra: usa lo que ComfyUI ya trae
 | **Text Concatenate Dynamic-Mika** | `TextConcatenateDynamic` | Concatena hasta 30 textos con separador configurable y limpieza opcional (`clean_output`). |
 | **Prompt Edit (Loop)-Mika** | `PromptEditLoopMika` | Edición de prompt con memoria entre ejecuciones. Devuelve el prompt anterior y el actual. |
 | **Text Line Selector-Mika** | `TextLineSelectorMika` | Selecciona un rango de líneas como LISTA, con opción de eliminarlas del cuadro (`delete_selected_lines`). |
-| **Text Line Stepper-Mika** | `TextLineStepperMika` | Recorrido **escalonado** de líneas: en cada ejecución avanza al siguiente bloque. `auto_advance=False` fija el rango. Salidas: `selected_lines` (lista) y `current_end` (string). |
+| **Text Line Stepper-Mika** | `TextLineStepperMika` | Recorrido **escalonado** de líneas: `start_index` es el índice base que avanza automáticamente cada generación y `steps` es la cantidad de líneas por bloque (fija). `auto_advance=False` fija `start_index`. Salidas: `selected_lines` (lista) y `current_end` (string). |
 
 ## 🧮 Score / Listas
 
@@ -93,7 +93,7 @@ No requiere dependencias extra: usa lo que ComfyUI ya trae
 |---|---|
 | `text_box_editor_mika.js` | Botones copiar/seleccionar/pegar en el header del Editor, dibujo propio colapsado y link estable. |
 | `text_box_visor_mika.js` | Lo mismo para el Visor + preview en vivo por websocket (`mika-visor-preview`). |
-| `text_line_stepper_mika.js` | Refleja el auto-avance en los widgets `start_index`/`end_index` tras cada ejecución. |
+| `text_line_stepper_mika.js` | Refleja el auto-avance en el widget `start_index` tras cada ejecución (`steps` queda fijo). |
 | `fast_nodes_bypasser_mika.js` / `fast_nodes_muter_mika.js` | Inputs dinámicos, toggles por nodo conectado y soporte de subgrafos. |
 | `score_list_mika.js` | Filas compactas del Score List (nombre 2/3 + valor 1/3) y control de filas con `num_rows`. |
 | `execution_timer.js` | Panel flotante arrastrable/colapsable con tiempos por nodo y total, + badges de tiempo sobre cada nodo. |

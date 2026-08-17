@@ -1,7 +1,8 @@
 import { app } from "/scripts/app.js";
 
-// Después de cada ejecución, actualiza la caja de texto y los índices
-// start/end para reflejar el próximo bloque del recorrido escalonado.
+// Después de cada ejecución, actualiza la caja de texto y el índice
+// start para reflejar el próximo bloque del recorrido escalonado.
+// `steps` (cantidad de líneas por generación) no se toca.
 // Sin esto, el avance automático no se refleja visualmente en el nodo.
 app.registerExtension({
   name: "Mika.TextLineStepper",
@@ -28,7 +29,6 @@ app.registerExtension({
 
       setWidget("text", message?.text?.[0]);
       setWidget("start_index", message?.start_index?.[0]);
-      setWidget("end_index", message?.end_index?.[0]);
     };
   },
 });
