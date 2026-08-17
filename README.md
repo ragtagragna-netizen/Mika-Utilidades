@@ -82,7 +82,7 @@ No requiere dependencias extra: usa lo que ComfyUI ya trae
 
 | Nodo | Clase | Descripción |
 |---|---|---|
-| **Index Int-Mika** | `IndexIntMika` | Índice INT con 3 modos: **fixed** (fijo), **increment** (suma `step` por ejecución, con `wrap` opcional entre min/max) y **random** (sorteo entre min/max). Salidas: `index` e `index_text`. |
+| **Index Int-Mika** | `IndexIntMika` | Índice INT con 3 modos: **fixed** (fijo) e **increment** (suma `step` por ejecución, con `wrap` opcional entre min/max; el avance se refleja en el widget `index`) y **random** (sorteo entre min/max, ignora `index`). El input `index` es conectable: si se enlaza un nodo, su valor manda. Salidas: `index` e `index_text`. |
 | **Index Stepper-Mika** | `IndexStepperMika` | Escalona un **rango** `[start..end]` en bloques. `auto_advance` detiene o permite el avance; `loop` + `max_index` para recorrido cíclico. Salidas: `index_list` (LISTA con cada int del rango), `current_start`, `current_end` y `range_text`. |
 
 ---
@@ -97,14 +97,14 @@ No requiere dependencias extra: usa lo que ComfyUI ya trae
 | `fast_nodes_bypasser_mika.js` / `fast_nodes_muter_mika.js` | Inputs dinámicos, toggles por nodo conectado y soporte de subgrafos. |
 | `score_list_mika.js` | Filas compactas del Score List (nombre 2/3 + valor 1/3) y control de filas con `num_rows`. |
 | `execution_timer.js` | Panel flotante arrastrable/colapsable con tiempos por nodo y total, + badges de tiempo sobre cada nodo. |
-| `index_int_mika.js` | Actualiza el widget `value` tras cada ejecución (increment/random). |
+| `index_int_mika.js` | Actualiza el widget `index` tras cada ejecución (increment). |
 | `index_stepper_mika.js` | Actualiza `start_index`/`end_index` tras cada ejecución del stepper de índices. |
 | `list_unpack_mika.js` | Sincroniza las salidas visibles del List Unpack con `output_count`. |
 
 ## Notas
 
 - Todos los nodos aparecen bajo la categoría **`Mika Utilidades/...`**.
-- Los nodos con estado que avanza (steppers, index increment, random) usan
+- Los nodos con estado que avanza (steppers, index increment) usan
   `IS_CHANGED = nan` y mensajes `ui` + JS para persistir el avance en el workflow.
 - Si agregás extensiones que suman samplers/schedulers nuevos, reiniciá
   ComfyUI para que los selectores los detecten.

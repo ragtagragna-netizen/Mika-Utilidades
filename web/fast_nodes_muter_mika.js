@@ -2,8 +2,47 @@ import { app } from "/scripts/app.js";
 
 const MAX_SLOTS = 20;
 
+function getInnerGraphOf(node) {
+	if (!node) return null;
+	if (node.subgraph) return node.subgraph;
+	if (node._subgraph) return node._subgraph;
+
+	if (typeof node.getInnerGraph === "function") {
+		try {
+			return node.getInnerGraph();
+		} catch (e) {
+			return null;
+		}
+	}
+
+	return null;
+}
+
+function pollSubgraphGraph(graph) {
+	const nodes = graph?.nodes || graph?._nodes || [];
+
+	for (const n of nodes) {
+		if (typeof n._mikaSync === "function") n._mikaSync();
+
+		const inner = getInnerGraphOf(n);
+		if (inner && inner !== graph) pollSubgraphGraph(inner);
+	}
+}
+
 app.registerExtension({
 	name: "Mika.FastNodesMuter",
+
+	async nodeCreated(node) {
+		const subgraph = getInnerGraphOf(node);
+		if (!subgraph) return;
+
+		const base = node.onDrawForeground;
+		node.onDrawForeground = function (ctx) {
+			const r = base ? base.apply(this, arguments) : undefined;
+			pollSubgraphGraph(subgraph);
+			return r;
+		};
+	},
 
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
 		if (nodeData.name !== "FastNodesMuterMika") return;
@@ -15,16 +54,6 @@ app.registerExtension({
 		const cleanName = (v) => String(v ?? "").trim();
 		const inputSlotName = (i) => `input_${i}`;
 		const toggleSlotName = (i) => `toggle_${i}`;
-
-		const optionalDefs = nodeData?.input?.optional || {};
-		const toggle0Entry = Object.entries(optionalDefs).find(
-			([k]) => cleanName(k) === "toggle_0"
-		);
-
-		const TOGGLE_IS_INPUT = Boolean(
-			toggle0Entry?.[1]?.[1]?.forceInput ||
-			toggle0Entry?.[1]?.[1]?.defaultInput
-		);
 
 		function getGraph(node) {
 			return node?.graph || app.graph;
@@ -210,6 +239,32 @@ app.registerExtension({
 			return undefined;
 		}
 
+		function getLinkedToggleValue(node, slotName) {
+			const idx = findInputIndex(node, slotName);
+			if (idx < 0) return undefined;
+
+			const input = node.inputs[idx];
+			if (!input || input.link == null) return undefined;
+
+			return resolveLinkedBoolean(getGraph(node), input.link);
+		}
+
+		function getToggleValue(node, slotName) {
+			const promoted = getPromotedBoolean(node, slotName);
+			if (promoted !== undefined) return promoted;
+
+			const linked = getLinkedToggleValue(node, slotName);
+			if (linked !== undefined) return linked;
+
+			const w = node.widgets?.find(
+				(w) => cleanName(w.name) === slotName
+			);
+
+			if (w && w.value != null) return toBool(w.value);
+
+			return undefined;
+		}
+
 		function getNodeConnectedAtInput(node, slotIdx) {
 			const graph = getGraph(node);
 			if (!node?.inputs || !graph) return null;
@@ -286,25 +341,29 @@ app.registerExtension({
 				}
 			}
 
-			// Limpiar toggles inputs sobrantes y ocultar widgets no usados.
+			// Gestionar los slots toggle_i: mantenerlos solo cuando el target
+			// está conectado, hay un link externo o el widget está visible.
+			// El resto se elimina para no bloquear el hit-testing de los
+			// sockets input_i.
 			for (let i = 0; i < MAX_SLOTS; i++) {
 				const targetConnected = isInputLinked(node, inputSlotName(i));
-
-				const toggleIdx = findInputIndex(node, toggleSlotName(i));
-
-				if (toggleIdx >= 0) {
-					const toggleLinked = node.inputs[toggleIdx].link != null;
-
-					if (!targetConnected && !toggleLinked) {
-						node.removeInput(toggleIdx);
-					}
-				} else if (targetConnected && TOGGLE_IS_INPUT) {
-					node.addInput(toggleSlotName(i), "BOOLEAN");
-				}
+				const toggleLinked = isInputLinked(node, toggleSlotName(i));
 
 				const widget = node.widgets?.find(
 					(w) => cleanName(w.name) === toggleSlotName(i)
 				);
+
+				const widgetVisible = widget ? !widget.hidden : false;
+				const keepSlot = targetConnected || toggleLinked || widgetVisible;
+				const toggleIdx = findInputIndex(node, toggleSlotName(i));
+
+				if (toggleIdx < 0 && keepSlot) {
+					node.addInput(toggleSlotName(i), "BOOLEAN", {
+						widget: { name: toggleSlotName(i) },
+					});
+				} else if (toggleIdx >= 0 && !keepSlot) {
+					node.removeInput(toggleIdx);
+				}
 
 				if (widget) {
 					widget.hidden = !targetConnected;
@@ -317,8 +376,6 @@ app.registerExtension({
 		// ------------------------------------------------------------
 
 		function rebuild(node) {
-			ensureInputs(node);
-
 			node._mikaNodeMapping = [];
 
 			// Ocultar todos los widgets toggle.
@@ -353,7 +410,9 @@ app.registerExtension({
 				if (widget) {
 					widget.hidden = false;
 					widget.label = displayName;
-					widget.value = currentState;
+
+					const toggleValue = getToggleValue(node, toggleName);
+					widget.value = toggleValue !== undefined ? toggleValue : currentState;
 
 					widget.callback = (value) => {
 						const graph = getGraph(node);
@@ -378,6 +437,10 @@ app.registerExtension({
 
 			node.setSize([w, h]);
 			node.setDirtyCanvas(true, true);
+
+			// ensureInputs después de ocultar/mostrar widgets, para que la
+			// decisión keepSlot use el estado final de los widgets.
+			ensureInputs(node);
 
 			node._mikaLastSync = 0;
 		}
@@ -527,89 +590,95 @@ app.registerExtension({
 		// Polling: Show Inputs + toggles + mute + promovidos
 		// ------------------------------------------------------------
 
+		nodeType.prototype._mikaSync = function () {
+			const now = Date.now();
+
+			if (this._mikaLastSync && now - this._mikaLastSync <= 400) {
+				return;
+			}
+
+			this._mikaLastSync = now;
+
+			let dirty = false;
+
+			const showW = this.widgets?.find(
+				(w) => cleanName(w.name) === "show_inputs"
+			);
+
+			const currentShow = showW ? Boolean(showW.value) : true;
+
+			if (currentShow !== this._mikaPrevShowInputs) {
+				this._mikaPrevShowInputs = currentShow;
+				ensureInputs(this);
+				dirty = true;
+			}
+
+			const graph = getGraph(this);
+			const mapping = this._mikaNodeMapping || [];
+
+			for (const entry of mapping) {
+				const targetNode = graph.getNodeById(entry.nodeId);
+				if (!targetNode) continue;
+
+				const actualState = isNodeTarget(targetNode);
+				const toggleValue = getToggleValue(this, entry.toggleSlot);
+
+				if (toggleValue !== undefined) {
+					if (toggleValue !== actualState) {
+						setNodeTarget(targetNode, toggleValue);
+						dirty = true;
+					}
+
+					entry._lastValue = toggleValue;
+
+					const w = this.widgets?.find(
+						(w) => cleanName(w.name) === entry.toggleSlot
+					);
+
+					if (w && w.value !== toggleValue) {
+						w.value = toggleValue;
+						dirty = true;
+					}
+
+					continue;
+				}
+
+				const w = this.widgets?.find(
+					(w) => cleanName(w.name) === entry.toggleSlot
+				);
+
+				if (!w) {
+					entry._lastValue = actualState;
+					continue;
+				}
+
+				if (
+					entry._lastValue !== undefined &&
+					w.value !== entry._lastValue &&
+					w.value !== actualState
+				) {
+					setNodeTarget(targetNode, toBool(w.value));
+					entry._lastValue = toBool(w.value);
+					dirty = true;
+				} else if (w.value !== actualState) {
+					w.value = actualState;
+					entry._lastValue = actualState;
+					dirty = true;
+				}
+			}
+
+			if (dirty) {
+				this.setDirtyCanvas(true, true);
+			}
+		};
+
 		const onDrawForeground = nodeType.prototype.onDrawForeground;
 		nodeType.prototype.onDrawForeground = function (ctx) {
 			const r = onDrawForeground
 				? onDrawForeground.apply(this, arguments)
 				: undefined;
 
-			const now = Date.now();
-
-			if (!this._mikaLastSync || now - this._mikaLastSync > 400) {
-				this._mikaLastSync = now;
-
-				let dirty = false;
-
-				const showW = this.widgets?.find(
-					(w) => cleanName(w.name) === "show_inputs"
-				);
-
-				const currentShow = showW ? Boolean(showW.value) : true;
-
-				if (currentShow !== this._mikaPrevShowInputs) {
-					this._mikaPrevShowInputs = currentShow;
-					ensureInputs(this);
-					dirty = true;
-				}
-
-				const graph = getGraph(this);
-				const mapping = this._mikaNodeMapping || [];
-
-				for (const entry of mapping) {
-					const targetNode = graph.getNodeById(entry.nodeId);
-					if (!targetNode) continue;
-
-					const actualState = isNodeTarget(targetNode);
-					const promotedValue = getPromotedBoolean(this, entry.toggleSlot);
-
-					if (promotedValue !== undefined) {
-						if (promotedValue !== actualState) {
-							setNodeTarget(targetNode, promotedValue);
-							dirty = true;
-						}
-
-						entry._lastValue = promotedValue;
-
-						const w = this.widgets?.find(
-							(w) => cleanName(w.name) === entry.toggleSlot
-						);
-
-						if (w && w.value !== promotedValue) {
-							w.value = promotedValue;
-							dirty = true;
-						}
-
-						continue;
-					}
-
-					const w = this.widgets?.find(
-						(w) => cleanName(w.name) === entry.toggleSlot
-					);
-
-					if (!w) {
-						entry._lastValue = actualState;
-						continue;
-					}
-
-					if (
-						entry._lastValue !== undefined &&
-						w.value !== entry._lastValue &&
-						w.value !== actualState
-					) {
-						setNodeTarget(targetNode, toBool(w.value));
-						entry._lastValue = toBool(w.value);
-						dirty = true;
-					} else if (w.value !== actualState) {
-						w.value = actualState;
-						entry._lastValue = actualState;
-						dirty = true;
-					}
-				}
-
-				if (dirty) {
-					this.setDirtyCanvas(true, true);
-				}
-			}
+			this._mikaSync?.();
 
 			return r;
 		};

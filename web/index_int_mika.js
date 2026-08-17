@@ -1,8 +1,8 @@
 import { app } from "/scripts/app.js";
 
-// Después de cada ejecución, actualiza el widget 'value' con el próximo
-// índice (increment) o el valor sorteado (random). Sin esto, el avance
-// no se refleja visualmente ni se guarda en el workflow.
+// Después de cada ejecución, actualiza el widget 'index' con el próximo
+// índice (increment). Si el widget está conectado a otro nodo, el valor del
+// nodo conectado manda y este avance queda guardado en el widget.
 app.registerExtension({
 	name: "Mika.IndexInt",
 
@@ -16,7 +16,17 @@ app.registerExtension({
 			const next = message?.value?.[0];
 			if (next === undefined) return;
 
-			const widget = this.widgets?.find((w) => w.name === "value");
+			const widget = this.widgets?.find((w) => w.name === "index");
+			console.log(
+				"[IndexIntMika] onExecuted message=",
+				message,
+				"widget found=",
+				!!widget,
+				"old value=",
+				widget?.value,
+				"next=",
+				next
+			);
 			if (widget) {
 				widget.value = next;
 				if (widget.callback) {

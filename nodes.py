@@ -1084,6 +1084,174 @@ class LoadImageMika:
             return float("NaN")
 
 
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".jfif")
+
+
+def _mika_list_images(directory):
+    """Lista de rutas de imágenes válidas en un directorio, ordenada."""
+    if not directory or not os.path.isdir(directory):
+        return []
+
+    try:
+        files = [
+            os.path.join(directory, f)
+            for f in os.listdir(directory)
+            if os.path.isfile(os.path.join(directory, f))
+            and f.lower().endswith(_IMAGE_EXTENSIONS)
+        ]
+    except OSError:
+        return []
+
+    return sorted(files)
+
+
+class LoadImageDirMika:
+    """
+    Load Image from Dir-Mika: carga una imagen desde un directorio,
+    seleccionándola por nombre de archivo o por índice dentro de la lista
+    ordenada de imágenes del directorio.
+
+    Modos de carga (load_mode):
+    - by_name: usa "image_name" (nombre de archivo, con o sin extensión).
+    - by_index: usa "image_index" (índice 0-based sobre la lista ordenada).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "directory": ("STRING", {"default": "./ComfyUI/input", "multiline": False}),
+                "load_mode": (["by_name", "by_index"], {"default": "by_name"}),
+            },
+            "optional": {
+                "image_name": ("STRING", {"default": "", "multiline": False}),
+                "image_index": ("INT", {"default": 0, "min": 0, "max": 1000000}),
+                "RGBA": ("BOOLEAN", {"default": False}),
+                "output_dimensions": ("BOOLEAN", {"default": True}),
+                "filename_text_extension": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "INT")
+    RETURN_NAMES = ("image", "mask", "filename_text", "width", "height")
+    FUNCTION = "load_image"
+    CATEGORY = "Mika Utilidades/image"
+
+    @staticmethod
+    def _unwrap_scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    def _resolve_path(self, directory, load_mode, image_name, image_index):
+        directory = os.path.abspath(os.path.expanduser((directory or "").strip()))
+
+        files = _mika_list_images(directory)
+
+        if load_mode == "by_index":
+            idx = self._unwrap_scalar(image_index, 0)
+            try:
+                idx = int(idx)
+            except (TypeError, ValueError):
+                idx = 0
+
+            if idx < 0 or idx >= len(files):
+                print(f"Load Image from Dir-Mika: índice {idx} fuera de rango (0..{max(len(files)-1, 0)}).")
+                idx = 0
+
+            if not files:
+                return None, ""
+
+            return files[idx], os.path.basename(files[idx])
+
+        name = self._unwrap_scalar(image_name, "")
+        name = str(name).strip()
+
+        if not name:
+            if not files:
+                return None, ""
+            return files[0], os.path.basename(files[0])
+
+        # Si la ruta ya existe tal cual, se usa directamente.
+        if os.path.isfile(name):
+            return name, os.path.basename(name)
+
+        # Buscar por nombre con o sin extensión, case-insensitive.
+        base = os.path.splitext(os.path.basename(name))[0].lower()
+
+        for f in files:
+            fname = os.path.basename(f)
+            fbase = os.path.splitext(fname)[0].lower()
+
+            if fname.lower() == name.lower() or fbase == base:
+                return f, fname
+
+        print(f"Load Image from Dir-Mika: no se encontró '{name}' en '{directory}'.")
+        return None, name
+
+    def load_image(self, directory, load_mode="by_name", image_name="",
+                   image_index=0, RGBA=False, output_dimensions=True,
+                   filename_text_extension=True):
+        image_path, filename = self._resolve_path(
+            directory, load_mode, image_name, image_index
+        )
+
+        i = None
+
+        if image_path:
+            try:
+                i = Image.open(image_path)
+                i = ImageOps.exif_transpose(i)
+            except OSError:
+                i = None
+
+        if i is None:
+            i = Image.new(mode='RGB', size=(512, 512), color=(0, 0, 0))
+
+        if output_dimensions:
+            width, height = i.size
+        else:
+            width, height = 0, 0
+
+        image = i
+
+        if not RGBA:
+            image = image.convert('RGB')
+
+        image = np.array(image).astype(np.float32) / 255.0
+        image = torch.from_numpy(image)[None,]
+
+        if 'A' in i.getbands():
+            mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
+            mask = 1. - torch.from_numpy(mask)
+        else:
+            mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
+
+        if filename_text_extension:
+            filename = os.path.basename(filename) if filename else ""
+        else:
+            filename = os.path.splitext(os.path.basename(filename))[0] if filename else ""
+
+        return (image, mask, filename, width, height)
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        directory = kwargs.get('directory', '')
+        load_mode = kwargs.get('load_mode', 'by_name')
+        image_name = kwargs.get('image_name', '')
+        image_index = kwargs.get('image_index', 0)
+
+        inst = cls()
+        image_path, _ = inst._resolve_path(
+            directory, load_mode, image_name, image_index
+        )
+
+        if not image_path or not os.path.exists(image_path):
+            return None
+
+        return _mika_hash_file(image_path) or None
+
+
 class SmartTagFilterMika:
     r"""
     Smart Tag Filter-Mika: filtra tags con soporte de pesos, caracteres
@@ -2305,12 +2473,16 @@ class SamplerSelectorMika:
         más argumentos (steps, device...), por eso NO instanciamos directo.
         """
         samplers_dict = getattr(comfy.samplers.KSampler, "SAMPLERS", {})
-        if sampler_name in samplers_dict:
-            sampler_fn = samplers_dict[sampler_name]
-            try:
-                return sampler_fn()
-            except TypeError:
-                return sampler_fn
+
+        # En ComfyUI recientes SAMPLERS es una lista de nombres y el
+        # objeto se construye con comfy.samplers.sampler_object().
+        if isinstance(samplers_dict, dict):
+            sampler_fn = samplers_dict.get(sampler_name)
+            if sampler_fn is not None:
+                try:
+                    return sampler_fn()
+                except TypeError:
+                    return sampler_fn
 
         sampler_object = getattr(comfy.samplers, "sampler_object", None)
         if callable(sampler_object):
@@ -2468,15 +2640,15 @@ class IndexIntMika:
     """
     Index Int-Mika: índice INT con 3 modos de operación.
 
-    - fixed:     devuelve siempre el valor de 'value' (cacheable).
-    - increment: devuelve 'value' y luego lo auto-incrementa en 'step'
-                 para la próxima ejecución (con wrap opcional entre
-                 min_value y max_value).
+    - fixed:     devuelve siempre el valor de 'index' (cacheable).
+    - increment: devuelve 'index' y luego lo auto-incrementa en 'step',
+                 reflejando el avance en el widget 'index' para la próxima
+                 ejecución (con wrap opcional entre min_value y max_value).
     - random:    sortea un valor entre min_value y max_value en cada
-                 ejecución.
+                 ejecución, ignorando 'index'.
 
-    El avance se refleja en el widget 'value' vía index_int_mika.js,
-    así el estado queda guardado en el workflow.
+    'index' es conectable: si se enlaza un nodo externo, su valor manda
+    sobre el widget.
     """
 
     @classmethod
@@ -2484,7 +2656,7 @@ class IndexIntMika:
         return {
             "required": {
                 "mode": (["fixed", "increment", "random"], {"default": "fixed"}),
-                "value": ("INT", {"default": 0, "min": -9999999, "max": 9999999, "step": 1}),
+                "index": ("INT", {"default": 0, "min": -9999999, "max": 9999999, "step": 1}),
                 "step": ("INT", {"default": 1, "min": -999999, "max": 999999, "step": 1}),
                 "min_value": ("INT", {"default": 0, "min": -9999999, "max": 9999999, "step": 1}),
                 "max_value": ("INT", {"default": 999999, "min": -9999999, "max": 9999999, "step": 1}),
@@ -2500,8 +2672,8 @@ class IndexIntMika:
     CATEGORY = "Mika Utilidades/index"
     OUTPUT_NODE = True
 
-    def run(self, mode, value, step, min_value, max_value, wrap=False):
-        value = int(value)
+    def run(self, mode, index, step, min_value, max_value, wrap=False):
+        index = int(index)
         step = int(step)
         lo = min(int(min_value), int(max_value))
         hi = max(int(min_value), int(max_value))
@@ -2512,35 +2684,34 @@ class IndexIntMika:
         else:
             wrap = bool(wrap)
 
-        if mode == "random":
-            out = random_module.randint(lo, hi)
-            next_value = out
-
-        elif mode == "increment":
-            out = value
-            nxt = value + step
+        if mode == "increment":
+            out = index
+            nxt = index + step
             if wrap:
                 if nxt > hi:
                     nxt = lo
                 elif nxt < lo:
                     nxt = hi
-            next_value = nxt
+            return {
+                "ui": {"value": [nxt]},
+                "result": (out, str(out)),
+            }
 
+        if mode == "random":
+            out = random_module.randint(lo, hi)
         else:  # fixed
-            out = value
-            next_value = value
+            out = index
 
         return {
-            "ui": {"value": [next_value]},
             "result": (out, str(out)),
         }
 
     @classmethod
-    def IS_CHANGED(cls, mode="fixed", value=0, **kwargs):
+    def IS_CHANGED(cls, mode="fixed", index=0, **kwargs):
         # fixed → cacheable; increment/random → re-ejecuta siempre.
         if mode in ("increment", "random"):
             return float("nan")
-        return value
+        return index
 
 
 class IndexStepperMika:
@@ -3198,6 +3369,39 @@ class IfAnyMika:
         return not self._is_empty(value)
 
 
+class BypassDetectorMika:
+    """
+    Bypass Detector-Mika: detecta si el nodo indicado (por título o id)
+    está en modo bypass y devuelve el texto configurado según el estado.
+    La detección la hace el frontend (el bypass es solo visual y nunca
+    llega al backend); el estado se comunica vía el widget is_bypassed.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "target": ("STRING", {"default": "", "multiline": False}),
+                "text_on_bypass": ("STRING", {"default": "", "multiline": True}),
+                "text_on_active": ("STRING", {"default": "", "multiline": True}),
+            },
+            "optional": {
+                "is_bypassed": ("BOOLEAN", {"default": False}),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("STRING", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("text", "bypassed", "state")
+    FUNCTION = "detect"
+    CATEGORY = "Mika Utilidades/utils"
+
+    def detect(self, target="", text_on_bypass="", text_on_active="", is_bypassed=False, unique_id=None):
+        if is_bypassed:
+            return (text_on_bypass, True, "bypass")
+        return (text_on_active, False, "active")
+
+
 # ======================================================================
 # MAPPINGS
 # ======================================================================
@@ -3232,7 +3436,9 @@ NODE_CLASS_MAPPINGS = {
     "IndexIntMika": IndexIntMika,
     "IndexStepperMika": IndexStepperMika,
     "LoadImageNameMika": LoadImageNameMika,
+    "LoadImageDirMika": LoadImageDirMika,
     "IfAnyMika": IfAnyMika,
+    "BypassDetectorMika": BypassDetectorMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3265,5 +3471,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IndexIntMika": "Index Int-Mika",
     "IndexStepperMika": "Index Stepper-Mika",
     "LoadImageNameMika": "Load Image + Name-Mika",
+    "LoadImageDirMika": "Load Image from Dir-Mika",
     "IfAnyMika": "If Any-Mika",
+    "BypassDetectorMika": "Bypass Detector-Mika",
 }
