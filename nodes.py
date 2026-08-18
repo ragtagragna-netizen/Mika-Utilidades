@@ -506,7 +506,7 @@ class ScoreListExtendable:
 
 class TextBoxClipboard:
     """
-    Text Box Editor-Mika: caja de texto con botones de copiar / seleccionar
+    Text Box-Mika: caja de texto con botones de copiar / seleccionar
     todo / pegar en el header (expandido y colapsado).
     """
 
@@ -529,10 +529,11 @@ class TextBoxClipboard:
 
 class TextBoxVisor:
     """
-    Text Box Visor-Mika: muestra CUALQUIER tipo de valor (str, int, float,
-    bool, list, tuple, set, dict, Tensor, ndarray, bytes) como una preview
+    Visor-Mika: muestra CUALQUIER tipo de valor (str, int, float, bool,
+    list, tuple, set, dict, Tensor, ndarray, bytes) como una preview
     legible. Botones en el header (copiar / seleccionar todo / pegar) vía
-    text_box_visor_mika.js. Preview en vivo por websocket.
+    text_box_visor_mika.js. Preview en vivo por websocket. El input `text`
+    es socketless: solo el slot `valor` recibe links.
 
     El límite de elementos mostrados por lista es MAX_ITEMS (fijo, no
     aparece en la interfaz).
@@ -546,7 +547,7 @@ class TextBoxVisor:
             "required": {},
             "optional": {
                 "valor": ("*", {}),
-                "text": ("STRING", {"multiline": True, "default": ""}),
+                "text": ("STRING", {"multiline": True, "default": "", "socketless": True}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -2689,18 +2690,19 @@ class IndexIntMika:
 
 class IndexStepperMika:
     """
-    Index Stepper-Mika: escalona un rango de índices [start..end] en cada
-    ejecución, igual que el Text Line Stepper pero SIN texto.
+    Index Stepper-Mika: escalona índices de forma ESCALONADA (auto-avanza),
+    igual que el Text Line Stepper. En cada ejecución selecciona `steps`
+    índices empezando en `start_index` (índice base) y avanza ese mismo
+    bloque hacia el siguiente, dentro del dominio 0..max_index (cíclico).
+    `start_index` se actualiza solo tras cada ejecución; `steps` queda FIJO.
 
-    - auto_advance=True:  avanza al siguiente bloque (tamaño = end-start+1).
-    - auto_advance=False: el rango queda FIJO (se detiene el escalonado).
-    - loop=True: al pasarse de max_index vuelve a 0.
-    - max_index: tope superior del rango.
+    Con auto_advance=False `start_index` queda FIJO (se detiene el avance) y
+    cada ejecución devuelve el mismo bloque.
 
     Salidas:
-    - index_list: LISTA de INT con cada índice entre start y end (inclusive).
+    - index_list: LISTA de INT con los índices del bloque actual.
     - current_start / current_end: INT con los límites del bloque actual.
-    - range_text: STRING "4-7".
+    - range_text: STRING "4-6".
     """
 
     @classmethod
@@ -2708,12 +2710,11 @@ class IndexStepperMika:
         return {
             "required": {
                 "start_index": ("INT", {"default": 0, "min": 0, "max": 999999}),
-                "end_index": ("INT", {"default": 2, "min": 0, "max": 999999}),
+                "steps": ("INT", {"default": 1, "min": 1, "max": 999999}),
             },
             "optional": {
                 "auto_advance": ("BOOLEAN", {"default": True}),
                 "max_index": ("INT", {"default": 999999, "min": 0, "max": 999999, "step": 1}),
-                "loop": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -2724,40 +2725,29 @@ class IndexStepperMika:
     CATEGORY = "Mika Utilidades/index"
     OUTPUT_NODE = True
 
-    def run(self, start_index, end_index,
-            auto_advance=True, max_index=999999, loop=False):
-
+    def run(self, start_index, steps, auto_advance=True, max_index=999999):
         auto_advance = _mika_coerce_bool(auto_advance)
-        loop = _mika_coerce_bool(loop)
 
-        start = min(int(start_index), int(end_index))
-        end = max(int(start_index), int(end_index))
-        chunk = end - start + 1
-        top = max(0, int(max_index))
+        total = max(1, int(max_index) + 1)
+        steps = max(1, int(steps))
 
-        # Clamp del bloque actual al tope.
-        actual_start = min(start, top)
-        actual_end = min(end, top)
+        start = int(start_index) % total
+        count = min(steps, total)
+        index_list = [((start + i) % total) for i in range(count)]
+
+        current_start = index_list[0] if index_list else start
+        current_end = index_list[-1] if index_list else start
 
         if auto_advance:
-            next_start = actual_end + 1
-            next_end = next_start + chunk - 1
-            if loop and next_start > top:
-                next_start = 0
-                next_end = min(chunk - 1, top)
+            next_start = (start + count) % total
         else:
-            # Rango fijo: no tocar los widgets.
-            next_start, next_end = int(start_index), int(end_index)
-
-        # Lista con CADA int del rango seleccionado (inclusive).
-        index_list = list(range(actual_start, actual_end + 1))
+            next_start = int(start_index)
 
         return {
             "ui": {
                 "start_index": [next_start],
-                "end_index": [next_end],
             },
-            "result": (index_list, actual_start, actual_end, f"{actual_start}-{actual_end}"),
+            "result": (index_list, current_start, current_end, f"{current_start}-{current_end}"),
         }
 
     @classmethod
@@ -3417,8 +3407,8 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "StringSelectorCut": "String Selector (Cut First Line)",
     "ScoreListExtendable": "Score List",
-    "TextBoxClipboard": "Text Box Editor-Mika",
-    "TextBoxVisor": "Text Box Visor-Mika",
+    "TextBoxClipboard": "Text Box-Mika",
+    "TextBoxVisor": "Visor-Mika",
     "TagFilter": "Tag Filter-Mika",
     "TextReplaceDynamic": "Text Replace Dynamic-Mika",
     "TextConcatenateDynamic": "Text Concatenate Dynamic-Mika",

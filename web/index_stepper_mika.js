@@ -1,31 +1,33 @@
 import { app } from "/scripts/app.js";
 
-// Después de cada ejecución, actualiza start_index / end_index con el
-// próximo bloque del recorrido escalonado (o los mismos valores si
-// auto_advance está apagado).
+// Después de cada ejecución, actualiza el índice start para reflejar el
+// próximo bloque del recorrido escalonado.
+// `steps` (cantidad de índices por generación) no se toca.
+// Sin esto, el avance automático no se refleja visualmente en el nodo.
 app.registerExtension({
-	name: "Mika.IndexStepper",
+  name: "Mika.IndexStepper",
+  async beforeRegisterNodeDef(nodeType, nodeData, app) {
+    if (nodeData.name !== "IndexStepperMika") {
+      return;
+    }
 
-	async beforeRegisterNodeDef(nodeType, nodeData, app) {
-		if (nodeData.name !== "IndexStepperMika") return;
+    const onExecuted = nodeType.prototype.onExecuted;
+    nodeType.prototype.onExecuted = function (message) {
+      onExecuted?.apply(this, arguments);
 
-		const onExecuted = nodeType.prototype.onExecuted;
-		nodeType.prototype.onExecuted = function (message) {
-			onExecuted?.apply(this, arguments);
+      // Helper para actualizar un widget por nombre
+      const setWidget = (name, value) => {
+        if (value === undefined) return;
+        const widget = this.widgets?.find((w) => w.name === name);
+        if (widget) {
+          widget.value = value;
+          if (widget.callback) {
+            widget.callback(widget.value);
+          }
+        }
+      };
 
-			const setWidget = (name, value) => {
-				if (value === undefined) return;
-				const widget = this.widgets?.find((w) => w.name === name);
-				if (widget) {
-					widget.value = value;
-					if (widget.callback) {
-						widget.callback(widget.value);
-					}
-				}
-			};
-
-			setWidget("start_index", message?.start_index?.[0]);
-			setWidget("end_index", message?.end_index?.[0]);
-		};
-	},
+      setWidget("start_index", message?.start_index?.[0]);
+    };
+  },
 });

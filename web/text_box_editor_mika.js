@@ -1,6 +1,6 @@
 import { app } from "/scripts/app.js";
 
-console.log("[Mika] Text Box Editor-Mika cargado — v11.1 (botones en header + link estático)");
+console.log("[Mika] Text Box-Mika cargado — v11.2 (botones en header + link estático)");
 
 const ICON_CHECK = ["M20 6L9 17l-5-5"];
 const ICON_CROSS = ["M18 6L6 18", "M6 6l12 12"];
@@ -350,6 +350,14 @@ app.registerExtension({
       this.mikaTextWidget =
         (this.widgets ?? []).find((w) => w.name === "text" || w.type === "customtext" || w.type === "STRING") ?? null;
       bindPaste(this, this.mikaTextWidget);
+
+      // Tamaño por defecto MÍNIMO: el widget multiline trae
+      // options.minNodeSize = [400, 200]; lo bajamos y encogemos el nodo.
+      if (this.mikaTextWidget?.options) {
+        this.mikaTextWidget.options.minNodeSize = [200, 60];
+      }
+      this.size = [200, 60];
+      if (typeof this.onResize === "function") this.onResize(this.size);
       return r;
     };
 
@@ -376,7 +384,7 @@ app.registerExtension({
         const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
         const titleText =
           (typeof this.getTitle === "function" ? this.getTitle() : this.title) ||
-          "Text Box Editor-Mika"; // ← en el visor: "Text Box Visor-Mika"
+          "Text Box-Mika"; // ← en el visor: "Visor-Mika"
 
         // Fuente chica FIJA (misma estética del título colapsado default).
         const titleFont = "10px sans-serif";

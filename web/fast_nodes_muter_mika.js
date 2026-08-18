@@ -624,20 +624,32 @@ app.registerExtension({
 				const toggleValue = getToggleValue(this, entry.toggleSlot);
 
 				if (toggleValue !== undefined) {
-					if (toggleValue !== actualState) {
-						setNodeTarget(targetNode, toggleValue);
-						dirty = true;
-					}
-
-					entry._lastValue = toggleValue;
-
 					const w = this.widgets?.find(
 						(w) => cleanName(w.name) === entry.toggleSlot
 					);
 
-					if (w && w.value !== toggleValue) {
-						w.value = toggleValue;
-						dirty = true;
+					if (toggleValue !== actualState) {
+						if (actualState && !toggleValue) {
+							// El target ya está en mute por un actor externo
+							// (p.ej. Fast Groups Muter-Mika o el subgrafo en
+							// mute): respetarlo y reflejarlo en el widget en
+							// lugar de pisar el modo del nodo.
+							entry._lastValue = actualState;
+							if (w && w.value !== actualState) {
+								w.value = actualState;
+								dirty = true;
+							}
+						} else {
+							setNodeTarget(targetNode, toggleValue);
+							entry._lastValue = toggleValue;
+							dirty = true;
+							if (w && w.value !== toggleValue) {
+								w.value = toggleValue;
+								dirty = true;
+							}
+						}
+					} else {
+						entry._lastValue = toggleValue;
 					}
 
 					continue;
