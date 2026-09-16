@@ -697,8 +697,8 @@ class TagFilter:
             },
         }
 
-    RETURN_TYPES = ("STRING", "INT")
-    RETURN_NAMES = ("text", "tags_count")
+    RETURN_TYPES = ("STRING", "INT", "STRING")
+    RETURN_NAMES = ("text", "tags_count", "rest")
     FUNCTION = "doit"
     CATEGORY = "Mika Utilidades/string"
 
@@ -706,9 +706,10 @@ class TagFilter:
         sep = separator if separator else ","
         parts = [p.strip() for p in (text or "").split(sep) if p.strip() != ""]
         kept = parts[:max_tags] if max_tags > 0 else []
+        rest = parts[max_tags:] if max_tags > 0 else parts
         joiner = sep.strip() + " " if sep.strip() else sep
 
-        return (joiner.join(kept), len(kept))
+        return (joiner.join(kept), len(kept), joiner.join(rest))
 
 
 MAX_REPLACES = 30
@@ -3365,6 +3366,97 @@ class BypassDetectorMika:
         return (text_on_active, False, "active")
 
 
+class TextSaveMika:
+    """
+    Text Save-Mika: guarda texto en un archivo local.
+
+    write_mode:
+    - overwrite: reemplaza el contenido del archivo.
+    - append:    agrega el texto al final del archivo.
+    - prepend:   agrega el texto al inicio del archivo.
+
+    El texto puede venir por SLOT (text, forceInput) o escribirse en la
+    caja editable si el slot no está conectado.
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "save_path": ("STRING", {"default": "./ComfyUI/output/text", "multiline": False}),
+                "filename": ("STRING", {"default": "mika_text.txt", "multiline": False}),
+                "write_mode": (["overwrite", "append", "prepend"], {"default": "overwrite"}),
+                "file_format": (
+                    [".txt", ".log", ".md", ".csv", ".json", ".html", ".xml", ".yaml", ".yml", ".ini", ".cfg", ".css", ".py"],
+                    {"default": ".txt"},
+                ),
+            },
+            "optional": {
+                "text": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
+                "separator": ("STRING", {"default": "\\n", "multiline": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "INT")
+    RETURN_NAMES = ("filepath", "char_count")
+    FUNCTION = "save"
+    CATEGORY = "Mika Utilidades/string"
+    OUTPUT_NODE = True
+
+    def save(self, save_path, filename, write_mode="overwrite", file_format=".txt", text="", separator="\\n"):
+        save_path = os.path.abspath(os.path.expanduser((save_path or "").strip()))
+        filename = (filename or "").strip()
+
+        if not filename:
+            raise ValueError("Text Save-Mika: filename no puede estar vacío.")
+
+        try:
+            os.makedirs(save_path, exist_ok=True)
+        except Exception as e:
+            raise RuntimeError(f"Text Save-Mika: no se pudo crear la carpeta '{save_path}': {e}")
+
+        if not isinstance(text, str):
+            text = str(text)
+
+        ext = (file_format or ".txt").strip().lower()
+        if not ext.startswith("."):
+            ext = "." + ext
+
+        if not filename.lower().endswith(ext):
+            filename += ext
+
+        filepath = os.path.join(save_path, filename)
+        sep = _mika_decode_separator(separator)
+
+        if write_mode == "append":
+            existing = ""
+            if os.path.isfile(filepath):
+                with open(filepath, "r", encoding="utf-8") as f:
+                    existing = f.read()
+            content = existing + sep + text
+        elif write_mode == "prepend":
+            existing = ""
+            if os.path.isfile(filepath):
+                with open(filepath, "r", encoding="utf-8") as f:
+                    existing = f.read()
+            content = text + sep + existing
+        else:
+            content = text
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        print(f"Text Save-Mika: {len(content)} caracteres guardados en '{filepath}' (modo: {write_mode}).")
+
+        return (filepath, len(content))
+
+
 # ======================================================================
 # MAPPINGS
 # ======================================================================
@@ -3402,6 +3494,7 @@ NODE_CLASS_MAPPINGS = {
     "LoadImageDirMika": LoadImageDirMika,
     "IfAnyMika": IfAnyMika,
     "BypassDetectorMika": BypassDetectorMika,
+    "TextSaveMika": TextSaveMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3437,4 +3530,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadImageDirMika": "Load Image from Dir-Mika",
     "IfAnyMika": "If Any-Mika",
     "BypassDetectorMika": "Bypass Detector-Mika",
+    "TextSaveMika": "Text Save-Mika",
 }
