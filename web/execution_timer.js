@@ -10,8 +10,8 @@ import { api } from "/scripts/api.js";
  * 1. Una etiqueta flotando sobre cada nodo con el tiempo de su última
  *    corrida (verde = rápido, amarillo = medio, rojo = lento, azul =
  *    resultado tomado de caché).
- * 2. Un panel flotante, arrastrable y colapsable, en la esquina
- *    inferior derecha, con el detalle de todos los nodos de la corrida
+ * 2. Un panel flotante, arrastrable y colapsable, abajo al centro de
+ *    la ventana, con el detalle de todos los nodos de la corrida
  *    actual ordenados de más lento a más rápido, y el total abajo.
  *
  * No hace falta agregar ningún nodo al workflow para que funcione: se
@@ -108,7 +108,7 @@ function ensurePanel() {
 	Object.assign(panelEl.style, {
 		position: "fixed",
 		right: "16px",
-		bottom: "16px",
+		bottom: "60px",
 		width: "260px",
 		maxHeight: "50vh",
 		background: "rgba(20,20,24,0.92)",
@@ -151,7 +151,7 @@ function ensurePanel() {
 	});
 
 	const titleText = document.createElement("span");
-	titleText.textContent = "⏱ Mika · Tiempos de ejecución";
+	titleText.textContent = "⏱ Mika - Timer";
 	titleText.style.fontSize = "14px";
 
 	liveTimeEl = document.createElement("span");

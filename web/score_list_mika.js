@@ -79,6 +79,16 @@ app.registerExtension({
 
 			const rows = getRowsCount(node);
 
+			// Un único DOM widget que contiene TODAS las filas, para evitar que
+			// los DOM widgets individuales se solapen / colapsen al cambiar de
+			// pestaña en ComfyUI.
+			const root = document.createElement("div");
+			root.style.display = "flex";
+			root.style.flexDirection = "column";
+			root.style.gap = "4px";
+			root.style.width = "100%";
+			root.style.boxSizing = "border-box";
+
 			for (let i = 1; i <= rows; i++) {
 				const nameW = node.widgets?.find((w) => cleanName(w.name) === `nombre_${i}`);
 				const valW = node.widgets?.find((w) => cleanName(w.name) === String(i));
@@ -92,19 +102,25 @@ app.registerExtension({
 				container.style.margin = "0";
 				container.style.padding = "0";
 
-				// Nombre: 2/3 del ancho
+				// Nombre: 2/3 del ancho (vacío por defecto).
 				const nameInput = document.createElement("input");
 				nameInput.type = "text";
 				nameInput.style.flex = "2 1 0%";
 				styleInput(nameInput);
-				nameInput.value = String(nameW?.value ?? `Opción ${i}`);
+				nameInput.value = String(nameW?.value ?? "");
 
-				// Valor: 1/3 del ancho
+				// Valor: 1/3 del ancho.
 				const valInput = document.createElement("input");
 				valInput.type = "number";
 				valInput.style.flex = "1 1 0%";
 				styleInput(valInput);
 				valInput.value = String(valW?.value ?? 0);
+
+				// La rueda del ratón NO debe cambiar el valor (solo flechas).
+				valInput.addEventListener("wheel", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+				}, { passive: false });
 
 				nameInput.addEventListener("input", () => {
 					if (nameW) {
@@ -122,24 +138,27 @@ app.registerExtension({
 
 				container.appendChild(nameInput);
 				container.appendChild(valInput);
-
-				const domWidget = node.addDOMWidget(
-					`mika_row_${i}_b${buildCounter}`,
-					"mika_score_row",
-					container
-				);
-				domWidget.serialize = false;
-
-				// Alto fijo y compacto de la fila.
-				try {
-					domWidget.computeSize = function () {
-						return [node.size?.[0] ?? 200, ROW_HEIGHT];
-					};
-				} catch (e) { /* no-op */ }
-
-				node._mikaRowWidgets.push(domWidget);
-				node._mikaRowElements.push(container);
+				root.appendChild(container);
 			}
+
+			const domWidget = node.addDOMWidget(
+				`mika_rows_${buildCounter}`,
+				"mika_score_rows",
+				root
+			);
+			domWidget.serialize = false;
+
+			// Alto fijo = filas apiladas (22px cada una + 4px de gap).
+			const totalH = rows * ROW_HEIGHT + (rows - 1) * 4;
+			root.style.height = Math.max(ROW_HEIGHT, totalH) + "px";
+			try {
+				domWidget.computeSize = function () {
+					return [node.size?.[0] ?? 200, Math.max(ROW_HEIGHT, totalH)];
+				};
+			} catch (e) { /* no-op */ }
+
+			node._mikaRowWidgets.push(domWidget);
+			node._mikaRowElements.push(root);
 
 			// Widget num_rows al principio + hook para reconstruir.
 			const rowsW = node.widgets?.find((w) => cleanName(w.name) === "num_rows");

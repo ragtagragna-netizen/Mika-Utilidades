@@ -1,48 +1,12 @@
 import { app } from "/scripts/app.js";
+import { enforceModes, releaseActive, forgetController } from "./mika_bypass_engine.js";
 
 const MAX_SLOTS = 20;
-
-function getInnerGraphOf(node) {
-	if (!node) return null;
-	if (node.subgraph) return node.subgraph;
-	if (node._subgraph) return node._subgraph;
-
-	if (typeof node.getInnerGraph === "function") {
-		try {
-			return node.getInnerGraph();
-		} catch (e) {
-			return null;
-		}
-	}
-
-	return null;
-}
-
-function pollSubgraphGraph(graph) {
-	const nodes = graph?.nodes || graph?._nodes || [];
-
-	for (const n of nodes) {
-		if (typeof n._mikaSync === "function") n._mikaSync();
-
-		const inner = getInnerGraphOf(n);
-		if (inner && inner !== graph) pollSubgraphGraph(inner);
-	}
-}
+const OFF_MODE = 4; // bypass
+const TICK_MS = 400;
 
 app.registerExtension({
 	name: "Mika.FastNodesBypasser",
-
-	async nodeCreated(node) {
-		const subgraph = getInnerGraphOf(node);
-		if (!subgraph) return;
-
-		const base = node.onDrawForeground;
-		node.onDrawForeground = function (ctx) {
-			const r = base ? base.apply(this, arguments) : undefined;
-			pollSubgraphGraph(subgraph);
-			return r;
-		};
-	},
 
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
 		if (nodeData.name !== "FastNodesBypasserMika") return;
@@ -63,13 +27,16 @@ app.registerExtension({
 			return n?.mode === 4;
 		}
 
-		function setNodeTarget(n, value) {
-			if (!n) return;
-
-			n.mode = value ? 4 : 0;
-
-			const graph = n.graph || app.graph;
-			graph?.setDirtyCanvas(true, true);
+		// Construye los targets {n, active} a partir del mapping y aplica el motor.
+		function syncApply(node, mapping) {
+			const graph = getGraph(node);
+			const targets = [];
+			for (const entry of mapping) {
+				const targetNode = graph.getNodeById(entry.nodeId);
+				if (!targetNode) continue;
+				targets.push({ n: targetNode, active: Boolean(entry._active) });
+			}
+			enforceModes(node, targets, OFF_MODE);
 		}
 
 		function toBool(value) {
@@ -396,12 +363,13 @@ app.registerExtension({
 				const displayName = getNodeDisplayName(connectedNode);
 				const currentState = isNodeTarget(connectedNode);
 
-				node._mikaNodeMapping.push({
+				const newEntry = {
 					toggleSlot: toggleName,
 					nodeId: connectedNode.id,
 					nodeName: displayName,
-					_lastValue: currentState,
-				});
+					_active: currentState,
+				};
+				node._mikaNodeMapping.push(newEntry);
 
 				const widget = node.widgets?.find(
 					(w) => cleanName(w.name) === toggleName
@@ -415,21 +383,36 @@ app.registerExtension({
 					widget.value = toggleValue !== undefined ? toggleValue : currentState;
 
 					widget.callback = (value) => {
-						const graph = getGraph(node);
-						const target = graph.getNodeById(connectedNode.id);
+						const entry = node._mikaNodeMapping?.find(
+							(m) => m.toggleSlot === toggleName
+						);
+						const boolValue = toBool(value);
 
-						if (target) {
-							setNodeTarget(target, toBool(value));
+						if (entry) {
+							entry._active = boolValue;
+							entry._lastApplied = boolValue;
+						}
 
-							const entry = node._mikaNodeMapping?.find(
-								(m) => m.toggleSlot === toggleName
-							);
+						// Write-through al promovido: es la misma perilla.
+						const container = getSubgraphContainer(node);
+						const pw = container?.widgets?.find((w) =>
+							nameMatchesSlot(cleanName(w?.name), toggleName)
+						);
+						if (pw) pw.value = boolValue;
 
-							if (entry) entry._lastValue = toBool(value);
+						syncApply(node, node._mikaNodeMapping || []);
+
+						if (!boolValue && entry) {
+							// OFF explícito: sale del bypass aunque lo hubiera
+							// impuesto un actor externo (p.ej. rgthree).
+							const target = getGraph(node).getNodeById(entry.nodeId);
+							if (target) releaseActive(node, [target]);
 						}
 					};
 				}
 			}
+
+			syncApply(node, node._mikaNodeMapping);
 
 			const visibleWidgets = (node.widgets || []).filter((w) => !w.hidden);
 			const h = Math.max(visibleWidgets.length * 20 + 6, 36);
@@ -441,44 +424,6 @@ app.registerExtension({
 			// ensureInputs después de ocultar/mostrar widgets, para que la
 			// decisión keepSlot use el estado final de los widgets.
 			ensureInputs(node);
-
-			node._mikaLastSync = 0;
-		}
-
-		function applyToggleState(node, toggleState) {
-			if (!node || !toggleState || typeof toggleState !== "object") return;
-
-			const graph = getGraph(node);
-			const mapping = node._mikaNodeMapping || [];
-
-			if (!mapping.length) {
-				rebuild(node);
-			}
-
-			for (const [slotName, rawValue] of Object.entries(toggleState)) {
-				const entry = (node._mikaNodeMapping || []).find(
-					(m) => m.toggleSlot === slotName
-				);
-
-				if (!entry) continue;
-
-				const targetNode = graph.getNodeById(entry.nodeId);
-				if (!targetNode) continue;
-
-				const targetState = toBool(rawValue);
-
-				if (isNodeTarget(targetNode) !== targetState) {
-					setNodeTarget(targetNode, targetState);
-				}
-
-				entry._lastValue = targetState;
-
-				const widget = node.widgets?.find(
-					(w) => cleanName(w.name) === slotName
-				);
-
-				if (widget) widget.value = targetState;
-			}
 		}
 
 		// ------------------------------------------------------------
@@ -509,6 +454,112 @@ app.registerExtension({
 		}
 
 		// ------------------------------------------------------------
+		// Tick periódico estilo TrixNodes: concilia display y mantenimiento,
+		// pero NUNCA escribe modos por sí solo. La escritura es por click o
+		// por cambio en un control externo (promovido/linkeado). Funciona en
+		// frontend clásico y Vue.
+		// ------------------------------------------------------------
+
+		function tick(node) {
+			let dirty = false;
+
+			const showW = node.widgets?.find(
+				(w) => cleanName(w.name) === "show_inputs"
+			);
+
+			const currentShow = showW ? Boolean(showW.value) : true;
+
+			if (currentShow !== node._mikaPrevShowInputs) {
+				node._mikaPrevShowInputs = currentShow;
+				ensureInputs(node);
+				dirty = true;
+			}
+
+			const graph = getGraph(node);
+			const mapping = node._mikaNodeMapping || [];
+
+			let needEnforce = false;
+
+			for (const entry of mapping) {
+				const targetNode = graph.getNodeById(entry.nodeId);
+				if (!targetNode) continue;
+
+				const actualState = isNodeTarget(targetNode);
+
+				// Refrescar label ante renombres del target.
+				const liveName = getNodeDisplayName(targetNode);
+				if (entry.nodeName !== liveName) entry.nodeName = liveName;
+				const w = node.widgets?.find(
+					(w) => cleanName(w.name) === entry.toggleSlot
+				);
+				if (w && w.label !== liveName) {
+					w.label = liveName;
+					dirty = true;
+				}
+
+				const promotedValue = getPromotedBoolean(node, entry.toggleSlot);
+				const linkedValue =
+					promotedValue === undefined
+						? getLinkedToggleValue(node, entry.toggleSlot)
+						: undefined;
+				const externalValue = promotedValue ?? linkedValue;
+
+				if (externalValue !== undefined) {
+					// Control externo: manda y se aplica por flanco.
+					const ev = toBool(externalValue);
+					if (w && w.value !== ev) {
+						w.value = ev;
+						dirty = true;
+					}
+					entry._active = ev;
+					if (entry._lastApplied !== ev) {
+						entry._lastApplied = ev;
+						needEnforce = true;
+					}
+					continue;
+				}
+
+				if (!w || w.value == null) {
+					entry._active = false;
+					continue;
+				}
+
+				// Toggle propio: el display sigue a la realidad (adopt).
+				const wValue = toBool(w.value);
+				entry._active = wValue;
+				if (wValue !== actualState) {
+					w.value = actualState;
+					entry._active = actualState;
+					dirty = true;
+				}
+
+				continue;
+			}
+
+			if (needEnforce) syncApply(node, mapping);
+
+			if (dirty) {
+				node.setDirtyCanvas(true, true);
+			}
+		}
+
+		function startTick(node) {
+			if (node._mikaInterval) return;
+			node._mikaInterval = setInterval(() => {
+				try {
+					tick(node);
+				} catch (e) {}
+			}, TICK_MS);
+		}
+
+		function stopTick(node) {
+			if (node._mikaInterval) {
+				clearInterval(node._mikaInterval);
+				node._mikaInterval = null;
+			}
+		}
+
+		// ------------------------------------------------------------
 		// Ciclo de vida del nodo
 		// ------------------------------------------------------------
 
@@ -517,7 +568,6 @@ app.registerExtension({
 			const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
 
 			this._mikaNodeMapping = [];
-			this._mikaLastSync = 0;
 			this._mikaPrevShowInputs = true;
 
 			if (!this.widgets?.some((w) => cleanName(w.name) === "show_inputs")) {
@@ -546,6 +596,8 @@ app.registerExtension({
 				rebuild(this);
 			}, 100);
 
+			startTick(this);
+			hookRemove(this);
 			return r;
 		};
 
@@ -558,8 +610,23 @@ app.registerExtension({
 				rebuild(this);
 			}, 100);
 
+			startTick(this);
+			hookRemove(this);
 			return r;
 		};
+
+		function hookRemove(node) {
+			if (!node || node._mikaRemoveHooked) return;
+			node._mikaRemoveHooked = true;
+			const prevRemove = node.onRemoved;
+			node.onRemoved = function () {
+				try {
+					stopTick(node);
+					forgetController(node);
+				} catch (e) {}
+				if (typeof prevRemove === "function") prevRemove.apply(this, arguments);
+			};
+		}
 
 		const onConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (type, slot, isConnect, linkInfo) {
@@ -572,125 +639,6 @@ app.registerExtension({
 					rebuild(this);
 				}, 50);
 			}
-
-			return r;
-		};
-
-		const onExecuted = nodeType.prototype.onExecuted;
-		nodeType.prototype.onExecuted = function (message) {
-			onExecuted?.apply(this, arguments);
-
-			const toggleState = message?.toggle_state?.[0];
-			if (!toggleState || typeof toggleState !== "object") return;
-
-			applyToggleState(this, toggleState);
-		};
-
-		// ------------------------------------------------------------
-		// Polling: Show Inputs + toggles + bypass + promovidos
-		// ------------------------------------------------------------
-
-		nodeType.prototype._mikaSync = function () {
-			const now = Date.now();
-
-			if (this._mikaLastSync && now - this._mikaLastSync <= 400) {
-				return;
-			}
-
-			this._mikaLastSync = now;
-
-			let dirty = false;
-
-			const showW = this.widgets?.find(
-				(w) => cleanName(w.name) === "show_inputs"
-			);
-
-			const currentShow = showW ? Boolean(showW.value) : true;
-
-			if (currentShow !== this._mikaPrevShowInputs) {
-				this._mikaPrevShowInputs = currentShow;
-				ensureInputs(this);
-				dirty = true;
-			}
-
-			const graph = getGraph(this);
-			const mapping = this._mikaNodeMapping || [];
-
-			for (const entry of mapping) {
-				const targetNode = graph.getNodeById(entry.nodeId);
-				if (!targetNode) continue;
-
-				const actualState = isNodeTarget(targetNode);
-				const toggleValue = getToggleValue(this, entry.toggleSlot);
-
-				if (toggleValue !== undefined) {
-					const w = this.widgets?.find(
-						(w) => cleanName(w.name) === entry.toggleSlot
-					);
-
-					if (toggleValue !== actualState) {
-						if (actualState && !toggleValue) {
-							// El target ya está en bypass por un actor externo
-							// (p.ej. Fast Groups Bypasser-Mika o el subgrafo en
-							// bypass): respetarlo y reflejarlo en el widget en
-							// lugar de pisar el modo del nodo.
-							entry._lastValue = actualState;
-							if (w && w.value !== actualState) {
-								w.value = actualState;
-								dirty = true;
-							}
-						} else {
-							setNodeTarget(targetNode, toggleValue);
-							entry._lastValue = toggleValue;
-							dirty = true;
-							if (w && w.value !== toggleValue) {
-								w.value = toggleValue;
-								dirty = true;
-							}
-						}
-					} else {
-						entry._lastValue = toggleValue;
-					}
-
-					continue;
-				}
-
-				const w = this.widgets?.find(
-					(w) => cleanName(w.name) === entry.toggleSlot
-				);
-
-				if (!w) {
-					entry._lastValue = actualState;
-					continue;
-				}
-
-				if (
-					entry._lastValue !== undefined &&
-					w.value !== entry._lastValue &&
-					w.value !== actualState
-				) {
-					setNodeTarget(targetNode, toBool(w.value));
-					entry._lastValue = toBool(w.value);
-					dirty = true;
-				} else if (w.value !== actualState) {
-					w.value = actualState;
-					entry._lastValue = actualState;
-					dirty = true;
-				}
-			}
-
-			if (dirty) {
-				this.setDirtyCanvas(true, true);
-			}
-		};
-
-		const onDrawForeground = nodeType.prototype.onDrawForeground;
-		nodeType.prototype.onDrawForeground = function (ctx) {
-			const r = onDrawForeground
-				? onDrawForeground.apply(this, arguments)
-				: undefined;
-
-			this._mikaSync?.();
 
 			return r;
 		};

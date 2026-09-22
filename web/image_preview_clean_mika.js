@@ -149,7 +149,7 @@ function eventToCanvasCoords(e) {
 }
 
 function findIconAt(e, flagName) {
-  const graph = app.graph;
+  const graph = app.canvas?.graph ?? app.graph;
   const pt = eventToCanvasCoords(e);
   if (!graph || !pt || pt[0] == null) return null;
   const nodes = graph._nodes ?? [];

@@ -30,6 +30,7 @@ No requiere dependencias extra: usa lo que ComfyUI ya trae
 | **Prompt Edit (Loop)-Mika** | `PromptEditLoopMika` | Edición de prompt con memoria entre ejecuciones. Devuelve el prompt anterior y el actual. |
 | **Text Line Selector-Mika** | `TextLineSelectorMika` | Selecciona un rango de líneas como LISTA, con opción de eliminarlas del cuadro (`delete_selected_lines`). |
 | **Text Line Stepper-Mika** | `TextLineStepperMika` | Recorrido **escalonado** de líneas: `start_index` es el índice base que avanza automáticamente cada generación y `steps` es la cantidad de líneas por bloque (fija). `auto_advance=False` fija `start_index`. Salidas: `selected_lines` (lista) y `current_end` (string). |
+| **Prompt Clean & Dedupe-Mika** | `PromptCleanDedupeMika` | Une **AnimaPromptFormatter** + **Remove Duplicate Tags [LP]**: quita saltos de línea, normaliza separadores a `", "` (sin espacios extra ni tags vacíos) y elimina tags repetidos conservando la primera aparición. `trailing_comma` activa la coma final como la del de LevelPixel. |
 
 ## 🧮 Score / Listas
 

@@ -273,7 +273,7 @@ function eventToCanvasCoords(e) {
 
 // Busca un icono (colapsado o expandido) bajo el cursor.
 function findIconAt(e, flagName) {
-  const graph = app.graph;
+  const graph = app.canvas?.graph ?? app.graph;
   const pt = eventToCanvasCoords(e);
   if (!graph || !pt || pt[0] == null) return null;
   const nodes = graph._nodes ?? [];
@@ -321,13 +321,9 @@ app.registerExtension({
   name: "Mika.TextBoxEditorMika",
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== "TextBoxClipboard") return;
+    if (nodeData.name !== "TextBoxClipboard" && nodeData.name !== "NoteMika") return;
     const FLAG = "_mikaIsTextBoxEditor";
 
-    // FIX LINK: el cable usa NUESTRO ancho cacheado (constante), así el
-    // ancla coincide con la barra dibujada y no oscila nunca. Se define UNA
-    // sola vez: re-envolverlo dentro de onDrawCollapsed acumulaba una capa
-    // por redibujado y degradaba el rendimiento.
     const origGetConnectionPos = nodeType.prototype.getConnectionPos;
     nodeType.prototype.getConnectionPos = function (is_input, slot_number, out) {
       const res = origGetConnectionPos
@@ -351,8 +347,6 @@ app.registerExtension({
         (this.widgets ?? []).find((w) => w.name === "text" || w.type === "customtext" || w.type === "STRING") ?? null;
       bindPaste(this, this.mikaTextWidget);
 
-      // Tamaño por defecto MÍNIMO: el widget multiline trae
-      // options.minNodeSize = [400, 200]; lo bajamos y encogemos el nodo.
       if (this.mikaTextWidget?.options) {
         this.mikaTextWidget.options.minNodeSize = [200, 60];
       }
@@ -361,7 +355,6 @@ app.registerExtension({
       return r;
     };
 
-    // Expandido: iconos en el header + engancha el paste nativo.
     const onDrawForeground = nodeType.prototype.onDrawForeground;
     nodeType.prototype.onDrawForeground = function (ctx) {
       const r = onDrawForeground ? onDrawForeground.apply(this, arguments) : undefined;
@@ -373,33 +366,37 @@ app.registerExtension({
       return r;
     };
 
-    // Colapsado: lo dibujamos COMPLETO nosotros (return true evita que
-    // LiteGraph pinte su barra encima y tape los iconos). Replicamos la
-    // estética default: barra de altura estándar, fuente chica, forma
-    // según la configuración (box/round/circle/card) y círculo indicador.
-    // Al ser los únicos que fijan _collapsed_width, el link queda estable.
     nodeType.prototype.onDrawCollapsed = function (ctx) {
       try {
         const LG = window.LiteGraph ?? {};
         const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
         const titleText =
           (typeof this.getTitle === "function" ? this.getTitle() : this.title) ||
-          "Text Box-Mika"; // ← en el visor: "Visor-Mika"
+          "Mika";
 
-        // Fuente chica FIJA (misma estética del título colapsado default).
-        const titleFont = "10px sans-serif";
+        const titleFont = `${Math.round(titleHeight * 0.42)}px sans-serif`;
         ctx.save();
         ctx.font = titleFont;
-        const titleWidth = ctx.measureText(titleText).width;
 
         const iconsWidth = ICONS.length * (ICON_SIZE + ICON_GAP) + ICON_GAP;
+        const titleWidth = ctx.measureText(titleText).width;
+        const expandedWidth = this.size?.[0] ?? 200;
         const width = Math.max(
           LG.NODE_COLLAPSED_WIDTH ?? 80,
-          titleHeight + titleWidth + 14 + iconsWidth
+          Math.min(expandedWidth, titleHeight + titleWidth + 14 + iconsWidth)
         );
-        this._mikaCollapsedWidth = width; // fuente de verdad propia (no pelea con LiteGraph)
+        this._mikaCollapsedWidth = width;
 
-        // Barra con la forma configurada (igual que el resto de nodos).
+        // El título se ajusta al ancho del nodo, no al revés (como los nativos).
+        const maxTitleWidth = width - titleHeight - iconsWidth - 22;
+        let displayTitle = titleText;
+        if (ctx.measureText(displayTitle).width > maxTitleWidth) {
+          while (displayTitle.length && ctx.measureText(displayTitle + "…").width > maxTitleWidth) {
+            displayTitle = displayTitle.slice(0, -1);
+          }
+          displayTitle += "…";
+        }
+
         const radius = LG.ROUND_RADIUS ?? 8;
         const shape = nodeShape(this);
         ctx.fillStyle = this.bgcolor ?? LG.NODE_DEFAULT_BGCOLOR ?? "#353535";
@@ -415,23 +412,36 @@ app.registerExtension({
         }
         ctx.fill();
 
-        // Círculo indicador izquierdo (igual que default).
         ctx.fillStyle = this.boxcolor ?? LG.NODE_DEFAULT_BOXCOLOR ?? "#888";
         ctx.beginPath();
         ctx.arc(titleHeight * 0.5, -titleHeight * 0.5, titleHeight * 0.28, 0, Math.PI * 2);
         ctx.fill();
 
-        // Título con fuente chica.
         ctx.fillStyle = LG.NODE_TITLE_COLOR ?? "#999";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        ctx.fillText(titleText, titleHeight + 8, -titleHeight * 0.5 + 1);
+        ctx.fillText(displayTitle, titleHeight + 8, -titleHeight * 0.5 + 1);
         ctx.restore();
 
-        // Iconos a la derecha, sobre nuestra propia barra (quedan visibles).
         drawHeaderIcons(this, ctx);
+
+        // Recuadro de selección blanco (igual que drawNodeShape de LiteGraph).
+        if (this.is_selected) {
+          ctx.save();
+          ctx.globalAlpha = 0.8;
+          ctx.strokeStyle = LG.NODE_BOX_OUTLINE_COLOR ?? "#FFF";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          if (shape === "box") {
+            ctx.rect(-6, -titleHeight - 6, width + 13, titleHeight + 12);
+          } else {
+            ctx.roundRect(-6, -titleHeight - 6, width + 13, titleHeight + 12, [radius * 2]);
+          }
+          ctx.stroke();
+          ctx.restore();
+        }
       } catch (e) { /* no-op */ }
-      return true; // nosotros dibujamos todo; LiteGraph no pisa nada.
+      return true;
     };
 
     const origGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;

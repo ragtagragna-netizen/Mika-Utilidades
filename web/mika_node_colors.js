@@ -1,9 +1,10 @@
 import { app } from "/scripts/app.js";
 
 // -----------------------------------------------------------------------
-// Mika · Colores extra para el menú "Colors" — v3 (variedad sin escalas)
+// Mika · Colores extra para el menú "Colors" — v4 (variedad cromática amplia)
 // -----------------------------------------------------------------------
-// Paleta reducida: menos variaciones del mismo color, más colores distintos.
+// Paleta amplia que recorre el círculo cromático completo: primarios,
+// secundarios, terciarios, pasteles y tonos cálidos/fríos bien diferenciados.
 // Cada color es claramente distinguible de los demás.
 // Mantiene el sistema adaptativo que detecta las claves del frontend.
 // -----------------------------------------------------------------------
@@ -23,6 +24,13 @@ const MIKA_EXTRA_COLORS = {
   cyan:     { dark: "#113333", bright: "#00CCCC" },
   magenta:  { dark: "#331133", bright: "#FF00CC" },
   lime:     { dark: "#223311", bright: "#99FF33" },
+
+  // Nuevos tonos cromáticos (v4): llenan huecos del círculo cromático
+  violet:   { dark: "#1A1033", bright: "#8B5CF6" },
+  indigo:   { dark: "#141238", bright: "#6366F1" },
+  turquoise:{ dark: "#0E3330", bright: "#2DD4BF" },
+  olive:    { dark: "#24310F", bright: "#A3E635" },
+  crimson:  { dark: "#331017", bright: "#E11D48" },
   
   // Pastel / suaves
   pink:     { dark: "#332233", bright: "#FF66AA" },
@@ -98,7 +106,7 @@ function extendNodeColors() {
     }
   }
   if (added > 0) {
-    console.log(`[Mika] v3: ${added} colores variados agregados al menú "Colors".`);
+    console.log(`[Mika] v4: ${added} colores variados agregados al menú "Colors".`);
   }
   return true;
 }

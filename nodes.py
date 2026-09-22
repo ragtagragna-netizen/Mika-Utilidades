@@ -466,7 +466,7 @@ class ScoreListExtendable:
         optional = {}
 
         for i in range(1, MAX_SCORES + 1):
-            optional[f"nombre_{i}"] = ("STRING", {"default": f"Opción {i}", "multiline": False})
+            optional[f"nombre_{i}"] = ("STRING", {"default": "", "multiline": False})
             optional[str(i)] = ("INT", {"default": 0, "min": -999999, "max": 999999, "step": 1})
 
         optional["num_rows"] = ("INT", {"default": 5, "min": 1, "max": MAX_SCORES, "step": 1})
@@ -525,6 +525,30 @@ class TextBoxClipboard:
 
     def doit(self, text):
         return (text,)
+
+
+class NoteMika:
+    """
+    Note-Mika: nota igual que el Note de ComfyUI (sin inputs ni outputs)
+    pero con los botones de copiar / seleccionar todo / pegar del Text
+    Box-Mika en el header.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/utils"
+    OUTPUT_NODE = True
+
+    def doit(self, text):
+        return ()
 
 
 class TextBoxVisor:
@@ -3365,6 +3389,10 @@ class BypassDetectorMika:
             return (text_on_bypass, True, "bypass")
         return (text_on_active, False, "active")
 
+    @classmethod
+    def IS_CHANGED(cls, is_bypassed=False, **kwargs):
+        return is_bypassed
+
 
 class TextSaveMika:
     """
@@ -3458,6 +3486,475 @@ class TextSaveMika:
 
 
 # ======================================================================
+# ANIMA PROMPT ORGANIZER (migrado desde Mika_Anima_Order)
+# ======================================================================
+
+HARD_NORMALIZE = True
+HARD_DEDUPE = True
+HARD_AUTO_AT_PREFIX = True
+HARD_SERIES_FROM_CHARACTER = True
+HARD_ARTIST_POLICY_KEEP_FIRST = True
+
+NEG_NO_SCORE = ("worst quality, low quality, artist name, blurry, "
+                "jpeg artifacts, chromatic aberration")
+NEG_WITH_SCORE = ("worst quality, low quality, score_1, score_2, score_3, "
+                  "artist name, blurry, jpeg artifacts, chromatic aberration")
+
+QUALITY_HUMAN = {
+    "masterpiece", "best quality", "high quality", "good quality",
+    "normal quality", "low quality", "worst quality", "very aesthetic",
+    "aesthetic",
+}
+
+SCORE_RE = re.compile(r"^score_\d(_up)?$")
+YEAR_RE = re.compile(r"^year\s+\d{3,4}$")
+
+PERIOD = {"newest", "recent", "mid", "early", "old"}
+
+SAFETY = {"safe", "sensitive", "nsfw", "explicit", "general", "questionable"}
+
+META = {
+    "highres", "absurdres", "incredibly absurdres", "lowres",
+    "anime screenshot", "anime screencap", "screencap",
+    "jpeg artifacts", "official art", "official alternate costume",
+    "artist name", "watermark", "signature", "web address", "dated",
+    "scan", "game cg", "promotional art", "key visual", "logo",
+    "commentary", "commentary request", "english commentary",
+    "translated", "traditional media", "photoshop (medium)",
+    "bad id", "bad pixiv id", "md5 mismatch", "revision",
+    "third-party edit", "chromatic aberration",
+}
+
+COUNT_RE = re.compile(r"^\d+\+?(girl|boy|other)s?$")
+COUNT_EXTRA = {
+    "solo", "solo focus", "multiple girls", "multiple boys",
+    "multiple others", "no humans", "1other", "6+girls", "6+boys",
+}
+
+PAREN_NOT_CHARACTER = {
+    "photoshop (medium)", "painting (medium)", "watercolor (medium)",
+    "marker (medium)", "pencil (medium)", "ink (medium)",
+    "sword (weapon)", "heart (symbol)", "spoken heart (symbol)",
+}
+
+DATASET_HEADERS = {"ye-pop", "deviantart"}
+
+BUCKETS = ["quality", "meta", "year", "safety", "count",
+           "character", "series", "artist", "general", "nl"]
+
+
+def _anima_split_tags(text):
+    """Corta por comas y saltos de linea respetando parentesis y escapes."""
+    parts, buf, depth, i = [], [], 0, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            buf.append(ch)
+            buf.append(text[i + 1])
+            i += 2
+            continue
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        if (ch == "," or ch == "\n") and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return [p.strip() for p in parts if p.strip()]
+
+
+_WEIGHT_RE = re.compile(r"^\((.*):\s*-?\d*\.?\d+\s*\)$", re.DOTALL)
+
+
+def _anima_core(tag):
+    """Devuelve el tag sin sintaxis de peso ni parentesis de enfasis."""
+    t = tag.strip()
+    for _ in range(8):
+        m = _WEIGHT_RE.match(t)
+        if m:
+            t = m.group(1).strip()
+            continue
+        if len(t) >= 2 and t[0] in "([" and t[-1] in ")]" and "\\" not in (t[0] + t[-1]):
+            inner = t[1:-1]
+            if inner.count("(") == inner.count(")"):
+                t = inner.strip()
+                continue
+        break
+    return t
+
+
+def _anima_normalize(tag):
+    """Minusculas, guiones bajos a espacios (salvo score_N), espacios limpios."""
+    def repl(m):
+        w = m.group(0)
+        if w.startswith("score_"):
+            return w
+        return w.replace("_", " ")
+
+    t = re.sub(r"[^\s,()\[\]:]+", repl, tag.lower())
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _anima_is_natural_language(text):
+    c = _anima_core(text)
+    if re.search(r"[.!?](\s|$)", c):
+        return True
+    return len(c.split()) >= 7
+
+
+_CHAR_PAREN_RE = re.compile(r"^(.+?)\s*\\?\((.+?)\\?\)$")
+
+_AT_IN_NL_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9 _'\-]*?)(?=\s*[,.;!?]|$)")
+
+
+class AnimaPromptOrganizer:
+    """Reordena un prompt libre al formato de tags de Anima."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "quality_tags": ("STRING", {
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "default": "masterpiece, best quality",
+                    "placeholder": ("tags de calidad / meta / year / safety, en el "
+                                    "orden que quieras (100% custom, no se auto-generan)"),
+                }),
+                "prompt": ("STRING", {
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "default": "1girl, smile, standing, simple background",
+                    "placeholder": "escena, pose, fondo, y cualquier tag suelto",
+                }),
+                "character": ("STRING", {
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "default": "",
+                    "placeholder": ("una linea por personaje, orden fijo: "
+                                    "personaje, serie, rasgo, rasgo, ...\n"
+                                    "ej: clementine \\(overlord\\), overlord \\(maruyama\\), "
+                                    "red eyes, blonde hair, short hair"),
+                }),
+                "style": ("STRING", {
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "default": "",
+                    "placeholder": "una linea por estilo, ej: @wlop  o  @wlop, anime coloring",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("positive", "negative", "report")
+    FUNCTION = "organize"
+    CATEGORY = "Mika Utilidades/prompt"
+    DESCRIPTION = ("Reordena al formato de Anima: [quality/meta/year/safety] "
+                   "[count] [character] [series] @artist [general]. "
+                   "'quality_tags' es literal/custom; 'character' separa "
+                   "personaje/serie/rasgos por posicion (una linea por "
+                   "personaje); 'style' detecta el/los @artista.")
+
+    @staticmethod
+    def _lines(block):
+        """Bloque multilinea -> lista de lineas no vacias, en orden."""
+        if not block:
+            return []
+        return [ln for ln in block.split("\n") if ln.strip()]
+
+    def _classify(self, tag, known_artists, known_chars, known_series):
+        c = _anima_normalize(_anima_core(tag))
+
+        if c.startswith("@"):
+            return "artist", c[1:].strip()
+        if c.startswith("by ") and len(c) > 3:
+            return "artist", c[3:].strip()
+        if c in known_artists:
+            return "artist", c
+
+        if c in QUALITY_HUMAN or SCORE_RE.match(c):
+            return "quality", c
+        if YEAR_RE.match(c) or c in PERIOD:
+            return "year", c
+        if c in SAFETY:
+            return "safety", c
+        if c in META:
+            return "meta", c
+        if COUNT_RE.match(c) or c in COUNT_EXTRA:
+            return "count", c
+
+        if c in known_chars:
+            return "character", c
+        if c in known_series:
+            return "series", c
+
+        if c not in PAREN_NOT_CHARACTER:
+            m = _CHAR_PAREN_RE.match(c)
+            if m and not re.match(r"^-?\d*\.?\d+$", m.group(2).strip()):
+                return "character", c
+
+        return "general", c
+
+    def organize(self, quality_tags, prompt, character, style):
+        notes = []
+        raw = prompt or ""
+
+        head_lines = raw.split("\n")
+        if head_lines and head_lines[0].strip().lower() in DATASET_HEADERS:
+            report = ("=== Anima Prompt Organizer ===\n"
+                      "Prompt con dataset tag ('%s'): se pasa tal cual, sin "
+                      "reordenar, porque ese formato depende de los saltos de "
+                      "linea." % head_lines[0].strip())
+            return (raw.strip(), NEG_NO_SCORE, report)
+
+        buckets = {b: [] for b in BUCKETS}
+        seen = set()
+        dropped = []
+
+        for t in _anima_split_tags(quality_tags or ""):
+            key = _anima_normalize(_anima_core(t)) if HARD_NORMALIZE else t.strip()
+            if HARD_DEDUPE and key in seen:
+                dropped.append("%s (duplicado en quality_tags)" % key)
+                continue
+            seen.add(key)
+            buckets["quality"].append(key)
+
+        char_lines = self._lines(character)
+        style_lines = self._lines(style)
+
+        known_chars, known_series, known_artists = set(), set(), set()
+        for ln in char_lines:
+            items = _anima_split_tags(ln)
+            if items:
+                known_chars.add(_anima_normalize(_anima_core(items[0])))
+            if len(items) > 1:
+                known_series.add(_anima_normalize(_anima_core(items[1])))
+        for ln in style_lines:
+            for it in _anima_split_tags(ln):
+                c = _anima_normalize(_anima_core(it))
+                if c.startswith("@"):
+                    known_artists.add(c[1:])
+                elif c.startswith("by ") and len(c) > 3:
+                    known_artists.add(c[3:])
+
+        slot_segments = []
+        for ln in char_lines:
+            items = _anima_split_tags(ln)
+            if not items:
+                continue
+
+            char_txt = _anima_normalize(_anima_core(items[0])) if HARD_NORMALIZE else items[0].strip()
+            if not (HARD_DEDUPE and char_txt in seen):
+                seen.add(char_txt)
+                buckets["character"].append(char_txt)
+
+            if len(items) > 1:
+                ser_txt = _anima_normalize(_anima_core(items[1])) if HARD_NORMALIZE else items[1].strip()
+                if not (HARD_DEDUPE and ser_txt in seen):
+                    seen.add(ser_txt)
+                    buckets["series"].append(ser_txt)
+            else:
+                notes.append("Una linea de 'character' no trae serie "
+                             "(2a posicion vacia): %s" % ln.strip())
+
+            if len(items) > 2:
+                slot_segments += items[2:]
+
+        style_segments = []
+        any_artist_tag = False
+        for ln in style_lines:
+            items = _anima_split_tags(ln)
+            style_segments += items
+            if any(_anima_normalize(_anima_core(it)).startswith(("@", "by ")) for it in items):
+                any_artist_tag = True
+        if style_lines and not any_artist_tag:
+            notes.append("El campo 'style' no trae ningun tag con '@' o 'by '; "
+                         "no se reconocera como artista.")
+
+        segments = slot_segments + style_segments + _anima_split_tags(raw)
+
+        for seg in segments:
+            if _anima_is_natural_language(seg):
+                found = _AT_IN_NL_RE.findall(seg)
+                for name in found:
+                    key = "@" + _anima_normalize(name)
+                    if HARD_DEDUPE and key in seen:
+                        continue
+                    seen.add(key)
+                    buckets["artist"].append(key)
+                if found:
+                    seg = _AT_IN_NL_RE.sub("", seg)
+                seg = re.sub(r"\s+", " ", seg).strip(" ,.")
+                if seg:
+                    buckets["nl"].append(seg)
+                continue
+
+            bucket, key = self._classify(seg, known_artists, known_chars, known_series)
+            text = _anima_normalize(seg) if HARD_NORMALIZE else seg.strip()
+
+            if bucket == "artist":
+                base = key
+                if HARD_AUTO_AT_PREFIX or _anima_normalize(_anima_core(seg)).startswith("@"):
+                    text = "@" + base
+                else:
+                    text = base
+                    notes.append(
+                        "'%s' quedo sin '@'; sin el prefijo el efecto del "
+                        "artista es muy debil." % base)
+                key = "@" + base
+
+            if HARD_DEDUPE:
+                if key in seen:
+                    continue
+                seen.add(key)
+
+            buckets[bucket].append(text)
+
+            if bucket == "character" and HARD_SERIES_FROM_CHARACTER:
+                m = _CHAR_PAREN_RE.match(_anima_normalize(_anima_core(seg)))
+                if m:
+                    ser = m.group(2).strip()
+                    if ser and ser not in seen and ser not in known_artists:
+                        buckets["series"].append(ser)
+                        seen.add(ser)
+                        notes.append(
+                            "Serie '%s' inferida de '%s' (verifica que sea la "
+                            "serie y no una variante del personaje)." % (ser, m.group(1)))
+
+        if buckets["artist"]:
+            if HARD_ARTIST_POLICY_KEEP_FIRST and len(buckets["artist"]) > 1:
+                extra = buckets["artist"][1:]
+                buckets["artist"] = buckets["artist"][:1]
+                dropped += ["%s (multi-artista)" % a for a in extra]
+                notes.append(
+                    "Se conservo solo el primer artista. Apilar artistas diluye "
+                    "el estilo hacia ilustracion plana.")
+            name = buckets["artist"][0].lstrip("@")
+            if len(name.split()) == 1 and len(name) <= 6:
+                notes.append(
+                    "'%s' es un nombre corto (pocos tokens) y tiende a ser "
+                    "menos estable entre prompts." % name)
+        else:
+            notes.append("No hay tag de artista: el estilo quedara al gusto "
+                         "por defecto del modelo.")
+
+        head = (buckets["quality"] + buckets["meta"] + buckets["year"] +
+                buckets["safety"])
+        tags_body = (buckets["count"] + buckets["character"] +
+                     buckets["series"] + buckets["general"])
+        body = (buckets["count"] + buckets["character"] + buckets["series"] +
+                buckets["artist"] + buckets["general"])
+
+        nl = ""
+        for piece in buckets["nl"]:
+            if not nl:
+                nl = piece
+            elif nl[-1] in ".!?":
+                nl += " " + piece
+            else:
+                nl += ", " + piece
+        nl = nl.strip()
+
+        pure_nl = not tags_body and bool(nl)
+
+        if nl and pure_nl:
+            lead_txt = ", ".join(head + buckets["artist"])
+            positive = (lead_txt + ". " if lead_txt else "") + nl
+            if tags_body:
+                positive += ", " + ", ".join(tags_body)
+        else:
+            positive = ", ".join(head + body)
+            if nl:
+                positive = (positive + ", " if positive else "") + nl
+
+        has_score = any(SCORE_RE.match(t) for t in buckets["quality"])
+        negative = NEG_WITH_SCORE if has_score else NEG_NO_SCORE
+
+        total_tags = sum(len(buckets[b]) for b in BUCKETS if b != "nl")
+        if total_tags < 8 and not nl:
+            notes.append("Prompt corto: Anima rellena huecos por su cuenta y "
+                         "aparece mas sangrado de estilo. Agrega pelo, ojos, "
+                         "ropa, pose y fondo.")
+        if len(buckets["character"]) > 1:
+            notes.append("Varios personajes: dale a cada uno al menos un rasgo "
+                         "distintivo no compartido o el modelo los fusiona.")
+
+        report_lines = ["=== Anima Prompt Organizer ==="]
+        for b in BUCKETS:
+            if buckets[b]:
+                val = nl if b == "nl" else ", ".join(buckets[b])
+                report_lines.append("%-10s : %s" % (b, val))
+        if dropped:
+            report_lines.append("%-10s : %s" % ("removidos", ", ".join(dropped)))
+        if notes:
+            report_lines.append("--- avisos ---")
+            report_lines += ["* " + n for n in dict.fromkeys(notes)]
+
+        return (positive, negative, "\n".join(report_lines))
+
+
+class PromptCleanDedupeMika:
+    """
+    Prompt Clean & Dedupe-Mika: une las funciones de AnimaPromptFormatter y
+    Remove Duplicate Tags [LP] en un solo nodo.
+
+    1. Formata el prompt: quita saltos de línea, separa por comas, limpia
+       espacios y descarta tags vacíos.
+    2. Elimina tags repetidos conservando solo la primera aparición.
+
+    Ejemplo: "tag1\\ntag2 ,, tag1" -> "tag1, tag2"
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "display": "prompt",
+                }),
+            },
+            "optional": {
+                "trailing_comma": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "coma final",
+                    "label_off": "sin coma final",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/prompt"
+
+    def run(self, text, trailing_comma=False):
+        if not text:
+            return ("",)
+
+        text = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+        seen = set()
+        unique_tags = []
+        for tag in text.split(","):
+            tag = tag.strip()
+            if tag and tag not in seen:
+                seen.add(tag)
+                unique_tags.append(tag)
+
+        result = ", ".join(unique_tags)
+        if trailing_comma and result:
+            result += ","
+
+        return (result,)
+
+
+# ======================================================================
 # MAPPINGS
 # ======================================================================
 
@@ -3465,6 +3962,7 @@ NODE_CLASS_MAPPINGS = {
     "StringSelectorCut": StringSelectorCut,
     "ScoreListExtendable": ScoreListExtendable,
     "TextBoxClipboard": TextBoxClipboard,
+    "NoteMika": NoteMika,
     "TextBoxVisor": TextBoxVisor,
     "TagFilter": TagFilter,
     "TextReplaceDynamic": TextReplaceDynamic,
@@ -3495,12 +3993,15 @@ NODE_CLASS_MAPPINGS = {
     "IfAnyMika": IfAnyMika,
     "BypassDetectorMika": BypassDetectorMika,
     "TextSaveMika": TextSaveMika,
+    "AnimaPromptOrganizer": AnimaPromptOrganizer,
+    "PromptCleanDedupeMika": PromptCleanDedupeMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "StringSelectorCut": "String Selector (Cut First Line)",
     "ScoreListExtendable": "Score List",
     "TextBoxClipboard": "Text Box-Mika",
+    "NoteMika": "Note-Mika",
     "TextBoxVisor": "Visor-Mika",
     "TagFilter": "Tag Filter-Mika",
     "TextReplaceDynamic": "Text Replace Dynamic-Mika",
@@ -3531,4 +4032,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IfAnyMika": "If Any-Mika",
     "BypassDetectorMika": "Bypass Detector-Mika",
     "TextSaveMika": "Text Save-Mika",
+    "AnimaPromptOrganizer": "Anima Prompt Organizer",
+    "PromptCleanDedupeMika": "Prompt Clean & Dedupe-Mika",
 }
