@@ -23,6 +23,8 @@ No requiere dependencias extra: usa lo que ComfyUI ya trae
 |---|---|---|
 | **String Selector (Cut First Line)** | `StringSelectorCut` | Selecciona una línea por índice con wraparound. La UI agrega botón para cortar la primera línea. |
 | **Text Box-Mika** | `TextBoxClipboard` | Caja de texto multilinea con botones de **copiar / seleccionar todo / pegar** en el header (expandido y colapsado). Tamaño por defecto mínimo. |
+| **Note-Mika** | `NoteMika` | Nota sin inputs ni outputs (como el Note nativo) con los botones de **copiar / seleccionar todo / pegar** en el header. |
+| **Workflow Save** | _(panel flotante)_ | Panel "💾 Mika - Workflow Save" encima del Mika - Timer: guarda el workflow en la carpeta indicada (detecta **automáticamente el nombre del workflow activo**), permite **sobreescribir o guardar como copia** y tiene botón para el **save nativo de ComfyUI** (Ctrl+S). |
 | **Visor-Mika** | `TextBoxVisor` | Muestra **cualquier tipo de valor** (str, int, float, bool, list, tuple, set, dict, Tensor, ndarray, bytes) como preview legible. Botones en header y preview en vivo por websocket. Lista de hasta 50 elementos. `text` es socketless: los links se conectan al slot `valor`. |
 | **Tag Filter-Mika** | `TagFilter` | Conserva solo los primeros N segmentos de un texto separado por comas. |
 | **Text Replace Dynamic-Mika** | `TextReplaceDynamic` | Reemplaza texto con hasta 30 pares find/replace dinámicos. Regex opcional. |

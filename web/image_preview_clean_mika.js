@@ -210,14 +210,88 @@ app.registerExtension({
       return r;
     };
 
-    // Dibujar icono en modo colapsado
+    // Dibujar barra colapsada completa (igual que nativa: se ajusta al
+    // título sin superar el ancho expandido) + icono dentro del header.
     nodeType.prototype.onDrawCollapsed = function (ctx) {
       try {
         const LG = window.LiteGraph ?? {};
         const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
-        drawHeaderIcon(this, ctx);
+        const titleText =
+          (typeof this.getTitle === "function" ? this.getTitle() : this.title) ||
+          "Image Preview Clean-Mika";
+
+        const titleFont = `${Math.round(titleHeight * 0.42)}px sans-serif`;
+        ctx.save();
+        ctx.font = titleFont;
+
+        const titleWidth = ctx.measureText(titleText).width;
+        const expandedWidth = this.size?.[0] ?? 200;
+        const width = Math.max(
+          LG.NODE_COLLAPSED_WIDTH ?? 80,
+          Math.min(expandedWidth, titleHeight + titleWidth + 14 + ICON_SIZE + 6)
+        );
+
+        const maxTitleWidth = width - titleHeight - ICON_SIZE - 28;
+        let displayTitle = titleText;
+        if (ctx.measureText(displayTitle).width > maxTitleWidth) {
+          while (displayTitle.length && ctx.measureText(displayTitle + "…").width > maxTitleWidth) {
+            displayTitle = displayTitle.slice(0, -1);
+          }
+          displayTitle += "…";
+        }
+
+        const radius = LG.ROUND_RADIUS ?? 8;
+        ctx.fillStyle = this.bgcolor ?? LG.NODE_DEFAULT_BGCOLOR ?? "#353535";
+        ctx.beginPath();
+        if (!ctx.roundRect) {
+          ctx.rect(0, -titleHeight, width, titleHeight);
+        } else {
+          ctx.roundRect(0, -titleHeight, width, titleHeight, [radius, radius, 0, 0]);
+        }
+        ctx.fill();
+
+        ctx.fillStyle = this.boxcolor ?? LG.NODE_DEFAULT_BOXCOLOR ?? "#888";
+        ctx.beginPath();
+        ctx.arc(titleHeight * 0.5, -titleHeight * 0.5, titleHeight * 0.28, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = LG.NODE_TITLE_COLOR ?? "#999";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(displayTitle, titleHeight + 8, -titleHeight * 0.5 + 1);
+        ctx.restore();
+
+        // El icono usa el ancho colapsado real, no el expandido.
+        const cx = width - ICON_SIZE - 8;
+        const cy = -titleHeight * 0.5;
+        const feedback = this._mikaCopyFeedback;
+        const showFeedback = feedback && feedback.until > Date.now();
+
+        ctx.fillStyle = NEUTRAL_BG;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(cx, cy - ICON_SIZE / 2, ICON_SIZE, ICON_SIZE, 4);
+        else ctx.rect(cx, cy - ICON_SIZE / 2, ICON_SIZE, ICON_SIZE);
+        ctx.fill();
+
+        if (showFeedback) {
+          drawIconCanvas(ctx, feedback.ok ? ICON_CHECK : ICON_CROSS, cx, cy - ICON_SIZE / 2, ICON_SIZE, feedback.ok ? "#8f8" : "#f88");
+        } else {
+          drawIconCanvas(ctx, ICON_COPY, cx, cy - ICON_SIZE / 2, ICON_SIZE, LG.NODE_TITLE_COLOR ?? "#999");
+        }
+        this._mikaCopyIconRect = { x: cx, y: cy - ICON_SIZE / 2, w: ICON_SIZE, h: ICON_SIZE };
+
+        if (this.is_selected) {
+          ctx.save();
+          ctx.globalAlpha = 0.8;
+          ctx.strokeStyle = LG.NODE_BOX_OUTLINE_COLOR ?? "#FFF";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(-6, -titleHeight - 6, width + 13, titleHeight + 12, [radius * 2]);
+          ctx.stroke();
+          ctx.restore();
+        }
       } catch (e) { /* no-op */ }
-      return false; // retornar false para que LiteGraph dibuje su barra default
+      return true;
     };
 
     // Capturar la URL de la imagen cuando se ejecuta

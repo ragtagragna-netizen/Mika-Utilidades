@@ -551,6 +551,59 @@ class NoteMika:
         return ()
 
 
+# Workflow Save: el panel flotante (web/workflow_save_mika.js) guarda el
+# workflow actual en la carpeta indicada. Si el nombre ya existe permite
+# sobreescribir o guardar como copia con sufijo " (1)", " (2)", etc.
+if PromptServer is not None and PromptServer.instance is not None:
+    from aiohttp import web
+
+    _MIKA_BAD_NAME_CHARS = re.compile(r'[\\/:*?"<>|]')
+
+    def _mika_sanitize_name(name):
+        name = _MIKA_BAD_NAME_CHARS.sub("_", str(name)).strip(" .")
+        if name.lower().endswith(".json"):
+            name = name[:-5]
+        return name or "workflow"
+
+    @PromptServer.instance.routes.post("/mika/save_workflow")
+    async def mika_save_workflow(request):
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"status": "error", "message": "JSON inválido"}, status=400)
+
+        folder = str(data.get("folder") or "").strip()
+        workflow = data.get("workflow")
+        mode = str(data.get("mode") or "ask")
+
+        if not folder or workflow is None:
+            return web.json_response({"status": "error", "message": "Faltan carpeta o workflow"}, status=400)
+
+        name = _mika_sanitize_name(data.get("name"))
+        folder = os.path.abspath(os.path.expanduser(os.path.expandvars(folder)))
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, name + ".json")
+
+        if os.path.exists(path):
+            if mode == "ask":
+                return web.json_response({"status": "exists", "path": path})
+            if mode == "copy":
+                i = 1
+                while os.path.exists(os.path.join(folder, f"{name} ({i}).json")):
+                    i += 1
+                name = f"{name} ({i})"
+                path = os.path.join(folder, name + ".json")
+
+        if mode not in ("ask", "overwrite", "copy"):
+            return web.json_response({"status": "error", "message": "Modo inválido"}, status=400)
+
+        import json
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(workflow, f, ensure_ascii=False, indent=2)
+
+        return web.json_response({"status": "ok", "path": path, "name": name})
+
+
 class TextBoxVisor:
     """
     Visor-Mika: muestra CUALQUIER tipo de valor (str, int, float, bool,
