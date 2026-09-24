@@ -1,94 +1,148 @@
 # Mika Utilidades — Paquete de nodos para ComfyUI
 
-Colección personal de nodos de utilidad para ComfyUI: manejo de texto/prompts,
-tags, listas, índices, imágenes, sampling, resoluciones, control de
-bypass/mute y medición de tiempos. Incluye extensiones JavaScript que
-mejoran la UI (botones en headers, filas compactas, panel de tiempos, etc.).
+Colección personal de nodos de utilidad para ComfyUI: manejo de texto y
+prompts, tags, listas, índices, imágenes, sampling, resoluciones, control de
+bypass/mute y medición de tiempos. Incluye extensiones JavaScript que mejoran
+la UI (botones en headers, filas compactas, paneles flotantes, colores de
+nodo extra, etc.).
+
+Todos los nodos aparecen bajo la categoría **`Mika Utilidades/...`**.
 
 ## Instalación
 
 1. Copiá/cloná la carpeta como `ComfyUI/custom_nodes/Mika-Utilidades`.
-2. Los archivos `.js` deben quedar en la carpeta de extensiones web que
-   carga tu ComfyUI (junto al resto de extensiones del paquete).
-3. Reiniciá ComfyUI y recargá el navegador con `Ctrl + F5`.
+2. Reiniciá ComfyUI y recargá el navegador con `Ctrl + F5`.
 
 No requiere dependencias extra: usa lo que ComfyUI ya trae
 (`Pillow`, `requests`, `numpy`, `torch`).
 
 ---
 
+## 🏷️ Tags y Prompts (nucleo del paquete)
+
+El corazón del paquete es la familia **FILTROS**, una versión sólida del
+subgrafo "FILTROS": un solo nodo reemplaza una docena de nodos encadenados.
+
+- **FILTROS-Mika** (`FiltrosMika`) — 4 filtros GEN/CARA/ROPA/LUGAR sobre el
+  prompt, extras de personajes por conteo (`2girls` → 1 extra,
+  `3girls` → 2... desde `per_f_extra`/`per_m_extra`, en modo **index** por
+  orden de línea o **random** por seed), detección de lenguaje natural con
+  `min_palabras` (salida `TAGS NATURAL` + opción `concatenar_natural` para
+  sumarlas a F GEN), modo **NSFW/SFW** (agrega el tag `uncensored` cuando el
+  prompt contiene tags de `penis`/`pussy`/`sex`, o los elimina en SFW) y
+  coma final opcional. 14 salidas: 7 combinaciones, `TAGS SIN FILTRO`
+  (ignora pesos y prefijos de color: `shirt` también filtra `white shirt`),
+  los 4 filtros passthrough y `PROMPT SIN FILTRO`. Todas las entradas de
+  filtro son opcionales (desconectadas = vacías).
+- **FILTROS Select-Mika** (`FiltrosMikaSelect`) — misma lógica con **una
+  salida elegida por combo** (`salida`, las 8 opciones del clásico switch
+  EZ) más salidas fijas `FILTRO GENERAL/ROPA/CARA/LUGAR`, `TAGS SIN FILTRO`
+  y `TAGS NATURAL`.
+
+Organización de prompts sin más filtrado:
+
+- **Prompt Reorganize-Mika** (`PromptReorganizeMika`) — ordena el prompt por
+  secciones (`GEN`, `ROPA`, `CARA`, `LUGAR`, `NATURAL`, `SIN FILTRO`)
+  asignándolas por cascada (`all_gen` → ropa → cara → `all_lugar` → natural
+  → resto). El orden se elige manualmente con 6 combos. Con
+  `agrupar_similares`, agrupa tags que comparten palabras dentro de cada
+  sección (`shirt` con `white shirt`, `ass` con `huge ass`) sin mezclar
+  secciones. Las frases naturales van al final de cada sección.
+- **Text Clean & Organize-Mika** (`TextCleanOrganizeMika`) — procesa listas
+  o párrafos (artistas, tags, etc.): elimina repetidos, quita palabras de
+  color (`black_hair` → `hair`), agrupa por similares, todo **respetando el
+  formato** (comas y saltos de línea). Muestra `IN / QUITADOS / OUT` dentro
+  del nodo y tiene salida extra `eliminados`.
+- **Text Clean & Organize Concat-Mika** (`TextCleanOrganizeConcatMika`) —
+  igual, pero con slots dinámicos `text_1..N` (control por `text_count`)
+  para **concatenar varias listas** antes de limpiar.
+- **Text Cleaner Compare-Mika** (`TextCleanerCompareMika`) — elimina de
+  `tags_in` lo que se repite en `base` (ignora mayúsculas, pesos y
+  guiones bajos). Salidas: `text` y `eliminados`.
+
+Utilidades sueltas de tags:
+
+| Nodo | Clase | Descripción |
+|---|---|---|
+| **Smart Tag Filter-Mika** | `SmartTagFilterMika` | Filtrado con pesos `(tag:1.2)`, caracteres escapados y prefijos de color. Modos include/exclude. |
+| **Tag If-Mika** | `TagIfMika` | Condicional por presencia de tags: hasta 6 pares find/output + `combined`. |
+| **Tag Remover-Mika** | `TagRemoverMika` | Remueve tags de un prompt (pesos, paréntesis anidados y escapes). |
+| **Prompt Clean & Dedupe-Mika** | `PromptCleanDedupeMika` | Limpia saltos de línea, normaliza separadores y quita duplicados (equivale a AnimaPromptFormatter + Remove Duplicate Tags). |
+| **Prompt Edit (Loop)-Mika** | `PromptEditLoopMika` | Edición de prompt con memoria entre ejecuciones. |
+
 ## 📄 String / Texto
 
 | Nodo | Clase | Descripción |
 |---|---|---|
-| **String Selector (Cut First Line)** | `StringSelectorCut` | Selecciona una línea por índice con wraparound. La UI agrega botón para cortar la primera línea. |
-| **Text Box-Mika** | `TextBoxClipboard` | Caja de texto multilinea con botones de **copiar / seleccionar todo / pegar** en el header (expandido y colapsado). Tamaño por defecto mínimo. |
-| **Note-Mika** | `NoteMika` | Nota sin inputs ni outputs (como el Note nativo) con los botones de **copiar / seleccionar todo / pegar** en el header. |
-| **Workflow Save** | _(panel flotante)_ | Panel "💾 Mika - Workflow Save" encima del Mika - Timer (contraíble, contraído por defecto): guarda el workflow en la carpeta indicada (nombre del **workflow activo** detectado al guardar), permite **sobreescribir o guardar como copia**, tiene botones para **Save** y **Save As** nativos de ComfyUI, y si la carpeta está **vacía** guarda en una **carpeta local** del navegador (útil en la nube/Colab). |
-| **Visor-Mika** | `TextBoxVisor` | Muestra **cualquier tipo de valor** (str, int, float, bool, list, tuple, set, dict, Tensor, ndarray, bytes) como preview legible. Botones en header y preview en vivo por websocket. Lista de hasta 50 elementos. `text` es socketless: los links se conectan al slot `valor`. |
-| **Tag Filter-Mika** | `TagFilter` | Conserva solo los primeros N segmentos de un texto separado por comas. |
-| **Text Replace Dynamic-Mika** | `TextReplaceDynamic` | Reemplaza texto con hasta 30 pares find/replace dinámicos. Regex opcional. |
-| **Text Concatenate Dynamic-Mika** | `TextConcatenateDynamic` | Concatena hasta 30 textos con separador configurable y limpieza opcional (`clean_output`). |
-| **Prompt Edit (Loop)-Mika** | `PromptEditLoopMika` | Edición de prompt con memoria entre ejecuciones. Devuelve el prompt anterior y el actual. |
-| **Text Line Selector-Mika** | `TextLineSelectorMika` | Selecciona un rango de líneas como LISTA, con opción de eliminarlas del cuadro (`delete_selected_lines`). |
-| **Text Line Stepper-Mika** | `TextLineStepperMika` | Recorrido **escalonado** de líneas: `start_index` es el índice base que avanza automáticamente cada generación y `steps` es la cantidad de líneas por bloque (fija). `auto_advance=False` fija `start_index`. Salidas: `selected_lines` (lista) y `current_end` (string). |
-| **Prompt Clean & Dedupe-Mika** | `PromptCleanDedupeMika` | Une **AnimaPromptFormatter** + **Remove Duplicate Tags [LP]**: quita saltos de línea, normaliza separadores a `", "` (sin espacios extra ni tags vacíos) y elimina tags repetidos conservando la primera aparición. `trailing_comma` activa la coma final como la del de LevelPixel. |
+| **String Selector (Cut First Line)** | `StringSelectorCut` | Línea por índice con wraparound + botón para cortar la primera línea. |
+| **Text Box-Mika** | `TextBoxClipboard` | Caja multilínea con botones **copiar / seleccionar todo / pegar** en el header (expandido y colapsado). |
+| **Text Box Paste-Mika** | `TextBoxPasteMika` | Igual pero con un único botón de **pegar que reemplaza** todo el texto. |
+| **Note-Mika** | `NoteMika` | Nota sin inputs/outputs con los botones de portapapeles del Text Box. |
+| **Visor-Mika** | `TextBoxVisor` | Muestra cualquier valor (str, números, listas, tensores...) con preview en vivo por websocket. |
+| **Tag Filter-Mika** | `TagFilter` | Conserva los primeros N segmentos separados por comas. |
+| **Text Replace Dynamic-Mika** | `TextReplaceDynamic` | Hasta 30 pares find/replace dinámicos, regex opcional. |
+| **Text Concatenate Dynamic-Mika** | `TextConcatenateDynamic` | Hasta 30 textos con separador configurable y limpieza opcional. |
+| **Text Line Selector-Mika** | `TextLineSelectorMika` | Rango de líneas como LISTA, con `delete_selected_lines`. |
+| **Text Line Stepper-Mika** | `TextLineStepperMika` | Recorrido escalonado: `start_index` auto-avanza, `steps` fija el bloque. |
+| **Primitive-Mika** | `PrimitiveMika` | Primitivo genérico: al conectarlo a un slot-widget adopta sus opciones (combo, número o texto) **sin controles de seed**. |
+
+## 🌐 Traducción
+
+Port de los nodos MarianMT (antes kkTranslator) — mismos nombres de clase,
+así que workflows viejos los cargan directo:
+
+| Nodo | Clase | Descripción |
+|---|---|---|
+| **Load MarianMT CheckPoint-Mika** | `LoadMarianMTCheckPoint` | Carga un modelo MarianMT desde `models/MikaTranslator/<modelo>` (descarga el checkpoint de Helsinki-NLP a mano). |
+| **Smart Prompt Translate-Mika** | `SmartPromptTranslate` | Traduce al inglés solo los segmentos en español; respeta tags SD, comillas dobles, y tiene modos *detectar idioma* / *contar palabras* + `debug_info`. |
+| **Prompt Translate to Text-Mika** | `PromptTranslateToText` | Traduce el texto completo con el modelo cargado. |
+
+Requiere `transformers`; el detector usa el propio tokenizer (o
+`fast-langdetect` si está instalado, o una lista de palabras como fallback).
 
 ## 🧮 Score / Listas
 
 | Nodo | Clase | Descripción |
 |---|---|---|
-| **Score List** | `ScoreListExtendable` | Filas numeradas nombre+valor (hasta 50) con `num_rows` visible. UI compacta: nombre y valor en la misma fila (valor = 1/3 del ancho). Suma solo las filas visibles. |
-| **Float OutputList** | `FloatOutputList` | Convierte una lista de números en texto a una OutputList de FLOAT (`OUTPUT_IS_LIST`). |
-| **List Unpack-Mika** | `ListUnpackMika` | **Unpack** de listas/tuplas/batches: separa la entrada en hasta 50 salidas según `output_count`. Soporta batches de IMAGE/LATENT (tensor 4D) y listas anidadas. |
+| **Score List** | `ScoreListExtendable` | Filas nombre+valor (hasta 50) en fila compacta; suma solo filas visibles. |
+| **Float OutputList** | `FloatOutputList` | Texto de números → OutputList de FLOAT. |
+| **List Unpack-Mika** | `ListUnpackMika` | Unpack de listas/tuplas/batches (incluye IMAGE/LATENT 4D) a N salidas. |
 
 ## 🖼️ Imagen
 
 | Nodo | Clase | Descripción |
 |---|---|---|
-| **Load Image-Mika** | `LoadImageMika` | Carga imagen desde ruta local o URL. Opción RGBA, máscara de alfa, dimensiones y nombre de archivo. |
-| **Image Preview Clean-Mika** | `ImagePreviewCleanMika` | Preview de imagen **sin metadata ni workflow** (PNG limpio). |
-| **Image Save Auto-Mika** | `ImageSaveAutoMika` | Guarda **automáticamente** cada imagen en la ruta local indicada (`save_path`, crea la carpeta si no existe). Prefijo, contador, timestamp, formato (png/jpg/webp) y preview limpio opcional. Salidas: `saved_paths`, `saved_count`. |
+| **Load Image-Mika** | `LoadImageMika` | Carga desde ruta local o URL, RGBA, máscara alfa, nombre de archivo. |
+| **Image Preview Clean-Mika** | `ImagePreviewCleanMika` | Preview **sin metadata ni workflow** (PNG limpio). |
+| **Image Save Auto-Mika** | `ImageSaveAutoMika` | Guarda automáticamente cada imagen (`saved_paths`, `saved_count`). |
 
-## 🏷️ Tags
-
-| Nodo | Clase | Descripción |
-|---|---|---|
-| **Smart Tag Filter-Mika** | `SmartTagFilterMika` | Filtrado de tags con soporte de pesos `(tag:1.2)`, caracteres escapados (emoticones) y prefijos de color. Modos include/exclude. |
-| **Tag If-Mika** | `TagIfMika` | Condicional por presencia de tags: hasta 6 pares find/output + salida `combined`. |
-| **Tag Remover-Mika** | `TagRemoverMika` | Remueve tags de un prompt (compatible con pesos, paréntesis anidados y escapes). |
-| **FILTROS-Mika** | `FiltrosMika` | Versión sólida del subgrafo "FILTROS": 4 filtros GEN/CARA/ROPA/LUGAR sobre el prompt, extras aleatorios por cantidad de personajes (`Ngirls`/`Nboys` → N-1 extras desde `per_f_extra`/`per_m_extra`, opcionales), separación de lenguaje natural con `min_palabras` (salida `TAGS NATURAL`, booleano `concatenar_natural` para sumarlas a F GEN). 14 salidas: 7 combinaciones + `TAGS SIN FILTRO`, los 4 filtros passthrough y `PROMPT SIN FILTRO`. |
-| **FILTROS Select-Mika** | `FiltrosMikaSelect` | Misma lógica que FILTROS-Mika pero con **una salida elegida** por combo (`salida`, 8 opciones = las del switch EZ) más salidas fijas `FILTRO GENERAL/ROPA/CARA/LUGAR`, `TAGS SIN FILTRO` y `TAGS NATURAL`. |
-
-## ️ Tiempos de ejecución
+## ⏱️ Tiempos de ejecución
 
 | Nodo | Clase | Descripción |
 |---|---|---|
-| **⏱ Tiempos de Ejecución (config)** | `ExecutionTimerConfig` | Configura el panel flotante y las etiquetas de tiempo por nodo (`execution_timer.js`): mostrar/ocultar panel, badges y decimales. Arranca **minimizado**. No hace falta agregarlo: el timer funciona solo; este nodo solo ajusta la configuración. |
+| **⏱ Tiempos de Ejecución (config)** | `ExecutionTimerConfig` | Ajusta el panel flotante y badges de tiempo por nodo. El timer funciona solo; el nodo solo configura. |
 
-## 🔀 Utils — Bypass / Mute
+## 🔀 Bypass / Mute
 
 | Nodo | Clase | Descripción |
 |---|---|---|
-| **Fast Groups Bypasser-Mika** | `FastGroupsBypasserMika` | Un toggle BOOLEAN por grupo para hacer **bypass** (mode 4). Controlable desde fuera de subgrafos vía websocket. |
-| **Fast Groups Muter-Mika** | `FastGroupsMuterMika` | Igual pero con **mute** (mode 2 / Never). |
-| **Fast Nodes Bypasser-Mika** | `FastNodesBypasserMika` | Conectás nodos a slots dinámicos y los bypasseás con toggles que aparecen por nodo conectado. Inputs dinámicos y promoción de toggles en subgrafos. |
-| **Fast Nodes Muter-Mika** | `FastNodesMuterMika` | Igual pero con mute. |
+| **Fast Groups Bypasser/Muter-Mika** | `FastGroupsBypasserMika`, `FastGroupsMuterMika` | Un toggle por grupo, incluso desde fuera de subgrafos vía websocket. |
+| **Fast Nodes Bypasser/Muter-Mika** | `FastNodesBypasserMika`, `FastNodesMuterMika` | Slots dinámicos con toggle por nodo conectado. |
 
 ## 🎯 Resolución / Sampling
 
 | Nodo | Clase | Descripción |
 |---|---|---|
-| **Anima Resolutions-Mika** | `AnimaResolutionsMika` | Resoluciones Anima (base 1024) en varias proporciones. `random=True` sortea resolución en cada ejecución (no cacheable). |
-| **Sampler Selector-Mika** | `SamplerSelectorMika` | Lista **todos los samplers instalados** (nativos + extensiones) con fallback estándar. Salidas: nombre (wildcard, conectable al KSampler), objeto `SAMPLER` y nombre como STRING. |
-| **Scheduler Selector-Mika** | `SchedulerSelectorMika` | Igual pero para **schedulers**: salida wildcard conectable al input `scheduler` del KSampler + nombre como STRING. |
+| **Anima Resolutions-Mika** | `AnimaResolutionsMika` | Resoluciones Anima (base 1024); `random` sortea en cada ejecución. |
+| **Sampler Selector-Mika** | `SamplerSelectorMika` | Lista todos los samplers instalados (nativos + extensiones). |
+| **Scheduler Selector-Mika** | `SchedulerSelectorMika` | Igual para schedulers. |
 
 ## 🔢 Índices
 
 | Nodo | Clase | Descripción |
 |---|---|---|
-| **Index Int-Mika** | `IndexIntMika` | Índice INT con 3 modos: **fixed** (fijo) e **increment** (suma `step` por ejecución, con `wrap` opcional entre min/max; el avance se refleja en el widget `index`) y **random** (sorteo entre min/max, ignora `index`). El input `index` es conectable: si se enlaza un nodo, su valor manda. Salidas: `index` e `index_text`. |
-| **Index Stepper-Mika** | `IndexStepperMika` | Escalona `steps` índices desde `start_index` (base) en cada ejecución, igual que el Text Line Stepper, cíclico dentro de 0..max_index. `steps` queda fijo; `start_index` auto-avanza (o se detiene con `auto_advance=False`). Salidas: `index_list` (LISTA con cada int del bloque), `current_start`, `current_end` y `range_text`. |
+| **Index Int-Mika** | `IndexIntMika` | INT en modos fixed / increment (step, wrap) / random, con input conectable. |
+| **Index Stepper-Mika** | `IndexStepperMika` | Bloque de `steps` índices desde `start_index` con auto-avance cíclico. |
 
 ---
 
@@ -96,20 +150,23 @@ No requiere dependencias extra: usa lo que ComfyUI ya trae
 
 | Archivo | Qué hace |
 |---|---|
-| `text_box_editor_mika.js` | Botones copiar/seleccionar/pegar en el header del Editor, dibujo propio colapsado y link estable. |
-| `text_box_visor_mika.js` | Lo mismo para el Visor + preview en vivo por websocket (`mika-visor-preview`). |
-| `text_line_stepper_mika.js` | Refleja el auto-avance en el widget `start_index` tras cada ejecución (`steps` queda fijo). |
-| `fast_nodes_bypasser_mika.js` / `fast_nodes_muter_mika.js` | Inputs dinámicos, toggles por nodo conectado y soporte de subgrafos. |
-| `score_list_mika.js` | Filas compactas del Score List (nombre 2/3 + valor 1/3) y control de filas con `num_rows`. |
-| `execution_timer.js` | Panel flotante arrastrable/colapsable con tiempos por nodo y total, + badges de tiempo sobre cada nodo. |
-| `index_int_mika.js` | Actualiza el widget `index` tras cada ejecución (increment). |
-| `index_stepper_mika.js` | Refleja el auto-avance en el widget `start_index` tras cada ejecución (`steps` queda fijo). |
-| `list_unpack_mika.js` | Sincroniza las salidas visibles del List Unpack con `output_count`. |
+| `mika_node_colors.js` | ~30 colores extra para el menú Colors (negros, dorados, esmeralda...), nombres traducidos (en/es) y limpieza de tooltips huérfanos del frontend nuevo. |
+| `text_box_editor_mika.js` | Botones copiar/seleccionar/pegar en los headers del Text Box / Note. |
+| `text_box_paste_mika.js` | Botón de pegar que reemplaza el texto (Text Box Paste). |
+| `text_box_visor_mika.js` | Preview en vivo del Visor por websocket. |
+| `text_concatenate_dynamic.js` | Slots dinámicos `text_i` con `text_count` (Concatenate y Clean & Organize Concat). |
+| `text_clean_stats_mika.js` | Dibuja las estadísticas IN/QUITADOS/OUT dentro de los nodos Text Clean. |
+| `primitive_mika.js` | Primitive-Mika adopta las opciones del slot al que se conecta. |
+| `execution_timer.js` | Panel flotante y badges de tiempo por nodo. |
+| `index_int_mika.js` / `index_stepper_mika.js` / `text_line_stepper_mika.js` | Reflejan el auto-avance en los widgets tras cada ejecución. |
+| `fast_nodes_*` / `fast_groups_*` | Inputs dinámicos y toggles de bypass/mute. |
+| `score_list_mika.js` | Filas compactas del Score List. |
+| `list_unpack_mika.js` | Salidas visibles del List Unpack según `output_count`. |
 
 ## Notas
 
-- Todos los nodos aparecen bajo la categoría **`Mika Utilidades/...`**.
 - Los nodos con estado que avanza (steppers, index increment) usan
-  `IS_CHANGED = nan` y mensajes `ui` + JS para persistir el avance en el workflow.
+  `IS_CHANGED = nan` y mensajes `ui` + JS para persistir el avance en el
+  workflow.
 - Si agregás extensiones que suman samplers/schedulers nuevos, reiniciá
   ComfyUI para que los selectores los detecten.

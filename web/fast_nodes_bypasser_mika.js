@@ -276,11 +276,8 @@ app.registerExtension({
 		function ensureInputs(node) {
 			if (!node?.inputs) return;
 
-			const showW = node.widgets?.find(
-				(w) => cleanName(w.name) === "show_inputs"
-			);
-
-			const showInputs = showW ? Boolean(showW.value) : true;
+			// show_inputs ahora es una opción del menú contextual, no widget.
+			const showInputs = node._mikaShowInputs !== false;
 
 			node._mikaHideInputs = !showInputs;
 
@@ -463,11 +460,7 @@ app.registerExtension({
 		function tick(node) {
 			let dirty = false;
 
-			const showW = node.widgets?.find(
-				(w) => cleanName(w.name) === "show_inputs"
-			);
-
-			const currentShow = showW ? Boolean(showW.value) : true;
+			const currentShow = node._mikaShowInputs !== false;
 
 			if (currentShow !== node._mikaPrevShowInputs) {
 				node._mikaPrevShowInputs = currentShow;
@@ -570,15 +563,19 @@ app.registerExtension({
 			this._mikaNodeMapping = [];
 			this._mikaPrevShowInputs = true;
 
-			if (!this.widgets?.some((w) => cleanName(w.name) === "show_inputs")) {
-				const showWidget = this.addWidget("toggle", "show_inputs", true, () => {});
-
-				const idx = this.widgets.indexOf(showWidget);
-
-				if (idx > 0) {
-					this.widgets.splice(idx, 1);
-					this.widgets.unshift(showWidget);
-				}
+			// show_inputs vive en properties (menú contextual); se elimina el
+			// widget viejo si el nodo cargaba uno guardado.
+			if (this.properties && this.properties._mikaShowInputs !== undefined) {
+				this._mikaShowInputs = Boolean(this.properties._mikaShowInputs);
+			} else if (this._mikaShowInputs === undefined) {
+				this._mikaShowInputs = true;
+			}
+			const legacyShow = this.widgets?.findIndex(
+				(w) => cleanName(w.name) === "show_inputs"
+			) ?? -1;
+			if (legacyShow >= 0) {
+				this._mikaShowInputs = Boolean(this.widgets[legacyShow].value);
+				this.widgets.splice(legacyShow, 1);
 			}
 
 			for (let i = 0; i < MAX_SLOTS; i++) {
@@ -605,6 +602,22 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (info) {
 			const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
 
+			// Restaurar show_inputs guardado en el workflow.
+			const props = info?.properties ?? this.properties ?? {};
+			const savedShow = props._mikaShowInputs;
+			if (savedShow !== undefined) {
+				this._mikaShowInputs = Boolean(savedShow);
+			} else {
+				const legacyIdx = (this.widgets ?? []).findIndex(
+					(w) => cleanName(w.name) === "show_inputs"
+				);
+				if (legacyIdx >= 0) {
+					this._mikaShowInputs = toBool(this.widgets[legacyIdx].value);
+					this.widgets.splice(legacyIdx, 1);
+				}
+			}
+			this._mikaPrevShowInputs = this._mikaShowInputs !== false;
+
 			setTimeout(() => {
 				ensureInputs(this);
 				rebuild(this);
@@ -612,6 +625,33 @@ app.registerExtension({
 
 			startTick(this);
 			hookRemove(this);
+			return r;
+		};
+
+		// Opción de menú contextual (click derecho sobre el nodo).
+		const origGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
+		nodeType.prototype.getExtraMenuOptions = function (_graph, options) {
+			const r = origGetExtraMenuOptions
+				? origGetExtraMenuOptions.apply(this, arguments)
+				: undefined;
+
+			if (Array.isArray(options)) {
+				options.push(null);
+				options.push({
+					content:
+						(this._mikaShowInputs !== false
+							? "◉ Mostrar slots de entrada (activo)"
+							: "◌ Mostrar slots de entrada (desactivado)"),
+					callback: () => {
+						this._mikaShowInputs = !(this._mikaShowInputs !== false);
+						if (!this.properties) this.properties = {};
+						this.properties._mikaShowInputs = this._mikaShowInputs;
+						ensureInputs(this);
+						this.setDirtyCanvas(true, true);
+					},
+				});
+			}
+
 			return r;
 		};
 

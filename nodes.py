@@ -881,7 +881,7 @@ class TextReplaceDynamic:
 
         return {
             "required": {
-                "text": ("STRING", {"forceInput": True}),
+                "text": ("*", {"forceInput": True}),
             },
             "optional": optional,
             "hidden": {
@@ -2757,10 +2757,10 @@ class IndexIntMika:
         return {
             "required": {
                 "mode": (["fixed", "increment", "random"], {"default": "fixed"}),
-                "index": ("INT", {"default": 0, "min": -9999999, "max": 9999999, "step": 1}),
-                "step": ("INT", {"default": 1, "min": -999999, "max": 999999, "step": 1}),
-                "min_value": ("INT", {"default": 0, "min": -9999999, "max": 9999999, "step": 1}),
-                "max_value": ("INT", {"default": 999999, "min": -9999999, "max": 9999999, "step": 1}),
+                "index": ("INT", {"default": 0, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "step": 1}),
+                "step": ("INT", {"default": 1, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "step": 1}),
+                "min_value": ("INT", {"default": 0, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "step": 1}),
+                "max_value": ("INT", {"default": 999999, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "step": 1}),
             },
             "optional": {
                 "wrap": ("BOOLEAN", {"default": False}),
@@ -2836,12 +2836,12 @@ class IndexStepperMika:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "start_index": ("INT", {"default": 0, "min": 0, "max": 999999}),
-                "steps": ("INT", {"default": 1, "min": 1, "max": 999999}),
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 1, "min": 1, "max": 0xffffffffffffffff}),
             },
             "optional": {
                 "auto_advance": ("BOOLEAN", {"default": True}),
-                "max_index": ("INT", {"default": 999999, "min": 0, "max": 999999, "step": 1}),
+                "max_index": ("INT", {"default": 999999, "min": 0, "max": 0xffffffffffffffff, "step": 1}),
             },
         }
 
@@ -4091,17 +4091,20 @@ class FiltrosMika:
         return {
             "required": {
                 "prompt": slot,
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "min_palabras": ("INT", {"default": 0, "min": 0, "max": 20}),
+                "concatenar_natural": ("BOOLEAN", {"default": False}),
+                "modo_personajes": (["index", "random"], {"default": "index"}),
+                "modo": (["NSFW", "SFW"], {"default": "NSFW"}),
+                "add_comma_space_end": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
                 "filtro_gen": slot,
                 "filtro_cara": slot,
                 "filtro_ropa": slot,
                 "filtro_lugar": slot,
                 "all_gen": slot,
                 "all_lugar": slot,
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "min_palabras": ("INT", {"default": 0, "min": 0, "max": 20}),
-                "concatenar_natural": ("BOOLEAN", {"default": False}),
-            },
-            "optional": {
                 "per_f_extra": slot,
                 "per_m_extra": slot,
                 "ignore_color_prefix": ("BOOLEAN", {"default": True}),
@@ -4140,25 +4143,31 @@ class FiltrosMika:
         return ", ".join([p for p in clean if p])
 
     @staticmethod
-    def _pick_lines(text, count, rng):
+    def _pick_lines(text, count, rng, modo="index"):
         lines = [ln for ln in str(text).splitlines() if ln.strip()]
         if not lines or count <= 0:
             return ""
         count = min(count, len(lines))
-        return ", ".join(rng.sample(lines, count))
+        # index: respeta el orden del nodo conectado (línea 1 = índice 0...).
+        # random: selección aleatoria sin repetir usando la seed.
+        elegidas = lines[:count] if modo == "index" else rng.sample(lines, count)
+        return ", ".join(elegidas)
 
     def execute(
         self,
         prompt,
-        filtro_gen,
-        filtro_cara,
-        filtro_ropa,
-        filtro_lugar,
-        all_gen,
-        all_lugar,
         seed=0,
         min_palabras=0,
         concatenar_natural=False,
+        modo_personajes="index",
+        modo="NSFW",
+        add_comma_space_end=True,
+        filtro_gen="",
+        filtro_cara="",
+        filtro_ropa="",
+        filtro_lugar="",
+        all_gen="",
+        all_lugar="",
         per_f_extra="",
         per_m_extra="",
         ignore_color_prefix=True,
@@ -4199,10 +4208,13 @@ class FiltrosMika:
             return mejor
 
         rng = random_module.Random(scalar(seed, 0))
+        modo_personajes = scalar(modo_personajes, "index")
+        if modo_personajes not in ("index", "random"):
+            modo_personajes = "index"
         n_girls = _max_count("girls")
         n_boys = _max_count("boys")
-        extra_f = self._pick_lines(per_f_extra, n_girls - 1 if n_girls >= 2 else 0, rng)
-        extra_m = self._pick_lines(per_m_extra, n_boys - 1 if n_boys >= 2 else 0, rng)
+        extra_f = self._pick_lines(per_f_extra, n_girls - 1 if n_girls >= 2 else 0, rng, modo_personajes)
+        extra_m = self._pick_lines(per_m_extra, n_boys - 1 if n_boys >= 2 else 0, rng, modo_personajes)
         extras = self._join(extra_f, extra_m)
 
         # Detección de frases en lenguaje natural sobre el prompt completo:
@@ -4232,30 +4244,73 @@ class FiltrosMika:
             scalar(all_lugar, ""),
             scalar(filtro_cara, ""),
         )
-        texto_sin_filtro = TagRemoverMika().tag(
-            prompt,
-            union_exclusion,
-            case_sensitive=False,
-            ignore_weight=True,
-        )[0]
+        # TAGS SIN FILTRO: se quita del prompt todo lo que coincida con la
+        # unión de listas, ignorando pesos y prefijos de color (así, si la
+        # lista tiene "shirt", "white shirt" también se filtra).
+        lista_exclusion = _parse_prompt(union_exclusion, False)
+        if lista_exclusion:
+            texto_sin_filtro = ", ".join(
+                f["original"]
+                for f in _parse_prompt(prompt, False)
+                if not any(
+                    _tags_match(f, ex, ignore_weight=True, ignore_color_prefix=True)
+                    for ex in lista_exclusion
+                )
+            )
+        else:
+            texto_sin_filtro = prompt
 
         prompt_sin_filtro = self._join(prompt, extras)
 
+        # Modo SFW / NSFW: con NSFW, si el prompt contiene un tag adulto se
+        # agrega el tag "uncensored". Con SFW, esos tags se eliminan.
+        # Disparadores: cualquier tag que contenga "penis" o "pussy"
+        # (cubre large penis, huge penis, gigantic penis, etc.) o la
+        # palabra exacta "sex".
+        modo = scalar(modo, "NSFW")
+
+        def _es_tag_nsfw(tag):
+            t = tag.lower().replace("_", " ")
+            palabras = re.findall(r"[a-z]+", t)
+            return "penis" in t or "pussy" in t or "sex" in palabras
+
+        def _hay_nsfw(texto):
+            return any(
+                _es_tag_nsfw(t) for t in str(texto).split(",") if t.strip()
+            )
+
+        def _limpiar_nsfw(texto):
+            partes = [t.strip() for t in str(texto).split(",")]
+            partes = [t for t in partes if t and not _es_tag_nsfw(t)]
+            return ", ".join(partes)
+
+        if modo == "SFW":
+            base = _limpiar_nsfw(base)
+            prompt_sin_filtro = _limpiar_nsfw(prompt_sin_filtro)
+        elif _hay_nsfw(prompt) and "uncensored" not in base.lower():
+            base = self._join(base, "uncensored")
+
+        coma_final = _mika_coerce_bool(scalar(add_comma_space_end, True))
+        ensure = SmartTagFilterMika._ensure_trailing_comma_space
+
+        def _fin(t):
+            return ensure(t) if coma_final else t
+
         return (
-            base,
-            self._join(base, filtros["cara"]),
-            self._join(base, filtros["ropa"]),
-            self._join(base, filtros["ropa"], filtros["cara"]),
-            self._join(base, filtros["ropa"], filtros["cara"], filtros["lugar"]),
-            self._join(base, filtros["cara"], filtros["lugar"]),
-            self._join(base, filtros["lugar"]),
-            texto_sin_filtro,
+            _fin(base),
+            _fin(self._join(base, filtros["cara"])),
+            _fin(self._join(base, filtros["ropa"])),
+            _fin(self._join(base, filtros["ropa"], filtros["cara"])),
+            _fin(self._join(base, filtros["ropa"], filtros["cara"], filtros["lugar"])),
+            _fin(self._join(base, filtros["cara"], filtros["lugar"])),
+            _fin(self._join(base, filtros["lugar"])),
+            _fin(texto_sin_filtro),
             tags_natural,
             filtros["gen"],
             filtros["ropa"],
             filtros["cara"],
             filtros["lugar"],
-            prompt_sin_filtro,
+            _fin(prompt_sin_filtro),
         )
 
 
@@ -4556,8 +4611,8 @@ class TextCleanOrganizeMika:
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("text",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "eliminados")
     FUNCTION = "execute"
     CATEGORY = "Mika Utilidades/tags"
 
@@ -4615,10 +4670,16 @@ class TextCleanOrganizeMika:
 
     @classmethod
     def _procesar(cls, items, eliminar_colores, eliminar_repetidos, agrupar_similares):
-        """Pipeline sobre items (seg, sep): colores, repetidos, similares."""
+        """Pipeline sobre items (seg, sep): colores, repetidos, similares.
+        Devuelve (items_procesados, eliminados)."""
+        eliminados = []
+
         if _mika_coerce_bool(eliminar_colores, False):
-            items = [(cls._sin_colores(seg), sep) for seg, sep in items]
-            items = [(seg, sep) for seg, sep in items if seg]
+            procesados = [(cls._sin_colores(seg), sep) for seg, sep in items]
+            eliminados += [
+                seg for (seg, _), (limpio, _) in zip(items, procesados) if seg and not limpio
+            ]
+            items = [(seg, sep) for seg, sep in procesados if seg]
 
         if _mika_coerce_bool(eliminar_repetidos, True):
             vistos = set()
@@ -4628,6 +4689,8 @@ class TextCleanOrganizeMika:
                 if clave not in vistos:
                     vistos.add(clave)
                     unicos.append((seg, sep))
+                else:
+                    eliminados.append(seg)
             items = unicos
 
         if _mika_coerce_bool(agrupar_similares, False):
@@ -4635,23 +4698,30 @@ class TextCleanOrganizeMika:
             por_texto = {seg: i for i, (seg, _) in enumerate(items)}
             items = [items[por_texto[seg]] for seg in orden if seg in por_texto]
 
-        return items
+        return items, eliminados
 
     def execute(self, text, eliminar_repetidos=True, eliminar_colores=False, agrupar_similares=False):
         text = str(self._scalar(text, ""))
         if not text.strip():
-            return {"ui": {"text": ["IN (0):", "OUT (0):"]}, "result": (text,)}
+            return {"ui": {"text": ["IN (0):", "QUITADOS (0):", "OUT (0):"]}, "result": (text, "")}
 
         items = self._split_items(text)
         if not items:
-            return {"ui": {"text": ["IN (0):", "OUT (0):"]}, "result": (text,)}
+            return {"ui": {"text": ["IN (0):", "QUITADOS (0):", "OUT (0):"]}, "result": (text, "")}
 
         cantidad_in = len(items)
-        items = self._procesar(items, eliminar_colores, eliminar_repetidos, agrupar_similares)
+        items, eliminados = self._procesar(items, eliminar_colores, eliminar_repetidos, agrupar_similares)
         reconstruido = self._reconstruir(items)
 
-        info = f"in: {cantidad_in} | out: {len(items)}"
-        return {"ui": {"text": [info]}, "result": (reconstruido,)}
+        info = [
+            f"IN ({cantidad_in}):",
+            f"QUITADOS ({len(eliminados)}):",
+            f"OUT ({len(items)}):",
+        ]
+        return {
+            "ui": {"text": info},
+            "result": (reconstruido, ", ".join(eliminados)),
+        }
 
 
 class TextCleanOrganizeConcatMika:
@@ -4683,8 +4753,8 @@ class TextCleanOrganizeConcatMika:
         )
         return {"required": {}, "optional": optional}
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("text",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "eliminados")
     FUNCTION = "execute"
     CATEGORY = "Mika Utilidades/tags"
 
@@ -4708,16 +4778,23 @@ class TextCleanOrganizeConcatMika:
                 items.extend(TextCleanOrganizeMika._split_items(value))
 
         if not items:
-            return {"ui": {"text": ["IN (0):", "OUT (0):"]}, "result": ("",)}
+            return {"ui": {"text": ["IN (0):", "QUITADOS (0):", "OUT (0):"]}, "result": ("", "")}
 
         cantidad_in = len(items)
-        items = TextCleanOrganizeMika._procesar(
+        items, eliminados = TextCleanOrganizeMika._procesar(
             items, eliminar_colores, eliminar_repetidos, agrupar_similares
         )
         reconstruido = TextCleanOrganizeMika._reconstruir(items)
 
-        info = f"in: {cantidad_in} | out: {len(items)}"
-        return {"ui": {"text": [info]}, "result": (reconstruido,)}
+        info = [
+            f"IN ({cantidad_in}):",
+            f"QUITADOS ({len(eliminados)}):",
+            f"OUT ({len(items)}):",
+        ]
+        return {
+            "ui": {"text": info},
+            "result": (reconstruido, ", ".join(eliminados)),
+        }
 
 
 class TextCleanerCompareMika:
@@ -4830,6 +4907,324 @@ class TextCleanerCompareMika:
 
 
 # ======================================================================
+# TRADUCCIÓN (Smart Prompt Translate, portado de kkTranslator)
+# ======================================================================
+
+try:
+    from fast_langdetect import detect as _mika_fastdetect
+except Exception:
+    _mika_fastdetect = None
+
+_MIKA_MARIAN_DEFAULTS = [
+    "opus-mt-es-en", "opus-mt-zh-en", "opus-mt-rn-en", "opus-mt-taw-en",
+    "opus-mt-az-en", "opus-mt-ru-en", "opus-mt-ja-en", "opus-mt-en-zh",
+    "opus-mt-en-ru", "opus-mt-en-jap", "opus-mt-en-rn",
+]
+
+
+def _mika_get_marian_list():
+    try:
+        base_path = os.path.join(folder_paths.models_dir, "MikaTranslator")
+        if os.path.isdir(base_path):
+            found = sorted(
+                d for d in os.listdir(base_path)
+                if os.path.isdir(os.path.join(base_path, d)) and not d.startswith(".")
+            )
+            if found:
+                return found
+    except Exception:
+        pass
+    return _MIKA_MARIAN_DEFAULTS
+
+
+def _mika_translate_raw(model, tokenizer, text):
+    translated = model.generate(**tokenizer(text, return_tensors="pt", padding=True))
+    result = ""
+    for t in translated:
+        result += tokenizer.decode(t, skip_special_tokens=True)
+    result = result.strip()
+    if result.endswith(".") and not text.strip().endswith("."):
+        result = result[:-1]
+    return result
+
+
+def _mika_translate(model, tokenizer, text):
+    """Traduce text pero preserva intacto lo que esté entre comillas dobles."""
+    parts = re.split(r'("(?:[^"]*)")', text)
+    if len(parts) == 1:
+        return _mika_translate_raw(model, tokenizer, text)
+    result_parts = []
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith('"') and part.endswith('"') and len(part) >= 2:
+            result_parts.append(part)
+        else:
+            stripped = part.strip()
+            if stripped:
+                translated_part = _mika_translate_raw(model, tokenizer, stripped)
+                if part.startswith(" "):
+                    translated_part = " " + translated_part
+                if part.endswith(" "):
+                    translated_part = translated_part + " "
+                result_parts.append(translated_part)
+            else:
+                result_parts.append(part)
+    return "".join(result_parts)
+
+
+_MIKA_ES_WORDS = {
+    "el","la","los","las","un","una","unos","unas","lo",
+    "yo","tu","ella","nosotros","ellos","ellas","me","te","se","nos",
+    "mi","mis","tus","su","sus","este","esta","estos","estas",
+    "ese","esa","esos","esas","aquel","aquella",
+    "es","son","estan","fue","ser","estar","tiene","tienen",
+    "hace","hacen","puede","pueden","va","van","viene","vienen",
+    "quiere","quieren","sabe","saben","ve","ven","da","dan",
+    "pone","ponen","lleva","llevan","trae","traen","dice","dicen",
+    "mira","miran","toma","toman","deja","dejan","sigue","siguen",
+    "de","del","en","con","por","para","sin","sobre","bajo","entre",
+    "hacia","desde","hasta","ante","tras","contra","durante","mediante",
+    "segun","excepto","salvo","incluso","ademas","tambien","tampoco",
+    "pero","sino","aunque","porque","como","cuando","donde","si","que",
+    "y","o","ni","pues","luego","entonces","asi","ya","aun","todavia",
+    "grande","pequeño","pequeña","alto","alta","bajo","baja",
+    "largo","larga","corto","corta","nuevo","nueva","viejo","vieja",
+    "bueno","buena","malo","mala","bonito","bonita","feo","fea",
+    "feliz","triste","enojado","enojada","cansado","cansada",
+    "rapido","rapida","lento","lenta","fuerte","debil","duro","dura",
+    "mucho","mucha","muchos","muchas","poco","poca","pocos","pocas",
+    "todo","toda","todos","todas","nada","nadie","alguien","algo",
+    "muy","mas","menos","tan","tanto","tanta","aqui","ahi","alla",
+    "ahora","antes","despues","siempre","nunca","jamas",
+    "chica","chico","mujer","hombre","niña","niño","persona","gente",
+    "cara","cabeza","cabello","pelo","ojos","boca","nariz","manos",
+    "cuerpo","piel","ropa","vestido","camisa","pantalon","zapatos",
+    "fondo","cielo","tierra","agua","fuego","luz","sombra","color",
+    "bosque","ciudad","casa","cuarto","cama","silla","mesa","puerta",
+    "arbol","flor","hierba","roca","montaña","playa","mar","rio",
+    "sol","luna","estrella","nube","lluvia","nieve","viento",
+    "gato","perro","pajaro","pez","caballo","conejo",
+    "dia","noche","tarde","mañana","momento","tiempo","vida","mundo",
+    "amor","miedo","alegria","tristeza","fuerza","poder","magia",
+    "facil","dificil","unico","unica","tipico","tipica",
+    "magico","magica","romantico","romantica","dramatico","dramatica",
+    "parada","parado","sentada","sentado","acostada","acostado",
+    "corriendo","saltando","volando","nadando","bailando","cantando",
+}
+
+_MIKA_SD_TAGS = {
+    "masterpiece","best quality","high quality","ultra detailed","ultra-detailed",
+    "highly detailed","extremely detailed","intricate details","professional",
+    "photorealistic","hyperrealistic","8k","4k","hd","uhd","sharp focus",
+    "looking at viewer","looking away","looking back","looking down","looking up",
+    "upper body","lower body","full body","close-up","portrait","cowboy shot",
+    "from above","from below","from behind","from side",
+    "depth of field","bokeh","lens flare","cinematic lighting","dramatic lighting",
+    "soft lighting","natural lighting","studio lighting","rim lighting",
+    "white background","simple background","gradient background","no background",
+    "detailed background","blurred background","outdoors","indoors",
+}
+
+
+def _mika_is_spanish(text, tokenizer=None):
+    """Detecta español: primero por tokenizer (ratio de <unk>), luego
+    fast-langdetect si está instalado, al final por lista de palabras."""
+    if tokenizer is not None:
+        try:
+            tokens = tokenizer.tokenize(text)
+            if not tokens:
+                return False
+            unk_token = tokenizer.unk_token or "<unk>"
+            unk_ratio = sum(1 for t in tokens if t == unk_token) / len(tokens)
+            return unk_ratio < 0.30
+        except Exception:
+            pass
+
+    if _mika_fastdetect is not None:
+        try:
+            result = _mika_fastdetect(text.lower())
+            if isinstance(result, list):
+                lang = result[0].get("lang", "") if result else ""
+            elif isinstance(result, dict):
+                lang = result.get("lang", "")
+            else:
+                lang = str(result)
+            return lang == "es"
+        except Exception:
+            pass
+
+    words = text.lower().strip().split()
+    return any(w in _MIKA_ES_WORDS for w in words)
+
+
+_MIKA_MARIAN_CACHE = {}
+
+
+def _mika_load_marian(checkpoint):
+    """Carga (y cachea en memoria) un modelo MarianMT + tokenizer desde
+    models/MikaTranslator/<modelo>."""
+    if checkpoint in _MIKA_MARIAN_CACHE:
+        return _MIKA_MARIAN_CACHE[checkpoint]
+
+    from transformers import MarianMTModel, MarianTokenizer
+
+    base_path = os.path.join(folder_paths.models_dir, "MikaTranslator")
+    os.makedirs(base_path, exist_ok=True)
+    translate_path = os.path.join(base_path, checkpoint)
+    if not os.path.isdir(translate_path):
+        raise ValueError(
+            f"Modelo no encontrado: {translate_path}\n"
+            f"Descarga Helsinki-NLP/{checkpoint} de HuggingFace"
+        )
+    pair = (
+        MarianMTModel.from_pretrained(translate_path),
+        MarianTokenizer.from_pretrained(translate_path),
+    )
+    _MIKA_MARIAN_CACHE[checkpoint] = pair
+    return pair
+
+
+class LoadMarianMTCheckPoint:
+    """Carga un modelo MarianMT local desde models/MikaTranslator/<modelo>."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        dynamic = _mika_get_marian_list()
+        return {
+            "required": {
+                "checkpoint": (dynamic, {"multiline": False, "default": dynamic[0]}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "TOKENIZER")
+    RETURN_NAMES = ("model", "tokenizer")
+    FUNCTION = "load_marian_mt"
+    CATEGORY = "Mika Utilidades/translate"
+
+    def load_marian_mt(self, checkpoint):
+        model, tokenizer = _mika_load_marian(checkpoint)
+        return (model, tokenizer)
+
+
+class SmartPromptTranslate:
+    """Traduce al inglés solo los segmentos en español (por valor de modo).
+    Carga el modelo MarianMT elegido con `checkpoint` (cacheado en memoria);
+    ya no requiere un nodo loader aparte, pero sigue aceptando model/tokenizer
+    conectados para compatibilidad con workflows viejos."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        dynamic = _mika_get_marian_list()
+        return {
+            "required": {
+                "checkpoint": (dynamic, {"multiline": False, "default": dynamic[0]}),
+                "modo": (["detectar idioma", "contar palabras"], {
+                    "default": "detectar idioma"
+                }),
+                "min_words": ("INT", {
+                    "default": 3, "min": 1, "max": 20, "step": 1,
+                    "display": "number"
+                }),
+            },
+            "optional": {
+                "prompt_text": ("STRING", {"forceInput": True}),
+                "model": ("MODEL",),
+                "tokenizer": ("TOKENIZER",),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("prompt_translated", "debug_info")
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/translate"
+
+    def run(self, checkpoint, modo="detectar idioma", min_words=3, prompt_text="",
+            model=None, tokenizer=None):
+        if not prompt_text or not prompt_text.strip():
+            return ("", "Sin texto de entrada")
+
+        if model is None or tokenizer is None:
+            model, tokenizer = _mika_load_marian(checkpoint)
+
+        use_lang_detect = (modo == "detectar idioma")
+
+        segments = prompt_text.split(",")
+        result_parts = []
+        debug_lines = []
+
+        for seg in segments:
+            stripped = seg.strip()
+            if not stripped:
+                result_parts.append(seg)
+                continue
+
+            if stripped.lower() in _MIKA_SD_TAGS:
+                result_parts.append(seg)
+                debug_lines.append(f"INTACTO   [tag SD]: '{stripped}'")
+                continue
+
+            if stripped.startswith('"') and stripped.endswith('"') and len(stripped) >= 2:
+                result_parts.append(seg)
+                debug_lines.append(f"INTACTO   [entre comillas]: '{stripped}'")
+                continue
+
+            if use_lang_detect:
+                should_translate = _mika_is_spanish(stripped, tokenizer)
+                reason = "es=español" if should_translate else "no=español"
+            else:
+                should_translate = len(stripped.split()) > min_words
+                reason = f">{min_words}pal" if should_translate else f"<={min_words}pal"
+
+            if should_translate:
+                translated = _mika_translate(model, tokenizer, stripped)
+                leading_space = " " if seg.startswith(" ") else ""
+                trailing_space = " " if seg.endswith(" ") else ""
+                result_parts.append(f"{leading_space}{translated}{trailing_space}")
+                debug_lines.append(f"TRADUCIDO [{reason}]: '{stripped}' -> '{translated}'")
+                print(f"[SmartTranslate] '{stripped}' -> '{translated}'")
+            else:
+                result_parts.append(seg)
+                debug_lines.append(f"INTACTO   [{reason}]: '{stripped}'")
+
+        return (",".join(result_parts), "\n".join(debug_lines))
+
+
+class PromptTranslateToText:
+    """Traduce el texto completo al inglés. El modelo MarianMT se elige con
+    `checkpoint` (cacheado); si hay model/tokenizer conectados, se usan."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        dynamic = _mika_get_marian_list()
+        return {
+            "required": {
+                "checkpoint": (dynamic, {"multiline": False, "default": dynamic[0]}),
+            },
+            "optional": {
+                "prompt_text": ("STRING", {"forceInput": True}),
+                "model": ("MODEL",),
+                "tokenizer": ("TOKENIZER",),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/translate"
+
+    def run(self, checkpoint, prompt_text="", model=None, tokenizer=None):
+        if not prompt_text or not prompt_text.strip():
+            return ("",)
+        if model is None or tokenizer is None:
+            model, tokenizer = _mika_load_marian(checkpoint)
+        translated = model.generate(**tokenizer(prompt_text, return_tensors="pt", padding=True))
+        text = ""
+        for t in translated:
+            text += tokenizer.decode(t, skip_special_tokens=True)
+        return (text,)
+
+
+# ======================================================================
 # MAPPINGS
 # ======================================================================
 
@@ -4878,6 +5273,9 @@ NODE_CLASS_MAPPINGS = {
     "TextCleanOrganizeMika": TextCleanOrganizeMika,
     "TextCleanOrganizeConcatMika": TextCleanOrganizeConcatMika,
     "TextCleanerCompareMika": TextCleanerCompareMika,
+    "LoadMarianMTCheckPoint": LoadMarianMTCheckPoint,
+    "SmartPromptTranslate": SmartPromptTranslate,
+    "PromptTranslateToText": PromptTranslateToText,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -4925,4 +5323,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TextCleanOrganizeMika": "Text Clean & Organize-Mika",
     "TextCleanOrganizeConcatMika": "Text Clean & Organize Concat-Mika",
     "TextCleanerCompareMika": "Text Cleaner Compare-Mika",
+    "LoadMarianMTCheckPoint": "Load MarianMT CheckPoint-Mika",
+    "SmartPromptTranslate": "Smart Prompt Translate-Mika",
+    "PromptTranslateToText": "Prompt Translate to Text-Mika",
 }
