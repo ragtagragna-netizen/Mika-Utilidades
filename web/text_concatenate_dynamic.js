@@ -7,7 +7,10 @@ app.registerExtension({
   name: "Comfy.TextConcatenateDynamic",
 
   async beforeRegisterNodeDef(nodeType, nodeData, app) {
-    if (nodeData.name !== "TextConcatenateDynamic") return;
+    if (
+      nodeData.name !== "TextConcatenateDynamic" &&
+      nodeData.name !== "TextCleanOrganizeConcatMika"
+    ) return;
 
     function clampCount(value) {
       if (Array.isArray(value)) {

@@ -24,7 +24,7 @@ No requiere dependencias extra: usa lo que ComfyUI ya trae
 | **String Selector (Cut First Line)** | `StringSelectorCut` | Selecciona una línea por índice con wraparound. La UI agrega botón para cortar la primera línea. |
 | **Text Box-Mika** | `TextBoxClipboard` | Caja de texto multilinea con botones de **copiar / seleccionar todo / pegar** en el header (expandido y colapsado). Tamaño por defecto mínimo. |
 | **Note-Mika** | `NoteMika` | Nota sin inputs ni outputs (como el Note nativo) con los botones de **copiar / seleccionar todo / pegar** en el header. |
-| **Workflow Save** | _(panel flotante)_ | Panel "💾 Mika - Workflow Save" encima del Mika - Timer: guarda el workflow en la carpeta indicada (detecta **automáticamente el nombre del workflow activo**), permite **sobreescribir o guardar como copia** y tiene botón para el **save nativo de ComfyUI** (Ctrl+S). |
+| **Workflow Save** | _(panel flotante)_ | Panel "💾 Mika - Workflow Save" encima del Mika - Timer (contraíble, contraído por defecto): guarda el workflow en la carpeta indicada (nombre del **workflow activo** detectado al guardar), permite **sobreescribir o guardar como copia**, tiene botones para **Save** y **Save As** nativos de ComfyUI, y si la carpeta está **vacía** guarda en una **carpeta local** del navegador (útil en la nube/Colab). |
 | **Visor-Mika** | `TextBoxVisor` | Muestra **cualquier tipo de valor** (str, int, float, bool, list, tuple, set, dict, Tensor, ndarray, bytes) como preview legible. Botones en header y preview en vivo por websocket. Lista de hasta 50 elementos. `text` es socketless: los links se conectan al slot `valor`. |
 | **Tag Filter-Mika** | `TagFilter` | Conserva solo los primeros N segmentos de un texto separado por comas. |
 | **Text Replace Dynamic-Mika** | `TextReplaceDynamic` | Reemplaza texto con hasta 30 pares find/replace dinámicos. Regex opcional. |
@@ -57,6 +57,8 @@ No requiere dependencias extra: usa lo que ComfyUI ya trae
 | **Smart Tag Filter-Mika** | `SmartTagFilterMika` | Filtrado de tags con soporte de pesos `(tag:1.2)`, caracteres escapados (emoticones) y prefijos de color. Modos include/exclude. |
 | **Tag If-Mika** | `TagIfMika` | Condicional por presencia de tags: hasta 6 pares find/output + salida `combined`. |
 | **Tag Remover-Mika** | `TagRemoverMika` | Remueve tags de un prompt (compatible con pesos, paréntesis anidados y escapes). |
+| **FILTROS-Mika** | `FiltrosMika` | Versión sólida del subgrafo "FILTROS": 4 filtros GEN/CARA/ROPA/LUGAR sobre el prompt, extras aleatorios por cantidad de personajes (`Ngirls`/`Nboys` → N-1 extras desde `per_f_extra`/`per_m_extra`, opcionales), separación de lenguaje natural con `min_palabras` (salida `TAGS NATURAL`, booleano `concatenar_natural` para sumarlas a F GEN). 14 salidas: 7 combinaciones + `TAGS SIN FILTRO`, los 4 filtros passthrough y `PROMPT SIN FILTRO`. |
+| **FILTROS Select-Mika** | `FiltrosMikaSelect` | Misma lógica que FILTROS-Mika pero con **una salida elegida** por combo (`salida`, 8 opciones = las del switch EZ) más salidas fijas `FILTRO GENERAL/ROPA/CARA/LUGAR`, `TAGS SIN FILTRO` y `TAGS NATURAL`. |
 
 ## ️ Tiempos de ejecución
 

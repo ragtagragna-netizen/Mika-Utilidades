@@ -504,10 +504,59 @@ class ScoreListExtendable:
         return (total, "\n".join(details))
 
 
+class PrimitiveMika:
+    """
+    Primitive-Mika: nodo primitivo genérico. Al conectarlo a un slot de
+    otro nodo (ej. el combo "salida" de FILTROS Select-Mika) la extensión
+    web copia las opciones de ese destino en su widget "value", sin
+    agregar controles de seed (fixed/randomize).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("STRING", {"default": "", "multiline": False}),
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("value",)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/utils"
+
+    def run(self, value=""):
+        return (value,)
+
+
 class TextBoxClipboard:
     """
     Text Box-Mika: caja de texto con botones de copiar / seleccionar
     todo / pegar en el header (expandido y colapsado).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, text):
+        return (text,)
+
+
+class TextBoxPasteMika:
+    """
+    Text Box Paste-Mika: caja de texto con un único botón de pegar en el
+    header; al pulsarlo REEMPLAZA todo el texto del nodo por el contenido
+    del portapapeles.
     """
 
     @classmethod
@@ -4008,14 +4057,789 @@ class PromptCleanDedupeMika:
 
 
 # ======================================================================
+# FILTROS-MIKA (versión sólida del subgrafo "FILTROS")
+# ======================================================================
+
+class FiltrosMika:
+    """
+    FILTROS-Mika: nodo sólido equivalente al subgrafo "FILTROS".
+
+    Entradas (todas linkeables):
+    - prompt: prompt general completo.
+    - filtro_gen / filtro_cara / filtro_ropa / filtro_lugar: tags a
+      seleccionar del prompt (modo include).
+    - all_gen / all_lugar: listas completas de categorías que se excluyen
+      del prompt en la salida TEXTO SIN FILTRO.
+    - per_f_extra / per_m_extra (opcionales): textos multilínea con un
+      personaje por línea. Si no hay nada conectado cuentan como vacíos.
+      Según los tags "Ngirls"/"Nboys" del filtro GEN se añaden N-1
+      personajes del sexo correspondiente.
+
+    - min_palabras: frases del filtro GEN con ese número de palabras o más
+      se separan como "lenguaje natural" (0 = sin separación). Ej: con 4
+      pasan a TAGS NATURAL frases como "boy standing on flor".
+    - concatenar_natural: si está activo, las frases de TAGS NATURAL se
+      concatenan también en F GEN y sus combinaciones.
+
+    Salidas: combinaciones F GEN + extras con CARA/ROPA/LUGAR, más los
+    filtros individuales, los TAGS SIN FILTRO y el PROMPT SIN FILTRO.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        slot = ("*", {"forceInput": True})
+        return {
+            "required": {
+                "prompt": slot,
+                "filtro_gen": slot,
+                "filtro_cara": slot,
+                "filtro_ropa": slot,
+                "filtro_lugar": slot,
+                "all_gen": slot,
+                "all_lugar": slot,
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "min_palabras": ("INT", {"default": 0, "min": 0, "max": 20}),
+                "concatenar_natural": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "per_f_extra": slot,
+                "per_m_extra": slot,
+                "ignore_color_prefix": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = tuple(["STRING"] * 14)
+    RETURN_NAMES = (
+        "F GEN",
+        "F GEN + CARA",
+        "F GEN + ROPA",
+        "F GEN + ROPA + CARA",
+        "F GEN + ROPA + CARA + LUGAR",
+        "F GEN + CARA + LUGAR",
+        "F GEN + LUGAR",
+        "TAGS SIN FILTRO",
+        "TAGS NATURAL",
+        "FILTRO GENERAL",
+        "FILTRO ROPA",
+        "FILTRO CARA",
+        "FILTRO LUGAR",
+        "PROMPT SIN FILTRO",
+    )
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    @staticmethod
+    def _scalar(value, default=""):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _join(*parts):
+        clean = [re.sub(r"[,\s]*$", "", str(p)) for p in parts]
+        return ", ".join([p for p in clean if p])
+
+    @staticmethod
+    def _pick_lines(text, count, rng):
+        lines = [ln for ln in str(text).splitlines() if ln.strip()]
+        if not lines or count <= 0:
+            return ""
+        count = min(count, len(lines))
+        return ", ".join(rng.sample(lines, count))
+
+    def execute(
+        self,
+        prompt,
+        filtro_gen,
+        filtro_cara,
+        filtro_ropa,
+        filtro_lugar,
+        all_gen,
+        all_lugar,
+        seed=0,
+        min_palabras=0,
+        concatenar_natural=False,
+        per_f_extra="",
+        per_m_extra="",
+        ignore_color_prefix=True,
+    ):
+        scalar = self._scalar
+        prompt = str(scalar(prompt, ""))
+        ignore_color_prefix = _mika_coerce_bool(scalar(ignore_color_prefix, True))
+
+        filtros = {}
+        for nombre, tags_in, icp in (
+            ("gen", filtro_gen, False),
+            ("ropa", filtro_ropa, ignore_color_prefix),
+            ("cara", filtro_cara, False),
+            ("lugar", filtro_lugar, False),
+        ):
+            filtro = SmartTagFilterMika()
+            filtros[nombre] = filtro.filter_tags(
+                prompt,
+                scalar(tags_in, ""),
+                mode="include",
+                case_sensitive=False,
+                ignore_weight=True,
+                ignore_color_prefix=icp,
+                add_comma_space_end=True,
+            )[0]
+
+        # Extras por cantidad de personajes, detectados sobre el filtro GEN
+        # (antes del filtro por largo de frase, para que "2girls" siga
+        # contando aunque min_palabras > 1).
+        tag_list = TagIfMika().parse_tags_list(filtros["gen"])
+
+        def _max_count(genero):
+            mejor = 0
+            for t in tag_list:
+                m = re.fullmatch(r"(\d+)\+?" + genero, t)
+                if m:
+                    mejor = max(mejor, int(m.group(1)))
+            return mejor
+
+        rng = random_module.Random(scalar(seed, 0))
+        n_girls = _max_count("girls")
+        n_boys = _max_count("boys")
+        extra_f = self._pick_lines(per_f_extra, n_girls - 1 if n_girls >= 2 else 0, rng)
+        extra_m = self._pick_lines(per_m_extra, n_boys - 1 if n_boys >= 2 else 0, rng)
+        extras = self._join(extra_f, extra_m)
+
+        # Detección de frases en lenguaje natural sobre el prompt completo:
+        # los fragmentos con min_palabras palabras o más van a TAGS NATURAL
+        # (0 = apagado). El filtro GEN nunca se modifica; las frases solo se
+        # concatenan al resultado si concatenar_natural está activo.
+        min_palabras = int(scalar(min_palabras, 0) or 0)
+        concatenar_natural = _mika_coerce_bool(scalar(concatenar_natural, False))
+        tags_natural = ""
+        naturales = []
+        if min_palabras > 0:
+            frases = [f.strip() for f in prompt.split(",") if f.strip()]
+            naturales = [f for f in frases if len(f.split()) >= min_palabras]
+            tags_natural = (", ".join(naturales) + ", ") if naturales else ""
+
+        if concatenar_natural and naturales:
+            gen_clean = filtros["gen"].rstrip(" ,")
+            presentes = {t.strip().lower() for t in gen_clean.split(",") if t.strip()}
+            extras_natural = [t for t in naturales if t.lower() not in presentes]
+            base = self._join(filtros["gen"], ", ".join(extras_natural), extras)
+        else:
+            base = self._join(filtros["gen"], extras)
+
+        union_exclusion = self._join(
+            scalar(all_gen, ""),
+            scalar(filtro_ropa, ""),
+            scalar(all_lugar, ""),
+            scalar(filtro_cara, ""),
+        )
+        texto_sin_filtro = TagRemoverMika().tag(
+            prompt,
+            union_exclusion,
+            case_sensitive=False,
+            ignore_weight=True,
+        )[0]
+
+        prompt_sin_filtro = self._join(prompt, extras)
+
+        return (
+            base,
+            self._join(base, filtros["cara"]),
+            self._join(base, filtros["ropa"]),
+            self._join(base, filtros["ropa"], filtros["cara"]),
+            self._join(base, filtros["ropa"], filtros["cara"], filtros["lugar"]),
+            self._join(base, filtros["cara"], filtros["lugar"]),
+            self._join(base, filtros["lugar"]),
+            texto_sin_filtro,
+            tags_natural,
+            filtros["gen"],
+            filtros["ropa"],
+            filtros["cara"],
+            filtros["lugar"],
+            prompt_sin_filtro,
+        )
+
+
+class FiltrosMikaSelect:
+    """
+    FILTROS Select-Mika: misma lógica que FILTROS-Mika pero con una sola
+    salida elegida con el selector "salida" (equivalente a FILTROS + switch
+    de 8 opciones por índice).
+    """
+
+    OPCIONES = [
+        "1 F GEN",
+        "2 F GEN + CARA",
+        "3 F GEN + ROPA",
+        "4 F GEN + ROPA + CARA",
+        "5 F GEN + ROPA + CARA + LUGAR",
+        "6 F GEN + CARA + LUGAR",
+        "7 F GEN + LUGAR",
+        "8 SIN FILTRO",
+    ]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        base = FiltrosMika.INPUT_TYPES()
+        base["required"]["salida"] = (cls.OPCIONES, {"default": cls.OPCIONES[0]})
+        return base
+
+    RETURN_TYPES = ("STRING",) * 7
+    RETURN_NAMES = (
+        "prompt filtro",
+        "FILTRO GENERAL",
+        "FILTRO ROPA",
+        "FILTRO CARA",
+        "FILTRO LUGAR",
+        "TAGS SIN FILTRO",
+        "TAGS NATURAL",
+    )
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    def execute(self, salida="1 F GEN", **kwargs):
+        resultados = FiltrosMika().execute(**kwargs)
+        # "8 SIN FILTRO" corresponde a la salida PROMPT SIN FILTRO (índice 13),
+        # igual que en el switch original; 1-7 son las salidas 0-6.
+        idx = self.OPCIONES.index(salida) if salida in self.OPCIONES else 0
+        if idx == 7:
+            idx = 13
+        return (
+            resultados[idx],
+            resultados[9],
+            resultados[10],
+            resultados[11],
+            resultados[12],
+            resultados[7],
+            resultados[8],
+        )
+
+
+class PromptReorganizeMika:
+    """
+    Prompt Reorganize-Mika: reorganiza el prompt en secciones con un orden
+    elegido manualmente.
+
+    Cada fragmento del prompt se asigna a UNA sola sección por cascada:
+    1) si aparece en all_gen → GEN; 2) en filtro_ropa → ROPA;
+    3) en filtro_cara → CARA; 4) en all_lugar → LUGAR; 6) el resto → SIN
+    FILTRO. La sección NATURAL recibe solo las frases de min_palabras
+    palabras o más que NO coinciden con ningún filtro.
+
+    Dentro de cada sección, las frases de min_palabras o más se mueven al
+    final (así "looking at viewer, 1boy, 2girls" queda
+    "1boy, 2girls, looking at viewer") sin que el filtro natural afecte a
+    los otros filtros.
+
+    Los widgets orden_1..orden_6 eligen qué sección va en cada posición.
+    Repetir una sección la imprime dos veces; omitirla la descarta.
+    """
+
+    SECCIONES = ["GEN", "ROPA", "CARA", "LUGAR", "NATURAL", "SIN FILTRO"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        slot = ("*", {"forceInput": True})
+        orden = {
+            f"orden_{i}": (cls.SECCIONES, {"default": cls.SECCIONES[i - 1]})
+            for i in range(1, len(cls.SECCIONES) + 1)
+        }
+        return {
+            "required": {
+                "prompt": slot,
+                "filtro_cara": slot,
+                "filtro_ropa": slot,
+                "all_gen": slot,
+                "all_lugar": slot,
+                "min_palabras": ("INT", {"default": 3, "min": 0, "max": 20}),
+                "add_comma_space_end": ("BOOLEAN", {"default": True}),
+                "agrupar_similares": ("BOOLEAN", {"default": False}),
+                **orden,
+            },
+            "optional": {
+                "ignore_color_prefix": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("prompt",)
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    @staticmethod
+    def _scalar(value, default=""):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    _STOPWORDS = {
+        "a", "an", "the", "of", "on", "in", "at", "to", "and", "with",
+        "el", "la", "los", "las", "un", "una", "de", "del", "en", "y", "o",
+        "esta", "este", "estan", "su", "sus", "its", "is",
+    }
+
+    @classmethod
+    def _agrupar_similares(cls, fragmentos):
+        """
+        Agrupa tags que comparten palabras: cada grupo ocupa la posición
+        de su primer miembro, los grupos se ordenan alfabéticamente por la
+        palabra que comparten y los miembros por número de palabras.
+        Ej: "1girl, solo, shirt, ass, white shirt, huge ass, standing"
+            → "1girl, solo, ass, huge ass, shirt, white shirt, standing".
+        """
+        por_palabra = {}
+        palabras_de = []
+        for i, texto in enumerate(fragmentos):
+            palabras = {
+                p for p in re.findall(r"[\w]+", texto.lower())
+                if len(p) > 1 and p not in cls._STOPWORDS
+            }
+            palabras_de.append(palabras)
+            for p in palabras:
+                por_palabra.setdefault(p, []).append(i)
+
+        # Componentes conexos por palabra compartida (union-find simple).
+        padre = list(range(len(fragmentos)))
+
+        def raiz(i):
+            while padre[i] != i:
+                padre[i] = padre[padre[i]]
+                i = padre[i]
+            return i
+
+        for indices in por_palabra.values():
+            for j in indices[1:]:
+                ri, rj = raiz(indices[0]), raiz(j)
+                if ri != rj:
+                    padre[rj] = ri
+
+        grupos = {}
+        for i in range(len(fragmentos)):
+            grupos.setdefault(raiz(i), []).append(i)
+
+        items = []
+        for miembros in grupos.values():
+            pos = miembros[0]
+            if len(miembros) > 1:
+                comunes = set(palabras_de[miembros[0]])
+                for m in miembros[1:]:
+                    comunes &= palabras_de[m]
+                clave = sorted(comunes)[0] if comunes else ""
+                ordenados = sorted(
+                    miembros,
+                    key=lambda m: (len(fragmentos[m].split()), fragmentos[m].lower()),
+                )
+                items.append([pos, True, clave, [fragmentos[m] for m in ordenados]])
+            else:
+                items.append([pos, False, "", [fragmentos[miembros[0]]]])
+
+        # Los grupos forman un bloque en la posición de su miembro más
+        # temprano y entre ellos se ordenan alfabéticamente por la palabra
+        # que comparten; los tags sueltos conservan su orden original.
+        clusters = [it for it in items if it[1]]
+        if clusters:
+            pos_bloque = min(it[0] for it in clusters)
+            clusters.sort(key=lambda it: it[2])
+            for orden_g, it in enumerate(clusters):
+                it[0] = pos_bloque
+                it[2] = orden_g
+        items.sort(key=lambda it: (it[0], 0 if it[1] else 1, it[2]))
+
+        resultado = []
+        for it in items:
+            resultado.extend(it[3])
+        return resultado
+
+    def execute(
+        self,
+        prompt,
+        filtro_cara,
+        filtro_ropa,
+        all_gen,
+        all_lugar,
+        min_palabras=3,
+        add_comma_space_end=True,
+        agrupar_similares=False,
+        orden_1="GEN",
+        orden_2="ROPA",
+        orden_3="CARA",
+        orden_4="LUGAR",
+        orden_5="NATURAL",
+        orden_6="SIN FILTRO",
+        ignore_color_prefix=True,
+    ):
+        scalar = self._scalar
+        prompt = str(scalar(prompt, ""))
+        icp = _mika_coerce_bool(scalar(ignore_color_prefix, True))
+        min_palabras = int(scalar(min_palabras, 3) or 0)
+
+        fragmentos = [t for t in _parse_prompt(prompt, False)]
+
+        listas = {}
+        for nombre, tags_in, usar_icp in (
+            ("GEN", all_gen, False),
+            ("ROPA", filtro_ropa, icp),
+            ("CARA", filtro_cara, False),
+            ("LUGAR", all_lugar, False),
+        ):
+            listas[nombre] = (_parse_prompt(str(scalar(tags_in, "")), False), usar_icp)
+
+        secciones = {clave: [] for clave in self.SECCIONES}
+        for frag in fragmentos:
+            asignado = None
+            # Los filtros mandan: el filtro natural no les quita fragmentos.
+            for clave in ("GEN", "ROPA", "CARA", "LUGAR"):
+                lista, usar_icp = listas[clave]
+                if any(
+                    _tags_match(frag, ft, ignore_weight=True, ignore_color_prefix=usar_icp)
+                    for ft in lista
+                ):
+                    asignado = clave
+                    break
+
+            if asignado is None and min_palabras > 0:
+                if len(frag["original"].split()) >= min_palabras:
+                    asignado = "NATURAL"
+
+            secciones[asignado or "SIN FILTRO"].append(frag["original"])
+
+        orden = [
+            scalar(o, d) for o, d in (
+                (orden_1, "GEN"), (orden_2, "ROPA"), (orden_3, "CARA"),
+                (orden_4, "LUGAR"), (orden_5, "NATURAL"), (orden_6, "SIN FILTRO"),
+            )
+        ]
+
+        agrupar = _mika_coerce_bool(scalar(agrupar_similares, False))
+        partes = []
+        for clave in orden:
+            if clave in secciones and secciones[clave]:
+                # Con similitud activa se agrupa cada sección por separado,
+                # respetando el orden de secciones y sin mezclar secciones
+                # (los tags sin filtro se agrupan solo entre ellos).
+                contenido = secciones[clave]
+                if agrupar:
+                    contenido = self._agrupar_similares(contenido)
+                # Las frases naturales (min_palabras o más) van al final de
+                # cada sección, sin cambiar a qué sección pertenecen.
+                if min_palabras > 0:
+                    cortos = [t for t in contenido if len(t.split()) < min_palabras]
+                    largos = [t for t in contenido if len(t.split()) >= min_palabras]
+                    contenido = cortos + largos
+                partes.append(", ".join(contenido))
+
+        resultado = ", ".join(partes)
+        if _mika_coerce_bool(scalar(add_comma_space_end, True)):
+            resultado = SmartTagFilterMika._ensure_trailing_comma_space(resultado)
+
+        return (resultado,)
+
+
+class TextCleanOrganizeMika:
+    """
+    Text Clean & Organize-Mika: procesa listas o párrafos de texto en
+    general (no depende de filtros). Puede eliminar elementos repetidos,
+    eliminar palabras de color ("black", "white", etc. de cada elemento)
+    y agrupar por similitud, respetando el formato original del texto
+    (comas y saltos de línea de cada elemento se conservan).
+
+    Muestra dentro del nodo cuántos elementos entraron y cuántos salieron.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"default": "", "multiline": True, "forceInput": True}),
+                "eliminar_repetidos": ("BOOLEAN", {"default": True}),
+                "eliminar_colores": ("BOOLEAN", {"default": False}),
+                "agrupar_similares": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    @staticmethod
+    def _scalar(value, default=""):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _sin_colores(seg):
+        """Quita las palabras de color de un elemento p. ej.
+        "white shirt" → "shirt", "black_hair" → "hair"."""
+        partes = re.split(r"([_\s]+)", seg)
+        palabras = partes[0::2]
+        delims = partes[1::2] + [""]
+
+        conservados = [
+            (i, w) for i, w in enumerate(palabras)
+            if w and w.lower() not in _COLORS
+        ]
+        if not conservados:
+            return ""
+
+        resultado = conservados[0][1]
+        for (prev, _), (_, w) in zip(conservados, conservados[1:]):
+            resultado += delims[prev] + w
+
+        return resultado.strip(" _")
+
+    @classmethod
+    def _split_items(cls, text):
+        """Divide texto en segmentos conservando su separador original."""
+        partes = re.split(r"(\s*(?:,\s*|\n)+)", text)
+        items = []  # (texto visible, separador siguiente original)
+        for i in range(0, len(partes), 2):
+            seg = partes[i]
+            sep = partes[i + 1] if i + 1 < len(partes) else ""
+            if seg.strip():
+                items.append((seg.strip(), sep))
+        return items
+
+    @classmethod
+    def _reconstruir(cls, items):
+        # Si al reordenar un elemento sin separador original queda en medio,
+        # usa el separador dominante del texto (salto de línea o coma).
+        con_nueva_linea = [sep for _, sep in items if "\n" in sep]
+        sep_dominante = con_nueva_linea[0] if con_nueva_linea else ", "
+        reconstruido = ""
+        for i, (seg, sep) in enumerate(items):
+            if not sep and i < len(items) - 1:
+                sep = sep_dominante
+            reconstruido += seg + sep
+        return reconstruido
+
+    @classmethod
+    def _procesar(cls, items, eliminar_colores, eliminar_repetidos, agrupar_similares):
+        """Pipeline sobre items (seg, sep): colores, repetidos, similares."""
+        if _mika_coerce_bool(eliminar_colores, False):
+            items = [(cls._sin_colores(seg), sep) for seg, sep in items]
+            items = [(seg, sep) for seg, sep in items if seg]
+
+        if _mika_coerce_bool(eliminar_repetidos, True):
+            vistos = set()
+            unicos = []
+            for seg, sep in items:
+                clave = seg.lower()
+                if clave not in vistos:
+                    vistos.add(clave)
+                    unicos.append((seg, sep))
+            items = unicos
+
+        if _mika_coerce_bool(agrupar_similares, False):
+            orden = PromptReorganizeMika._agrupar_similares([seg for seg, _ in items])
+            por_texto = {seg: i for i, (seg, _) in enumerate(items)}
+            items = [items[por_texto[seg]] for seg in orden if seg in por_texto]
+
+        return items
+
+    def execute(self, text, eliminar_repetidos=True, eliminar_colores=False, agrupar_similares=False):
+        text = str(self._scalar(text, ""))
+        if not text.strip():
+            return {"ui": {"text": ["IN (0):", "OUT (0):"]}, "result": (text,)}
+
+        items = self._split_items(text)
+        if not items:
+            return {"ui": {"text": ["IN (0):", "OUT (0):"]}, "result": (text,)}
+
+        cantidad_in = len(items)
+        items = self._procesar(items, eliminar_colores, eliminar_repetidos, agrupar_similares)
+        reconstruido = self._reconstruir(items)
+
+        info = f"in: {cantidad_in} | out: {len(items)}"
+        return {"ui": {"text": [info]}, "result": (reconstruido,)}
+
+
+class TextCleanOrganizeConcatMika:
+    """
+    Text Clean & Organize Concat-Mika: igual que Text Clean & Organize-Mika
+    pero con varios slots linkeables (text_1..N): concatena las listas o
+    párrafos de todos los nodos conectados, luego elimina colores, repeti-
+    dos y agrupa por similares. Muestra in/out en el propio nodo.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {
+            f"text_{i}": ("STRING", {"default": "", "multiline": False})
+            for i in range(1, MAX_CONCAT_SLOTS + 1)
+        }
+        optional["eliminar_repetidos"] = ("BOOLEAN", {"default": True})
+        optional["eliminar_colores"] = ("BOOLEAN", {"default": False})
+        optional["agrupar_similares"] = ("BOOLEAN", {"default": False})
+        optional["text_count"] = (
+            "INT",
+            {
+                "default": DEFAULT_CONCAT_SLOTS,
+                "min": 1,
+                "max": MAX_CONCAT_SLOTS,
+                "step": 1,
+                "display": "number",
+            },
+        )
+        return {"required": {}, "optional": optional}
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    def execute(
+        self,
+        eliminar_repetidos=True,
+        eliminar_colores=False,
+        agrupar_similares=False,
+        text_count=DEFAULT_CONCAT_SLOTS,
+        **kwargs,
+    ):
+        scalar = TextCleanOrganizeMika._scalar
+        count = max(1, min(MAX_CONCAT_SLOTS, int(scalar(text_count, DEFAULT_CONCAT_SLOTS))))
+
+        items = []
+        for i in range(1, count + 1):
+            value = scalar(kwargs.get(f"text_{i}"), "")
+            if not isinstance(value, str):
+                value = str(value)
+            if value.strip():
+                items.extend(TextCleanOrganizeMika._split_items(value))
+
+        if not items:
+            return {"ui": {"text": ["IN (0):", "OUT (0):"]}, "result": ("",)}
+
+        cantidad_in = len(items)
+        items = TextCleanOrganizeMika._procesar(
+            items, eliminar_colores, eliminar_repetidos, agrupar_similares
+        )
+        reconstruido = TextCleanOrganizeMika._reconstruir(items)
+
+        info = f"in: {cantidad_in} | out: {len(items)}"
+        return {"ui": {"text": [info]}, "result": (reconstruido,)}
+
+
+class TextCleanerCompareMika:
+    """
+    Text Cleaner Compare-Mika: elimina de una lista o grupo de tags los
+    elementos que se repiten en otra lista base, respetando el formato
+    (comas / saltos de línea) del texto de entrada.
+
+    - base: lista/grupo que sirve de referencia.
+    - tags_in: lista/grupo a la que se le quitan los repetidos de base.
+    - eliminar_repetidos: además quita duplicados dentro de tags_in.
+    - eliminar_colores / agrupar_similares: opciones del Clean & Organize.
+
+    Muestra en el nodo cuántos entraron, cuántos se quitaron y cuántos
+    salieron.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        slot = ("STRING", {"default": "", "multiline": True, "forceInput": True})
+        return {
+            "required": {
+                "base": slot,
+                "tags_in": slot,
+            },
+            "optional": {
+                "eliminar_repetidos": ("BOOLEAN", {"default": True}),
+                "eliminar_colores": ("BOOLEAN", {"default": False}),
+                "agrupar_similares": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "eliminados")
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    @staticmethod
+    def _scalar(value, default=""):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    def execute(
+        self,
+        base,
+        tags_in,
+        eliminar_repetidos=True,
+        eliminar_colores=False,
+        agrupar_similares=False,
+    ):
+        scalar = self._scalar
+        base = str(scalar(base, ""))
+        tags_in = str(scalar(tags_in, ""))
+
+        tco = TextCleanOrganizeMika
+        items = tco._split_items(tags_in)
+        if not items:
+            vacio = {"text": ["IN (0):", "QUITADOS (0):", "OUT (0):"]}
+            return {"ui": vacio, "result": ("", "")}
+
+        base_set = {
+            TagRemoverMika._normalize_for_compare(seg, False, True)
+            for seg, _ in tco._split_items(base)
+        }
+        base_set.discard("")
+
+        cantidad_in = len(items)
+        quitados = []
+
+        if _mika_coerce_bool(scalar(eliminar_colores, False), False):
+            items = [(tco._sin_colores(seg), sep) for seg, sep in items]
+            items = [(seg, sep) for seg, sep in items if seg]
+
+        filtrados = []
+        for seg, sep in items:
+            clave = TagRemoverMika._normalize_for_compare(seg, False, True)
+            if clave and clave in base_set:
+                quitados.append(seg)
+            else:
+                filtrados.append((seg, sep))
+        items = filtrados
+
+        if _mika_coerce_bool(scalar(eliminar_repetidos, True), True):
+            vistos = set()
+            unicos = []
+            for seg, sep in items:
+                clave = seg.lower()
+                if clave not in vistos:
+                    vistos.add(clave)
+                    unicos.append((seg, sep))
+            items = unicos
+
+        if _mika_coerce_bool(scalar(agrupar_similares, False), False):
+            orden = PromptReorganizeMika._agrupar_similares([s for s, _ in items])
+            por_texto = {s: i for i, (s, _) in enumerate(items)}
+            items = [items[por_texto[s]] for s in orden if s in por_texto]
+
+        reconstruido = tco._reconstruir(items)
+
+        info = [
+            f"IN ({cantidad_in}):",
+            f"QUITADOS ({len(quitados)}):",
+            f"OUT ({len(items)}):",
+        ]
+        return {
+            "ui": {"text": info},
+            "result": (reconstruido, ", ".join(quitados)),
+        }
+
+
+# ======================================================================
 # MAPPINGS
 # ======================================================================
 
 NODE_CLASS_MAPPINGS = {
     "StringSelectorCut": StringSelectorCut,
     "ScoreListExtendable": ScoreListExtendable,
+    "PrimitiveMika": PrimitiveMika,
     "TextBoxClipboard": TextBoxClipboard,
     "NoteMika": NoteMika,
+    "TextBoxPasteMika": TextBoxPasteMika,
     "TextBoxVisor": TextBoxVisor,
     "TagFilter": TagFilter,
     "TextReplaceDynamic": TextReplaceDynamic,
@@ -4048,13 +4872,21 @@ NODE_CLASS_MAPPINGS = {
     "TextSaveMika": TextSaveMika,
     "AnimaPromptOrganizer": AnimaPromptOrganizer,
     "PromptCleanDedupeMika": PromptCleanDedupeMika,
+    "FiltrosMika": FiltrosMika,
+    "FiltrosMikaSelect": FiltrosMikaSelect,
+    "PromptReorganizeMika": PromptReorganizeMika,
+    "TextCleanOrganizeMika": TextCleanOrganizeMika,
+    "TextCleanOrganizeConcatMika": TextCleanOrganizeConcatMika,
+    "TextCleanerCompareMika": TextCleanerCompareMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "StringSelectorCut": "String Selector (Cut First Line)",
     "ScoreListExtendable": "Score List",
+    "PrimitiveMika": "Primitive-Mika",
     "TextBoxClipboard": "Text Box-Mika",
     "NoteMika": "Note-Mika",
+    "TextBoxPasteMika": "Text Box Paste-Mika",
     "TextBoxVisor": "Visor-Mika",
     "TagFilter": "Tag Filter-Mika",
     "TextReplaceDynamic": "Text Replace Dynamic-Mika",
@@ -4087,4 +4919,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TextSaveMika": "Text Save-Mika",
     "AnimaPromptOrganizer": "Anima Prompt Organizer",
     "PromptCleanDedupeMika": "Prompt Clean & Dedupe-Mika",
+    "FiltrosMika": "FILTROS-Mika",
+    "FiltrosMikaSelect": "FILTROS Select-Mika",
+    "PromptReorganizeMika": "Prompt Reorganize-Mika",
+    "TextCleanOrganizeMika": "Text Clean & Organize-Mika",
+    "TextCleanOrganizeConcatMika": "Text Clean & Organize Concat-Mika",
+    "TextCleanerCompareMika": "Text Cleaner Compare-Mika",
 }

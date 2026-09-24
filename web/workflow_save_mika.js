@@ -94,8 +94,12 @@ function flashStatus(text, ok = true, ms = 2500) {
 
 async function sendSave(mode) {
   syncWorkflowName();
+  const folder = folderInput.value.trim();
+  if (!folder) {
+    return sendSaveLocalFolder(mode);
+  }
   try {
-    localStorage.setItem(STORAGE_KEY_FOLDER, folderInput.value.trim());
+    localStorage.setItem(STORAGE_KEY_FOLDER, folder);
   } catch (e) { /* no-op */ }
   let workflow;
   try {
@@ -144,6 +148,91 @@ async function sendSave(mode) {
 
   console.error("[Mika] Error guardando workflow:", data.message || res.statusText);
   flashStatus("✗ Error al guardar", false);
+}
+
+// Carpeta vacía = guardar en una carpeta LOCAL del navegador (útil en
+// la nube, ej. Google Colab, donde el servidor no accede a tu disco).
+// Usa la File System Access API; si el navegador no la soporta, baja
+// el archivo como descarga.
+async function sendSaveLocalFolder(mode) {
+  syncWorkflowName();
+
+  let workflow;
+  try {
+    workflow = app.graph.serialize();
+  } catch (e) {
+    console.error("[Mika] No se pudo serializar el workflow:", e);
+    flashStatus("✗ Error serializando", false);
+    return;
+  }
+
+  const baseName = (nameInput.value.trim() || "workflow").replace(/[\\/:*?"<>|]/g, "_");
+  let fileName = `${baseName}.json`;
+
+  if (typeof window.showDirectoryPicker === "function") {
+    let dirHandle;
+    try {
+      dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+    } catch (e) {
+      return; // el usuario canceló el selector
+    }
+
+    let exists = false;
+    try {
+      await dirHandle.getFileHandle(fileName, { create: false });
+      exists = true;
+    } catch (e) { /* no existe */ }
+
+    if (exists && mode === "ask") {
+      const overwrite = window.confirm(
+        `Ya existe "${fileName}" en la carpeta elegida.\n\n` +
+        `Aceptar = SOBREESCRIBIR\nCancelar = guardar como copia`
+      );
+      mode = overwrite ? "overwrite" : "copy";
+    }
+
+    if (mode === "copy") {
+      let i = 1;
+      while (true) {
+        const candidate = `${baseName} (${i}).json`;
+        try {
+          await dirHandle.getFileHandle(candidate, { create: false });
+          i += 1;
+        } catch (e) {
+          fileName = candidate;
+          break;
+        }
+      }
+    }
+
+    try {
+      const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(JSON.stringify(workflow, null, 2));
+      await writable.close();
+      console.log(`[Mika] Workflow guardado localmente: ${fileName}`);
+      flashStatus(`✓ ${fileName}`);
+    } catch (e) {
+      console.error("[Mika] Error guardando en la carpeta local:", e);
+      flashStatus("✗ Error al guardar", false);
+    }
+    return;
+  }
+
+  // Fallback: descarga del navegador (el navegador deduplica el nombre).
+  try {
+    const blob = new Blob([JSON.stringify(workflow, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+    flashStatus(`✓ ${fileName}`);
+  } catch (e) {
+    console.error("[Mika] Error descargando el workflow:", e);
+    flashStatus("✗ Error al guardar", false);
+  }
 }
 
 function ensurePanel() {
@@ -239,7 +328,7 @@ function ensurePanel() {
     savedFolder = localStorage.getItem(STORAGE_KEY_FOLDER) || "workflows";
   } catch (e) { /* no-op */ }
 
-  folderInput = makeInput("Carpeta destino", savedFolder);
+  folderInput = makeInput("Carpeta del servidor (vacío = carpeta local)", savedFolder);
   nameInput = makeInput("Nombre del workflow (vacío = nombre del workflow activo)", "");
 
   const btnRow = document.createElement("div");
