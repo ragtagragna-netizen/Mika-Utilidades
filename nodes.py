@@ -11,6 +11,7 @@ import os
 import hashlib
 import requests
 import re
+import json
 import folder_paths
 import time
 import random as random_module
@@ -455,25 +456,20 @@ MAX_SCORES = 50
 
 class ScoreListExtendable:
     """
-    Similar al nodo 'SCORE' de JPS-Nodes: filas numeradas con nombre y valor.
-    Filas dinámicas (1..50) controladas por num_rows.
-    La UI (score_list_mika.js) dibuja nombre y valor en la misma fila,
-    con el valor ocupando 1/3 del ancho.
+    Score List: contabilidad de pares nombre+valor (hasta MAX_SCORES filas).
+
+    Los datos se guardan como JSON en un único widget oculto ("datos"),
+    serializado por el mecanismo estándar de ComfyUI. La UI
+    (score_list_mika.js) solo dibuja las filas con botones + / -; este
+    nodo no procesa más que sumar los valores.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
-        optional = {}
-
-        for i in range(1, MAX_SCORES + 1):
-            optional[f"nombre_{i}"] = ("STRING", {"default": "", "multiline": False})
-            optional[str(i)] = ("INT", {"default": 0, "min": -999999, "max": 999999, "step": 1})
-
-        optional["num_rows"] = ("INT", {"default": 5, "min": 1, "max": MAX_SCORES, "step": 1})
-
         return {
-            "required": {},
-            "optional": optional,
+            "required": {
+                "datos": ("STRING", {"default": "[]", "multiline": True}),
+            },
         }
 
     RETURN_TYPES = ("INT", "STRING")
@@ -481,24 +477,25 @@ class ScoreListExtendable:
     FUNCTION = "doit"
     CATEGORY = "Mika Utilidades/score"
 
-    def doit(self, num_rows=5, **kwargs):
+    def doit(self, datos="[]", **_kwargs):
         try:
-            rows = max(1, min(MAX_SCORES, int(num_rows)))
-        except Exception:
-            rows = MAX_SCORES
+            rows = json.loads(datos) or []
+        except (TypeError, ValueError):
+            rows = []
+        if not isinstance(rows, list):
+            rows = []
 
         total = 0
         details = []
-
-        for i in range(1, rows + 1):
-            k = str(i)
-
-            if k not in kwargs:
+        for i, row in enumerate(rows[:MAX_SCORES], start=1):
+            if not isinstance(row, dict):
                 continue
-
-            value = int(kwargs[k])
+            try:
+                value = int(row.get("valor", 0))
+            except (TypeError, ValueError):
+                continue
             total += value
-            label = str(kwargs.get(f"nombre_{k}", k)).strip() or k
+            label = str(row.get("nombre", "")).strip() or str(i)
             details.append(f"{label}: {value}")
 
         return (total, "\n".join(details))
@@ -4369,6 +4366,131 @@ class FiltrosMikaSelect:
         )
 
 
+class FiltrosPromptMika:
+    """
+    FILTROS Prompt-Mika: solo filtrado de prompts para extraer datos.
+
+    Aplica los cuatro filtros (GEN/ROPA/CARA/LUGAR) sobre el prompt y
+    devuelve el resultado de cada uno por separado, más los TAGS SIN
+    FILTRO y los TAGS NATURAL. Sin lógica de personajes, sin selector de
+    salida y sin combinaciones.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        slot = ("*", {"forceInput": True})
+        return {
+            "required": {
+                "prompt": slot,
+                "min_palabras": ("INT", {"default": 0, "min": 0, "max": 20}),
+                "add_comma_space_end": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "filtro_gen": slot,
+                "filtro_cara": slot,
+                "filtro_ropa": slot,
+                "filtro_lugar": slot,
+                "all_gen": slot,
+                "all_lugar": slot,
+                "ignore_color_prefix": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",) * 6
+    RETURN_NAMES = (
+        "FILTRO GENERAL",
+        "FILTRO ROPA",
+        "FILTRO CARA",
+        "FILTRO LUGAR",
+        "TAGS SIN FILTRO",
+        "TAGS NATURAL",
+    )
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    def execute(
+        self,
+        prompt,
+        min_palabras=0,
+        add_comma_space_end=True,
+        filtro_gen="",
+        filtro_cara="",
+        filtro_ropa="",
+        filtro_lugar="",
+        all_gen="",
+        all_lugar="",
+        ignore_color_prefix=True,
+    ):
+        scalar = FiltrosMika._scalar
+        prompt = str(scalar(prompt, ""))
+        ignore_color_prefix = _mika_coerce_bool(scalar(ignore_color_prefix, True))
+
+        filtros = {}
+        for nombre, tags_in, icp in (
+            ("gen", filtro_gen, False),
+            ("ropa", filtro_ropa, ignore_color_prefix),
+            ("cara", filtro_cara, False),
+            ("lugar", filtro_lugar, False),
+        ):
+            filtro = SmartTagFilterMika()
+            filtros[nombre] = filtro.filter_tags(
+                prompt,
+                scalar(tags_in, ""),
+                mode="include",
+                case_sensitive=False,
+                ignore_weight=True,
+                ignore_color_prefix=icp,
+                add_comma_space_end=True,
+            )[0]
+
+        join = FiltrosMika._join
+
+        # TAGS SIN FILTRO: se quita del prompt todo lo que coincida con la
+        # unión de listas, ignorando pesos y prefijos de color.
+        union_exclusion = join(
+            scalar(all_gen, ""),
+            scalar(filtro_ropa, ""),
+            scalar(all_lugar, ""),
+            scalar(filtro_cara, ""),
+        )
+        lista_exclusion = _parse_prompt(union_exclusion, False)
+        if lista_exclusion:
+            texto_sin_filtro = ", ".join(
+                f["original"]
+                for f in _parse_prompt(prompt, False)
+                if not any(
+                    _tags_match(f, ex, ignore_weight=True, ignore_color_prefix=True)
+                    for ex in lista_exclusion
+                )
+            )
+        else:
+            texto_sin_filtro = prompt
+
+        # TAGS NATURAL: frases del prompt con min_palabras palabras o más
+        # (0 = apagado).
+        min_palabras = int(scalar(min_palabras, 0) or 0)
+        tags_natural = ""
+        if min_palabras > 0:
+            frases = [f.strip() for f in prompt.split(",") if f.strip()]
+            naturales = [f for f in frases if len(f.split()) >= min_palabras]
+            tags_natural = (", ".join(naturales) + ", ") if naturales else ""
+
+        coma_final = _mika_coerce_bool(scalar(add_comma_space_end, True))
+        ensure = SmartTagFilterMika._ensure_trailing_comma_space
+
+        def _fin(t):
+            return ensure(t) if coma_final else t
+
+        return (
+            filtros["gen"],
+            filtros["ropa"],
+            filtros["cara"],
+            filtros["lugar"],
+            _fin(texto_sin_filtro),
+            tags_natural,
+        )
+
+
 class PromptReorganizeMika:
     """
     Prompt Reorganize-Mika: reorganiza el prompt en secciones con un orden
@@ -5269,6 +5391,7 @@ NODE_CLASS_MAPPINGS = {
     "PromptCleanDedupeMika": PromptCleanDedupeMika,
     "FiltrosMika": FiltrosMika,
     "FiltrosMikaSelect": FiltrosMikaSelect,
+    "FiltrosPromptMika": FiltrosPromptMika,
     "PromptReorganizeMika": PromptReorganizeMika,
     "TextCleanOrganizeMika": TextCleanOrganizeMika,
     "TextCleanOrganizeConcatMika": TextCleanOrganizeConcatMika,
@@ -5319,6 +5442,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptCleanDedupeMika": "Prompt Clean & Dedupe-Mika",
     "FiltrosMika": "FILTROS-Mika",
     "FiltrosMikaSelect": "FILTROS Select-Mika",
+    "FiltrosPromptMika": "FILTROS Prompt-Mika",
     "PromptReorganizeMika": "Prompt Reorganize-Mika",
     "TextCleanOrganizeMika": "Text Clean & Organize-Mika",
     "TextCleanOrganizeConcatMika": "Text Clean & Organize Concat-Mika",

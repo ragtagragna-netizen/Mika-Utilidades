@@ -353,7 +353,7 @@ function ensurePanel() {
     return btn;
   };
 
-  makeButton("💾 Guardar", "Guardar (pregunta si ya existe)", () => sendSave("ask"));
+  makeButton("💾 Export", "Exportar (pregunta si ya existe)", () => sendSave("ask"));
   makeButton("📄 Copia", "Guardar siempre como copia", () => sendSave("copy"));
   body.appendChild(btnRow);
 

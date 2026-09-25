@@ -1,54 +1,35 @@
 import { app } from "/scripts/app.js";
 
-const MAX_ROWS = 50;
 const ROW_HEIGHT = 22; // alto fijo de cada fila (compacto)
+const ROW_GAP = 4;
 
+// Score List: los datos viven en un único widget STRING ("datos", JSON)
+// que serializa ComfyUI de forma estándar. El DOM solo es la vista de ese
+// valor, así los datos sobreviven al cambiar de pestaña/workflow.
 app.registerExtension({
 	name: "Mika.ScoreListLayout",
 
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
 		if (nodeData.name !== "ScoreListExtendable") return;
 
-		const cleanName = (v) => String(v ?? "").trim();
-		let buildCounter = 0;
+		const datosWidget = (node) =>
+			node.widgets?.find((w) => String(w?.name ?? "").trim() === "datos");
 
-		function getRowsCount(node) {
-			const w = node.widgets?.find((w) => cleanName(w.name) === "num_rows");
-			let n = parseInt(w?.value, 10);
-			if (Number.isNaN(n)) n = 5;
-			return Math.max(1, Math.min(MAX_ROWS, n));
+		function readRows(node) {
+			const w = datosWidget(node);
+			try {
+				const rows = JSON.parse(String(w?.value ?? "[]"));
+				return Array.isArray(rows) ? rows : [];
+			} catch (e) {
+				return [];
+			}
 		}
 
-		function refreshSize(node) {
-			requestAnimationFrame(() => {
-				try {
-					node.onResize?.(node.size);
-				} catch (e) { /* no-op */ }
-				try {
-					const size = node.computeSize();
-					node.setSize([
-						Math.max(220, size?.[0] || 220),
-						Math.max(50, size?.[1] || 50),
-					]);
-				} catch (e) { /* no-op */ }
-				node.setDirtyCanvas(true, true);
-			});
-		}
-
-		function clearRowWidgets(node) {
-			// 1) Eliminar los elementos DOM de las filas anteriores.
-			for (const el of node._mikaRowElements || []) {
-				try { el.remove(); } catch (e) { /* no-op */ }
-			}
-			node._mikaRowElements = [];
-
-			// 2) Eliminar los DOM widgets del array de widgets.
-			for (const w of node._mikaRowWidgets || []) {
-				try { w.onRemove?.(); } catch (e) { /* no-op */ }
-				const idx = node.widgets.indexOf(w);
-				if (idx >= 0) node.widgets.splice(idx, 1);
-			}
-			node._mikaRowWidgets = [];
+		function writeRows(node, rows) {
+			const w = datosWidget(node);
+			if (!w) return;
+			w.value = JSON.stringify(rows);
+			w.callback?.(w.value);
 		}
 
 		function styleInput(el) {
@@ -65,56 +46,50 @@ app.registerExtension({
 
 		function buildRows(node) {
 			if (typeof node.addDOMWidget !== "function") return;
+			const w = datosWidget(node);
+			if (!w) return;
+			w.hidden = true;
 
-			clearRowWidgets(node);
-			buildCounter++;
-
-			// Ocultar los widgets originales (siguen serializando su valor).
-			for (let i = 1; i <= MAX_ROWS; i++) {
-				const nameW = node.widgets?.find((w) => cleanName(w.name) === `nombre_${i}`);
-				const valW = node.widgets?.find((w) => cleanName(w.name) === String(i));
-				if (nameW) nameW.hidden = true;
-				if (valW) valW.hidden = true;
+			// Eliminar la vista anterior.
+			const prev = node._mikaDomWidget;
+			if (prev) {
+				try { prev.element?.remove(); } catch (e) { /* no-op */ }
+				try { prev.onRemove?.(); } catch (e) { /* no-op */ }
+				const idx = node.widgets.indexOf(prev);
+				if (idx >= 0) node.widgets.splice(idx, 1);
+				node._mikaDomWidget = null;
 			}
 
-			const rows = getRowsCount(node);
+			const rows = readRows(node);
 
-			// Un único DOM widget que contiene TODAS las filas, para evitar que
-			// los DOM widgets individuales se solapen / colapsen al cambiar de
-			// pestaña en ComfyUI.
 			const root = document.createElement("div");
 			root.style.display = "flex";
 			root.style.flexDirection = "column";
-			root.style.gap = "4px";
+			root.style.gap = ROW_GAP + "px";
 			root.style.width = "100%";
 			root.style.boxSizing = "border-box";
 
-			for (let i = 1; i <= rows; i++) {
-				const nameW = node.widgets?.find((w) => cleanName(w.name) === `nombre_${i}`);
-				const valW = node.widgets?.find((w) => cleanName(w.name) === String(i));
-
+			rows.forEach((row, i) => {
 				const container = document.createElement("div");
 				container.style.display = "flex";
 				container.style.gap = "4px";
 				container.style.width = "100%";
 				container.style.height = ROW_HEIGHT + "px";
 				container.style.alignItems = "center";
-				container.style.margin = "0";
-				container.style.padding = "0";
 
-				// Nombre: 2/3 del ancho (vacío por defecto).
+				// Nombre: 2/3 del ancho.
 				const nameInput = document.createElement("input");
 				nameInput.type = "text";
 				nameInput.style.flex = "2 1 0%";
 				styleInput(nameInput);
-				nameInput.value = String(nameW?.value ?? "");
+				nameInput.value = String(row?.nombre ?? "");
 
 				// Valor: 1/3 del ancho.
 				const valInput = document.createElement("input");
 				valInput.type = "number";
 				valInput.style.flex = "1 1 0%";
 				styleInput(valInput);
-				valInput.value = String(valW?.value ?? 0);
+				valInput.value = String(parseInt(row?.valor, 10) || 0);
 
 				// La rueda del ratón NO debe cambiar el valor (solo flechas).
 				valInput.addEventListener("wheel", (e) => {
@@ -123,72 +98,80 @@ app.registerExtension({
 				}, { passive: false });
 
 				nameInput.addEventListener("input", () => {
-					if (nameW) {
-						nameW.value = nameInput.value;
-						nameW.callback?.(nameW.value);
-					}
+					rows[i] = { ...row, nombre: nameInput.value };
+					row.nombre = nameInput.value;
+					writeRows(node, rows);
 				});
 
 				valInput.addEventListener("input", () => {
-					if (valW) {
-						valW.value = parseInt(valInput.value || "0", 10) || 0;
-						valW.callback?.(valW.value);
-					}
+					rows[i] = { ...row, valor: parseInt(valInput.value || "0", 10) || 0 };
+					row.valor = rows[i].valor;
+					writeRows(node, rows);
 				});
 
 				container.appendChild(nameInput);
 				container.appendChild(valInput);
 				root.appendChild(container);
-			}
+			});
 
-			const domWidget = node.addDOMWidget(
-				`mika_rows_${buildCounter}`,
-				"mika_score_rows",
-				root
-			);
+			// Botones para añadir / quitar filas.
+			const footer = document.createElement("div");
+			footer.style.display = "flex";
+			footer.style.gap = "4px";
+			footer.style.height = ROW_HEIGHT + "px";
+
+			for (const [text, action] of [
+				["+", () => { rows.push({ nombre: "", valor: 0 }); }],
+				["–", () => { if (rows.length > 1) rows.pop(); }],
+			]) {
+				const btn = document.createElement("button");
+				btn.textContent = text;
+				btn.style.flex = "1 1 0%";
+				btn.style.height = ROW_HEIGHT + "px";
+				btn.style.border = "1px solid var(--border-color, #444)";
+				btn.style.borderRadius = "3px";
+				btn.style.background = "var(--comfy-input-bg, #222)";
+				btn.style.color = "var(--input-text, #eee)";
+				btn.style.cursor = "pointer";
+				btn.addEventListener("click", () => {
+					action();
+					writeRows(node, rows);
+					buildRows(node);
+				});
+				footer.appendChild(btn);
+			}
+			root.appendChild(footer);
+
+			const domWidget = node.addDOMWidget("mika_score_rows", "div", root);
 			domWidget.serialize = false;
 
-			// Alto fijo = filas apiladas (22px cada una + 4px de gap).
-			const totalH = rows * ROW_HEIGHT + (rows - 1) * 4;
-			root.style.height = Math.max(ROW_HEIGHT, totalH) + "px";
+			const totalH =
+				rows.length * ROW_HEIGHT +
+				rows.length * ROW_GAP +
+				ROW_HEIGHT;
 			try {
 				domWidget.computeSize = function () {
-					return [node.size?.[0] ?? 200, Math.max(ROW_HEIGHT, totalH)];
+					return [node.size?.[0] ?? 200, totalH];
 				};
 			} catch (e) { /* no-op */ }
 
-			node._mikaRowWidgets.push(domWidget);
-			node._mikaRowElements.push(root);
+			node._mikaDomWidget = domWidget;
 
-			// Widget num_rows al principio + hook para reconstruir.
-			const rowsW = node.widgets?.find((w) => cleanName(w.name) === "num_rows");
-			if (rowsW) {
-				const idx = node.widgets.indexOf(rowsW);
-				if (idx > 0) {
-					node.widgets.splice(idx, 1);
-					node.widgets.unshift(rowsW);
-				}
-
-				if (!rowsW._mikaHooked) {
-					rowsW._mikaHooked = true;
-					const oldCb = rowsW.callback;
-					rowsW.callback = (v) => {
-						oldCb?.(v);
-						setTimeout(() => buildRows(node), 0);
-					};
-				}
-			}
-
-			node._mikaPrevRows = rows;
-			refreshSize(node);
+			requestAnimationFrame(() => {
+				try {
+					const size = node.computeSize();
+					node.setSize([
+						Math.max(220, size?.[0] || 220),
+						Math.max(50, size?.[1] || 50),
+					]);
+				} catch (e) { /* no-op */ }
+				node.setDirtyCanvas(true, true);
+			});
 		}
 
 		const onNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function () {
 			const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
-			this._mikaRowWidgets = [];
-			this._mikaRowElements = [];
-			this._mikaPrevRows = getRowsCount(this);
 			setTimeout(() => buildRows(this), 100);
 			return r;
 		};
@@ -196,28 +179,8 @@ app.registerExtension({
 		const onConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (info) {
 			const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
-			this._mikaRowWidgets = [];
-			this._mikaRowElements = [];
-			this._mikaPrevRows = getRowsCount(this);
+			// Reconstruir con los datos restaurados del workflow.
 			setTimeout(() => buildRows(this), 100);
-			return r;
-		};
-
-		// Polling: detecta cambios de num_rows (flechas del widget).
-		const onDrawForeground = nodeType.prototype.onDrawForeground;
-		nodeType.prototype.onDrawForeground = function (ctx) {
-			const r = onDrawForeground ? onDrawForeground.apply(this, arguments) : undefined;
-
-			const now = Date.now();
-			if (!this._mikaLastLayout || now - this._mikaLastLayout > 200) {
-				this._mikaLastLayout = now;
-				const rows = getRowsCount(this);
-				if (rows !== this._mikaPrevRows) {
-					this._mikaPrevRows = rows;
-					buildRows(this);
-				}
-			}
-
 			return r;
 		};
 	},

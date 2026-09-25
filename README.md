@@ -36,8 +36,12 @@ subgrafo "FILTROS": un solo nodo reemplaza una docena de nodos encadenados.
   filtro son opcionales (desconectadas = vacías).
 - **FILTROS Select-Mika** (`FiltrosMikaSelect`) — misma lógica con **una
   salida elegida por combo** (`salida`, las 8 opciones del clásico switch
-  EZ) más salidas fijas `FILTRO GENERAL/ROPA/CARA/LUGAR`, `TAGS SIN FILTRO`
-  y `TAGS NATURAL`.
+   EZ) más salidas fijas `FILTRO GENERAL/ROPA/CARA/LUGAR`, `TAGS SIN FILTRO`
+   y `TAGS NATURAL`.
+- **FILTROS Prompt-Mika** (`FiltrosPromptMika`) — solo filtrado de prompts
+  para extraer datos: los 4 filtros GEN/ROPA/CARA/LUGAR más `TAGS SIN
+  FILTRO` y `TAGS NATURAL`, sin personajes, sin combinaciones y sin
+  selector de salida.
 
 Organización de prompts sin más filtrado:
 
@@ -104,7 +108,7 @@ Requiere `transformers`; el detector usa el propio tokenizer (o
 
 | Nodo | Clase | Descripción |
 |---|---|---|
-| **Score List** | `ScoreListExtendable` | Filas nombre+valor (hasta 50) en fila compacta; suma solo filas visibles. |
+| **Score List** | `ScoreListExtendable` | Filas nombre+valor (hasta 50) en fila compacta con botones +/−; los datos se guardan en un widget JSON, estables al cambiar de pestaña. |
 | **Float OutputList** | `FloatOutputList` | Texto de números → OutputList de FLOAT. |
 | **List Unpack-Mika** | `ListUnpackMika` | Unpack de listas/tuplas/batches (incluye IMAGE/LATENT 4D) a N salidas. |
 
