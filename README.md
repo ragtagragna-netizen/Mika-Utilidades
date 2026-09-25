@@ -78,7 +78,10 @@ Utilidades sueltas de tags:
 
 | Nodo | Clase | Descripción |
 |---|---|---|
-| **String Selector (Cut First Line)** | `StringSelectorCut` | Línea por índice con wraparound + botón para cortar la primera línea. |
+| **String Selector-Mika** | `StringSelectorMika` | Una línea por índice con wraparound; `select` con control *fixed/increment/decrement/randomize*. |
+| **String Selector Cut-Mika** | `StringSelectorCutMika` | Igual que String Selector-Mika + botón ✂ para cortar la primera línea al portapapeles. |
+| **String Selector Multi-Mika** | `StringSelectorCut` | Igual que String Selector-Mika pero con `count` + `modo` (secuencial/random) para seleccionar varias líneas; botón para cortar la primera línea. |
+| **File Picker-Mika** | `FilePickerMika` | Ruta de carpeta + botones **📁 Elegir archivo** (ventana con grid de 7 columnas, imagen completa sobre fondo de transparencia, lee solo caché en disco) y **⚡ Precachear carpeta** (genera todas las miniaturas por lotes en el servidor, con progreso; evita picos de RAM para carpetas de miles de imágenes); salidas `filename` (toggle `con_extension`) y `full_path`. |
 | **Text Box-Mika** | `TextBoxClipboard` | Caja multilínea con botones **copiar / seleccionar todo / pegar** en el header (expandido y colapsado). |
 | **Text Box Paste-Mika** | `TextBoxPasteMika` | Igual pero con un único botón de **pegar que reemplaza** todo el texto. |
 | **Note-Mika** | `NoteMika` | Nota sin inputs/outputs con los botones de portapapeles del Text Box. |

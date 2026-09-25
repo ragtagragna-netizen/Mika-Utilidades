@@ -432,7 +432,54 @@ class StringSelectorCut:
         return {
             "required": {
                 "strings": ("STRING", {"multiline": True, "default": ""}),
-                "select": ("INT", {"default": 0, "min": 0, "max": 999999}),
+                "select": ("INT", {
+                    "default": 0, "min": 0, "max": 999999,
+                    "control_after_generate": True,
+                }),
+                "count": ("INT", {"default": 1, "min": 1, "max": 999999}),
+                "modo": (["secuencial", "random"], {"default": "secuencial"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, strings, select, count=1, modo="secuencial"):
+        lines = [s for s in strings.split("\n") if s.strip() != ""]
+
+        if len(lines) == 0:
+            return ("",)
+
+        n = len(lines)
+        count = max(1, min(int(count), n))
+
+        if modo == "random":
+            # select actúa como seed: misma select -> misma elección.
+            idxs = sorted(random_module.Random(select).sample(range(n), count))
+        else:
+            start = select % n
+            idxs = [(start + i) % n for i in range(count)]
+
+        return ("\n".join(lines[i] for i in idxs),)
+
+
+class StringSelectorMika:
+    """
+    String Selector-Mika: selecciona una única línea por índice con
+    wraparound, con control fixed/increment/decrement/randomize en select.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "strings": ("STRING", {"multiline": True, "default": ""}),
+                "select": ("INT", {
+                    "default": 0, "min": 0, "max": 999999,
+                    "control_after_generate": True,
+                }),
             }
         }
 
@@ -447,8 +494,224 @@ class StringSelectorCut:
         if len(lines) == 0:
             return ("",)
 
-        idx = select % len(lines)
-        return (lines[idx],)
+        return (lines[select % len(lines)],)
+
+
+class StringSelectorCutMika:
+    """
+    String Selector Cut-Mika: selecciona una única línea por índice con
+    wraparound y control fixed/increment/decrement/randomize en select.
+    Igual que String Selector-Mika pero con el botón "cortar primera
+    línea" de String Selector Multi-Mika (cut_first_line.js).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "strings": ("STRING", {"multiline": True, "default": ""}),
+                "select": ("INT", {
+                    "default": 0, "min": 0, "max": 999999,
+                    "control_after_generate": True,
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, strings, select):
+        return StringSelectorMika().doit(strings, select)
+
+
+class FilePickerMika:
+    """
+    File Picker-Mika: introduce la ruta de una carpeta local y usa el
+    botón "📁 Elegir archivo" para seleccionar un archivo con click.
+    Salidas: nombre del archivo y ruta completa.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "folder": ("STRING", {"default": "", "multiline": False}),
+                "filename": ("STRING", {"default": "", "multiline": False}),
+                "con_extension": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("filename", "full_path")
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, folder, filename, con_extension=True):
+        folder = str(folder).strip()
+        filename = os.path.basename(str(filename).strip())
+        full_path = os.path.join(folder, filename) if folder and filename else ""
+        if not con_extension:
+            filename = os.path.splitext(filename)[0]
+        return (filename, full_path)
+
+
+if PromptServer is not None and PromptServer.instance is not None:
+    @PromptServer.instance.routes.get("/mika/file_picker/list")
+    async def _mika_file_picker_list(request):
+        from aiohttp import web as _web
+        folder = request.query.get("folder", "").strip().strip('"')
+        if not folder or not os.path.isdir(folder):
+            return _web.json_response({"files": [], "error": "carpeta no encontrada"})
+        try:
+            files = sorted(
+                f for f in os.listdir(folder)
+                if os.path.isfile(os.path.join(folder, f))
+            )
+        except OSError:
+            return _web.json_response({"files": [], "error": "no se pudo leer"})
+        return _web.json_response({"files": files})
+
+    @PromptServer.instance.routes.get("/mika/file_picker/file")
+    async def _mika_file_picker_file(request):
+        from aiohttp import web as _web
+        folder = request.query.get("folder", "").strip().strip('"')
+        name = request.query.get("name", "")
+        if not folder or not os.path.isdir(folder):
+            return _web.Response(status=404)
+        # Contención: solo archivos directamente dentro de la carpeta.
+        base = os.path.realpath(folder)
+        path = os.path.realpath(os.path.join(base, os.path.basename(name)))
+        if not path.startswith(base + os.sep) or not os.path.isfile(path):
+            return _web.Response(status=404)
+        return _web.FileResponse(path)
+
+    # Caché en el directorio user/ de ComfyUI, fuera del paquete (así no se
+    # sube a GitHub al publicar el custom node).
+    _MIKA_THUMB_DIR = os.path.join(
+        folder_paths.base_path, "user", "mika_file_picker_thumbs")
+    # Progreso de precacheo por carpeta: {folder: {"done": n, "total": m}}
+    _MIKA_CACHE_JOBS = {}
+
+    def _mika_thumb_path(base, name):
+        """Ruta de caché: <carpeta>_<hash8>/<nombre_original>.png."""
+        folder_tag = hashlib.sha256(base.encode()).hexdigest()[:8]
+        safe_folder = re.sub(
+            r"[^A-Za-z0-9_.\-]+", "_", os.path.basename(base) or "root")
+        safe_name = re.sub(r"[^A-Za-z0-9_.\-]+", "_",
+                           os.path.splitext(os.path.basename(name))[0])
+        return os.path.join(
+            _MIKA_THUMB_DIR, f"{safe_folder}_{folder_tag}", safe_name + ".png")
+
+    @PromptServer.instance.routes.get("/mika/file_picker/cache")
+    async def _mika_file_picker_cache(request):
+        from aiohttp import web as _web
+        import asyncio
+
+        folder = request.query.get("folder", "").strip().strip('"')
+        try:
+            size = max(64, min(int(request.query.get("size", "192")), 512))
+        except ValueError:
+            size = 192
+        if not folder or not os.path.isdir(folder):
+            return _web.json_response({"total": 0, "error": "carpeta no encontrada"})
+        base = os.path.realpath(folder)
+        os.makedirs(_MIKA_THUMB_DIR, exist_ok=True)
+
+        imgs = [
+            f for f in os.listdir(base)
+            if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"))
+            and os.path.isfile(os.path.join(base, f))
+        ]
+        _MIKA_CACHE_JOBS[base] = {"done": 0, "total": len(imgs)}
+
+        def _make_all():
+            for i, f in enumerate(imgs, 1):
+                path = os.path.join(base, f)
+                cache_path = _mika_thumb_path(base, f)
+                try:
+                    fresh = os.path.isfile(cache_path) and \
+                        os.stat(cache_path).st_mtime_ns >= os.stat(path).st_mtime_ns
+                except OSError:
+                    continue
+                if not fresh:
+                    try:
+                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                        with Image.open(path) as img:
+                            img = ImageOps.exif_transpose(img)
+                            if img.mode not in ("RGB", "RGBA"):
+                                img = img.convert("RGBA")
+                            img.thumbnail((size, size))
+                            img.save(cache_path, "PNG")
+                    except Exception:
+                        pass
+                _MIKA_CACHE_JOBS[base]["done"] = i
+            return len(imgs)
+
+        await asyncio.get_event_loop().run_in_executor(None, _make_all)
+        return _web.json_response({"total": len(imgs)})
+
+    @PromptServer.instance.routes.get("/mika/file_picker/cache_status")
+    async def _mika_file_picker_cache_status(request):
+        from aiohttp import web as _web
+        folder = request.query.get("folder", "").strip().strip('"')
+        job = _MIKA_CACHE_JOBS.get(os.path.realpath(folder), {"done": 0, "total": 0})
+        return _web.json_response(job)
+
+    @PromptServer.instance.routes.get("/mika/file_picker/thumb")
+    async def _mika_file_picker_thumb(request):
+        from aiohttp import web as _web
+        import asyncio
+
+        folder = request.query.get("folder", "").strip().strip('"')
+        name = request.query.get("name", "")
+        try:
+            size = max(64, min(int(request.query.get("size", "192")), 512))
+        except ValueError:
+            size = 192
+        if not folder or not os.path.isdir(folder):
+            return _web.Response(status=404)
+        base = os.path.realpath(folder)
+        path = os.path.realpath(os.path.join(base, os.path.basename(name)))
+        if not path.startswith(base + os.sep) or not os.path.isfile(path):
+            return _web.Response(status=404)
+
+        try:
+            src_mtime_ns = os.stat(path).st_mtime_ns
+        except OSError:
+            return _web.Response(status=404)
+        cache_path = _mika_thumb_path(base, name)
+        fresh = os.path.isfile(cache_path) and \
+            os.stat(cache_path).st_mtime_ns >= src_mtime_ns
+
+        if not fresh:
+            # cached=1: no generar nada (la ventana usa solo la caché).
+            if request.query.get("cached"):
+                return _web.Response(status=404)
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+
+            def _make_thumb():
+                try:
+                    with Image.open(path) as img:
+                        img = ImageOps.exif_transpose(img)
+                        # PNG conserva la transparencia (RGBA) para la grid.
+                        if img.mode not in ("RGB", "RGBA"):
+                            img = img.convert("RGBA")
+                        img.thumbnail((size, size))
+                        img.save(cache_path, "PNG")
+                    return True
+                except Exception:
+                    return False
+
+            ok = await asyncio.get_event_loop().run_in_executor(None, _make_thumb)
+            if not ok or not os.path.isfile(cache_path):
+                return _web.Response(status=404)
+
+        # no-cache: revalida por Last-Modified, así si la imagen cambia y se
+        # regenera el thumb (misma URL), el navegador pide la versión nueva.
+        return _web.FileResponse(
+            cache_path, headers={"Cache-Control": "no-cache"})
 
 
 MAX_SCORES = 50
@@ -2020,7 +2283,7 @@ class ImagePreviewCleanMika:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
+            "optional": {
                 "images": ("IMAGE",),
             },
         }
@@ -2030,8 +2293,11 @@ class ImagePreviewCleanMika:
     CATEGORY = "Mika Utilidades/image"
     OUTPUT_NODE = True
 
-    def preview(self, images):
+    def preview(self, images=None):
         results = []
+
+        if images is None:
+            return {"ui": {"images": results}}
 
         array = 255. * images.cpu().numpy()
         array = np.clip(array, 0, 255).astype(np.uint8)
@@ -4069,8 +4335,8 @@ class FiltrosMika:
       del prompt en la salida TEXTO SIN FILTRO.
     - per_f_extra / per_m_extra (opcionales): textos multilínea con un
       personaje por línea. Si no hay nada conectado cuentan como vacíos.
-      Según los tags "Ngirls"/"Nboys" del filtro GEN se añaden N-1
-      personajes del sexo correspondiente.
+      Según los tags del prompt "1boy"/"Nboys" se añaden N personajes
+      masculinos, y con "2girls"/"Ngirls" se añaden N-1 femeninos.
 
     - min_palabras: frases del filtro GEN con ese número de palabras o más
       se separan como "lenguaje natural" (0 = sin separación). Ej: con 4
@@ -4194,12 +4460,16 @@ class FiltrosMika:
         # Extras por cantidad de personajes, detectados sobre el filtro GEN
         # (antes del filtro por largo de frase, para que "2girls" siga
         # contando aunque min_palabras > 1).
-        tag_list = TagIfMika().parse_tags_list(filtros["gen"])
+        # Se cuentan los "Ngirls"/"Nboys" tanto en el filtro GEN como en el
+        # prompt completo, para que los extras también se sumen en la salida
+        # SIN FILTRO aunque esos tags no estén en la lista del filtro GEN.
+        tag_list = TagIfMika().parse_tags_list(filtros["gen"]) + \
+            TagIfMika().parse_tags_list(prompt)
 
         def _max_count(genero):
             mejor = 0
             for t in tag_list:
-                m = re.fullmatch(r"(\d+)\+?" + genero, t)
+                m = re.fullmatch(r"(\d+)\+?" + genero + r"s?\+?", t)
                 if m:
                     mejor = max(mejor, int(m.group(1)))
             return mejor
@@ -4208,10 +4478,10 @@ class FiltrosMika:
         modo_personajes = scalar(modo_personajes, "index")
         if modo_personajes not in ("index", "random"):
             modo_personajes = "index"
-        n_girls = _max_count("girls")
-        n_boys = _max_count("boys")
+        n_girls = _max_count("girl")
+        n_boys = _max_count("boy")
         extra_f = self._pick_lines(per_f_extra, n_girls - 1 if n_girls >= 2 else 0, rng, modo_personajes)
-        extra_m = self._pick_lines(per_m_extra, n_boys - 1 if n_boys >= 2 else 0, rng, modo_personajes)
+        extra_m = self._pick_lines(per_m_extra, n_boys, rng, modo_personajes)
         extras = self._join(extra_f, extra_m)
 
         # Detección de frases en lenguaje natural sobre el prompt completo:
@@ -5352,6 +5622,9 @@ class PromptTranslateToText:
 
 NODE_CLASS_MAPPINGS = {
     "StringSelectorCut": StringSelectorCut,
+    "StringSelectorMika": StringSelectorMika,
+    "StringSelectorCutMika": StringSelectorCutMika,
+    "FilePickerMika": FilePickerMika,
     "ScoreListExtendable": ScoreListExtendable,
     "PrimitiveMika": PrimitiveMika,
     "TextBoxClipboard": TextBoxClipboard,
@@ -5402,7 +5675,10 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "StringSelectorCut": "String Selector (Cut First Line)",
+    "StringSelectorCut": "String Selector Multi-Mika",
+    "StringSelectorMika": "String Selector-Mika",
+    "StringSelectorCutMika": "String Selector Cut-Mika",
+    "FilePickerMika": "File Picker-Mika",
     "ScoreListExtendable": "Score List",
     "PrimitiveMika": "Primitive-Mika",
     "TextBoxClipboard": "Text Box-Mika",

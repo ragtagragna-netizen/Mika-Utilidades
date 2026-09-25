@@ -3,7 +3,7 @@ import { app } from "/scripts/app.js";
 app.registerExtension({
     name: "Comfy.StringSelectorCut",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name !== "StringSelectorCut") return;
+        if (nodeData.name !== "StringSelectorCut" && nodeData.name !== "StringSelectorCutMika") return;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
