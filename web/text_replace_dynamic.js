@@ -156,10 +156,36 @@ app.registerExtension({
         node.pairCountWidget.value = node.visibleReplacePairs.length;
       }
 
+      pruneWidgetInputs(node);
+
       relayout(node);
     }
 
     const onNodeCreated = nodeType.prototype.onNodeCreated;
+
+    // Sincroniza slots con widgets presentes: los pares ocultos (sacados
+    // de node.widgets) conservarían slots fantasma apilados junto al
+    // header que aceptan conexiones por error. Queda "text" (forceInput,
+    // sin widget) + un slot por widget visible.
+    function pruneWidgetInputs(node) {
+      if (!Array.isArray(node.inputs)) node.inputs = [];
+      const present = new Set((node.widgets || []).map((w) => w && w.name));
+      for (let i = node.inputs.length - 1; i >= 0; i--) {
+        const inp = node.inputs[i];
+        if (!inp || inp.name === "text") continue;
+        if (inp.widget && !present.has(inp.name)) {
+          node.removeInput(i);
+        }
+      }
+      // Al mostrar de nuevo un par, su widget vuelve a node.widgets sin
+      // slot: se reintroduce para que siga siendo linkeable.
+      for (const w of node.widgets || []) {
+        if (!w || !w.name || w.name === "pair_count") continue;
+        if (node.inputs.some((i) => i && i.name === w.name)) continue;
+        const type = w.type === "toggle" ? "BOOLEAN" : "STRING";
+        node.addInput(w.name, type, { widget: { name: w.name } });
+      }
+    }
 
     nodeType.prototype.onNodeCreated = function () {
       const r = onNodeCreated
@@ -284,6 +310,8 @@ app.registerExtension({
         }
       };
 
+      pruneWidgetInputs(this);
+
       setVisibleCount(this, initial, true);
 
       return r;
@@ -369,6 +397,10 @@ app.registerExtension({
           this.widgets[i].value = sv[i];
         }
       }
+
+      // Los workflows guardados re-crean los slots fantasma; se podan
+      // de nuevo (los enlaces que apuntaban a un slot fantasma se sueltan).
+      pruneWidgetInputs(this);
 
       const target =
         info.pair_count ??

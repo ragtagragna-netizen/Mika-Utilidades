@@ -73,6 +73,42 @@ app.registerExtension({
       );
     }
 
+    // Los widgets ocultos conservan slots de input que el canvas dibuja
+    // apilados junto al header (y aceptan conexiones por error). Se
+    // sincronizan los slots con los widgets text_N visibles: solo hay un
+    // slot por widget visible; al ocultar un widget su slot se elimina
+    // siempre, desconectando cualquier link que tuviera enganchado.
+    function syncInputs(node) {
+      if (!Array.isArray(node.inputs)) node.inputs = [];
+      if (!Array.isArray(node.widgets)) return;
+
+      const wanted = new Set(
+        node.widgets
+          .filter((w) => isTextSlotWidget(w) && !w.hidden)
+          .map((w) => w.name)
+      );
+
+      for (let i = node.inputs.length - 1; i >= 0; i--) {
+        const inp = node.inputs[i];
+        if (inp && inp.name && /^text_\d+$/.test(inp.name) && !wanted.has(inp.name)) {
+          if (inp.link != null) {
+            try {
+              node.disconnectInput(i, true);
+            } catch (e) {
+              /* no-op */
+            }
+          }
+          node.removeInput(i);
+        }
+      }
+
+      for (const w of node.widgets) {
+        if (!isTextSlotWidget(w) || w.hidden) continue;
+        if (node.inputs.some((i) => i && i.name === w.name)) continue;
+        node.addInput(w.name, "STRING", { widget: { name: w.name } });
+      }
+    }
+
     function getTextSlots(node) {
       if (!Array.isArray(node.widgets)) return [];
 
@@ -158,6 +194,8 @@ app.registerExtension({
           slot.widget.value = "";
         }
       }
+
+      syncInputs(node);
 
       if (syncWidget) {
         const countWidget = getCountWidget(node);

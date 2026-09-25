@@ -526,6 +526,112 @@ class StringSelectorCutMika:
         return StringSelectorMika().doit(strings, select)
 
 
+class TextAffixMika:
+    """
+    Text Affix-Mika: añade símbolos/texto al inicio o al final, o reemplaza
+    texto. Modo "parrafo": aplica una vez sobre todo el texto; modo
+    "lista": aplica línea por línea (ideal para conectar a/from TextBox).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
+                "accion": (["inicio", "final", "reemplazar"], {"default": "inicio"}),
+                "modo": (["parrafo", "lista"], {"default": "lista"}),
+            },
+            "optional": {
+                # inicio/final: símbolo o texto a añadir.
+                # reemplazar: texto a buscar.
+                "texto": ("STRING", {"multiline": False, "default": ""}),
+                # reemplazar: texto por el que se sustituye.
+                "reemplazo": ("STRING", {"multiline": False, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, text, accion="inicio", modo="lista", texto="", reemplazo=""):
+        text = str(text)
+
+        if accion == "reemplazar":
+            if modo == "lista":
+                return ("\n".join(
+                    ln.replace(texto, reemplazo) for ln in text.split("\n")
+                ),)
+            return (text.replace(texto, reemplazo),)
+
+        if modo == "lista":
+            if accion == "inicio":
+                return ("\n".join(texto + ln for ln in text.split("\n")),)
+            return ("\n".join(ln + texto for ln in text.split("\n")),)
+
+        if accion == "inicio":
+            return (texto + text,)
+        return (text + texto,)
+
+
+class SwitchMika:
+    """
+    Switch-Mika: switch entre hasta 50 inputs dinámicos (input_1..N
+    según number_of_inputs). Modos: by index, by random (usa opt_seed si
+    está conectado y != 0) y automatic (primer input no nulo).
+    Adaptado de ComfyUI-EZ-AF-Nodes.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "number_of_inputs": ("INT", {"default": 2, "min": 2, "max": 50, "step": 1}),
+                "selected_index": ("INT", {"default": 1, "min": 1, "max": 50, "step": 1}),
+                "selection_mode": (["by index", "by random", "automatic"], {"default": "by index"}),
+            },
+            "optional": {
+                "opt_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "forceInput": True}),
+            },
+            "hidden": {
+                **{f"input_{i}": ("*", {"forceInput": True}) for i in range(1, 51)}
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("output",)
+    FUNCTION = "switch"
+    CATEGORY = "Mika Utilidades/utils"
+
+    def switch(self, number_of_inputs, selection_mode, selected_index=None, opt_seed=0, **kwargs):
+        if selection_mode == "by index":
+            if selected_index is None:
+                return (None,)
+            return (kwargs.get(f"input_{selected_index}"),)
+
+        if selection_mode == "by random":
+            inputs = [kwargs[k] for k in sorted(kwargs) if kwargs[k] is not None]
+            if not inputs:
+                return (None,)
+            if opt_seed:
+                random_module.seed(opt_seed)
+            return (inputs[random_module.randint(0, len(inputs) - 1)],)
+
+        # automatic: primer input no nulo.
+        for k in sorted(kwargs):
+            if kwargs[k] is not None:
+                return (kwargs[k],)
+        return (None,)
+
+    @classmethod
+    def IS_CHANGED(cls, selection_mode, opt_seed=0, **kwargs):
+        # En modo random sin seed fija, re-ejecuta en cada prompt.
+        if selection_mode == "by random" and not opt_seed:
+            return float("nan")
+        return False
+
+
 class FilePickerMika:
     """
     File Picker-Mika: introduce la ruta de una carpeta local y usa el
@@ -562,6 +668,18 @@ class FilePickerMika:
 
 
 if PromptServer is not None and PromptServer.instance is not None:
+    @PromptServer.instance.routes.get("/mika/preset_selector/list")
+    async def _mika_preset_selector_list(request):
+        from aiohttp import web as _web
+        folder = request.query.get("folder", "").strip().strip('"')
+        if not folder:
+            folder = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "presets")
+        if not os.path.isdir(folder):
+            return _web.json_response({"files": [], "error": "carpeta no encontrada"})
+        files = PromptPresetSelectorMika._scan_dir_files(folder)
+        return _web.json_response({"files": files})
+
     @PromptServer.instance.routes.get("/mika/file_picker/list")
     async def _mika_file_picker_list(request):
         from aiohttp import web as _web
@@ -3149,6 +3267,480 @@ class IndexStepperMika:
         return float("nan")
 
 
+# ======================================================================
+# PROMPT PRESET SELECTOR MIKA
+# Clon de "Prompt Preset Selector" que lee los archivos de presets desde
+# la carpeta propia Mika-Utilidades/presets/ (se crea automáticamente).
+# Admite .txt, .yaml y .yml, filtrado por keywords y modos de selección.
+# ======================================================================
+
+try:
+    import yaml as _mika_yaml
+except ImportError:
+    _mika_yaml = None
+
+
+class PromptPresetSelectorMika:
+    """
+    Prompt Preset Selector-Mika: clon del Prompt Preset Selector, pero
+    lee los presets desde la carpeta dedicada Mika-Utilidades/presets/
+    (recursivo, incluye subcarpetas). También admite absolute_path para
+    cargar un archivo suelto fuera de esa carpeta.
+    """
+
+    _continue_state = {}
+
+    def __init__(self):
+        self.preset_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets")
+        os.makedirs(self.preset_dir, exist_ok=True)
+
+    # ---------- listado de archivos ----------
+
+    @staticmethod
+    def _scan_dir_files(base):
+        """Lista .txt/.yaml/.yml recursivamente bajo base, con rutas relativas '/'."""
+        files = []
+        try:
+            if base and os.path.isdir(base):
+                base_real = os.path.realpath(base)
+                for root, _dirs, names in os.walk(base_real):
+                    for name in names:
+                        if name.lower().endswith((".txt", ".yaml", ".yml")):
+                            rel = os.path.relpath(os.path.join(root, name), base_real)
+                            files.append(rel.replace(os.sep, "/"))
+        except Exception:
+            files = []
+
+        def sort_key(rel):
+            parts = rel.split("/")
+            return ("/".join(parts[:-1]).lower(), parts[-1].lower())
+
+        return sorted(files, key=sort_key)
+
+    @classmethod
+    def _get_preset_files(cls):
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets")
+        files = cls._scan_dir_files(base)
+        return files if files else ["(No preset files found)"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "preset_file": (cls._get_preset_files(),),
+                "absolute_path": ("STRING", {"default": "", "multiline": False, "placeholder": "Opcional: carpeta externa o /ruta/archivo.txt o .yaml"}),
+                "keyword": ("STRING", {"default": "", "multiline": False}),
+                "keyword_mode": (["OFF", "AND", "OR"], {"default": "OFF"}),
+                "selection_mode": (["Manual", "Sequential", "Sequential (continue)", "Random"], {"default": "Manual"}),
+                "preset_index": ("INT", {"default": 0, "min": 0, "max": 9999, "step": 1}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("text", "preset_list", "selected_info")
+    FUNCTION = "select_preset"
+    CATEGORY = "Mika Utilidades/text"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, preset_file, absolute_path="", **kwargs):
+        absolute_path = str(absolute_path).strip().strip('"')
+
+        # absolute_path como archivo suelto.
+        if absolute_path and os.path.isfile(absolute_path):
+            return True
+
+        # absolute_path como carpeta externa: preset_file se resuelve dentro.
+        if absolute_path and os.path.isdir(absolute_path):
+            if preset_file == "(No preset files found)":
+                return True
+            return cls._resolve_in_dir(absolute_path, preset_file) is not None
+
+        if absolute_path:
+            return True  # ruta aún no creada: se informará en la ejecución
+
+        if preset_file == "(No preset files found)":
+            return True
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets")
+        return cls._resolve_in_dir(base, preset_file) is not None
+
+    @classmethod
+    def IS_CHANGED(cls, preset_file, absolute_path, keyword, keyword_mode, selection_mode, preset_index, seed):
+        return f"{preset_file}_{absolute_path}_{keyword}_{keyword_mode}_{selection_mode}_{preset_index}_{seed}"
+
+    # ---------- carga y parseo ----------
+
+    @staticmethod
+    def _resolve_in_dir(base_dir, preset_file):
+        """Resuelve preset_file dentro de base_dir con contención (nada de ../)."""
+        if preset_file in ("(No preset files found)", ""):
+            return None
+        base_real = os.path.realpath(base_dir)
+        path = os.path.realpath(os.path.join(base_real, os.path.normpath(preset_file)))
+        if path.startswith(base_real + os.sep) and os.path.isfile(path):
+            return path
+        return None
+
+    def _resolve_file(self, preset_file, absolute_path=""):
+        """Devuelve la ruta final del archivo de preset.
+
+        Prioridad:
+        1. absolute_path como archivo suelto (.txt/.yaml/.yml existente).
+        2. absolute_path como carpeta externa: preset_file resuelto dentro.
+        3. preset_file resuelto dentro de la carpeta dedicada presets/.
+        """
+        absolute_path = str(absolute_path).strip().strip('"')
+
+        if absolute_path:
+            if os.path.isfile(absolute_path):
+                return absolute_path
+            if os.path.isdir(absolute_path):
+                return self._resolve_in_dir(absolute_path, preset_file)
+            return None
+
+        return self._resolve_in_dir(self.preset_dir, preset_file)
+
+    def load_preset_lines(self, preset_file, absolute_path=""):
+        """Carga líneas de presets, filtrando comentarios (#) y líneas vacías."""
+        try:
+            file_path = self._resolve_file(preset_file, absolute_path)
+
+            if not file_path:
+                print(f"[Prompt Preset Selector-Mika] Aviso: archivo no encontrado: {preset_file}")
+                return []
+
+            suffix = os.path.splitext(file_path)[1].lower()
+
+            if suffix in (".yaml", ".yml"):
+                if _mika_yaml is None:
+                    print(f"[Prompt Preset Selector-Mika] Error: PyYAML no instalado, no se puede cargar {os.path.basename(file_path)}")
+                    return []
+                return self.load_yaml_presets(file_path)
+
+            if suffix == ".txt":
+                lines = []
+                with open(file_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        stripped = line.strip()
+                        if stripped and not stripped.startswith("#"):
+                            lines.append(stripped)
+                return lines
+
+            print(f"[Prompt Preset Selector-Mika] Aviso: formato no soportado: {suffix}")
+            return []
+
+        except Exception as e:
+            print(f"[Prompt Preset Selector-Mika] Error cargando preset {preset_file}: {e}")
+            return []
+
+    def load_yaml_presets(self, file_path):
+        """Admite: {'presets': [...]}, lista plana, o dict anidado (claves como prefijo)."""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = _mika_yaml.safe_load(f)
+
+            if data is None:
+                return []
+
+            if isinstance(data, dict) and "presets" in data:
+                presets = data["presets"]
+                if isinstance(presets, list):
+                    return [str(item) for item in presets if item]
+
+            if isinstance(data, list):
+                return [str(item) for item in data if item]
+
+            if isinstance(data, dict):
+                return self.flatten_yaml_dict(data)
+
+            return []
+
+        except Exception as e:
+            print(f"[Prompt Preset Selector-Mika] Error parseando YAML: {e}")
+            return []
+
+    def flatten_yaml_dict(self, data, parent_keys=None):
+        """Aplana dicts anidados: {'a': {'b': ['x']}} -> ['a:b: x']."""
+        lines = []
+        if parent_keys is None:
+            parent_keys = []
+
+        if isinstance(data, dict):
+            for key, value in data.items():
+                current_keys = parent_keys + [key]
+                key_prefix = ":".join(current_keys) + ": "
+
+                if isinstance(value, list):
+                    for item in value:
+                        if item:
+                            lines.append(key_prefix + str(item))
+                elif isinstance(value, dict):
+                    lines.extend(self.flatten_yaml_dict(value, current_keys))
+                elif isinstance(value, str):
+                    lines.append(key_prefix + value)
+
+        return lines
+
+    # ---------- keywords ----------
+
+    def parse_keywords(self, keyword_string):
+        """'front, "low-angle shot" -wide' -> (['front', 'low-angle shot'], ['wide'])."""
+        if not keyword_string.strip():
+            return ([], [])
+
+        include_keywords = []
+        exclude_keywords = []
+
+        pattern = r'(-?)"([^"]+)"|(-?)([^,\s]+)'
+        for minus1, phrase, minus2, word in re.findall(pattern, keyword_string):
+            keyword = phrase or word
+            if not keyword:
+                continue
+            if minus1 == "-" or minus2 == "-":
+                exclude_keywords.append(keyword)
+            else:
+                include_keywords.append(keyword)
+
+        return (include_keywords, exclude_keywords)
+
+    def filter_by_keywords(self, lines, include_keywords, exclude_keywords, mode):
+        """Devuelve [(indice_original, linea), ...] tras aplicar include (AND/OR) y exclude."""
+        if not include_keywords and not exclude_keywords:
+            return [(i, line) for i, line in enumerate(lines)]
+
+        if include_keywords and mode != "OFF":
+            filtered = []
+            for i, line in enumerate(lines):
+                line_lower = line.lower()
+                matches = [kw.lower() in line_lower for kw in include_keywords]
+                if mode == "AND" and all(matches):
+                    filtered.append((i, line))
+                elif mode == "OR" and any(matches):
+                    filtered.append((i, line))
+        else:
+            filtered = [(i, line) for i, line in enumerate(lines)]
+
+        if exclude_keywords:
+            filtered = [
+                (i, line)
+                for i, line in filtered
+                if not any(kw.lower() in line.lower() for kw in exclude_keywords)
+            ]
+
+        return filtered
+
+    # ---------- helpers ----------
+
+    def generate_preset_list(self, lines):
+        if not lines:
+            return "(No presets available)"
+        return "\n".join(f"{i}: {line}" for i, line in enumerate(lines))
+
+    def strip_key_hierarchy(self, text):
+        """'cam:close: front view' -> 'front view'."""
+        parts = text.split(": ", 1)
+        if len(parts) == 2:
+            key_part = parts[0]
+            if ":" in key_part or (key_part and " " not in key_part):
+                return parts[1]
+        return text
+
+    # ---------- ejecución ----------
+
+    def select_preset(self, preset_file, absolute_path, keyword, keyword_mode, selection_mode, preset_index, seed):
+        # absolute_path puede ser un archivo suelto o una carpeta externa.
+        abs_path = (absolute_path or "").strip().strip('"')
+
+        if abs_path and not os.path.isdir(abs_path):
+            # Archivo suelto.
+            if not os.path.isfile(abs_path):
+                error_msg = f"Absolute path not found: {abs_path}"
+                print(f"[Prompt Preset Selector-Mika] Error: {error_msg}")
+                return ("", "", error_msg)
+
+            if not abs_path.lower().endswith((".txt", ".yaml", ".yml")):
+                error_msg = f"Unsupported file type. Use .txt, .yaml, or .yml: {abs_path}"
+                print(f"[Prompt Preset Selector-Mika] Error: {error_msg}")
+                return ("", "", error_msg)
+
+            file_to_load = abs_path
+            load_arg = abs_path
+        else:
+            if preset_file == "(No preset files found)":
+                msg = f"No preset files found in: {abs_path}" if abs_path else "No preset files found in presets/"
+                print(f"[Prompt Preset Selector-Mika] Aviso: {msg}")
+                return ("", "(No preset files found)", "")
+
+            file_to_load = preset_file
+            load_arg = preset_file
+
+        all_lines = self.load_preset_lines(load_arg, abs_path)
+        if not all_lines:
+            print(f"[Prompt Preset Selector-Mika] Aviso: '{file_to_load}' está vacío o no se pudo cargar")
+            return ("", "(File is empty or failed to load)", "")
+
+        preset_list = self.generate_preset_list(all_lines)
+
+        include_keywords, exclude_keywords = self.parse_keywords(keyword)
+        filtered_items = self.filter_by_keywords(all_lines, include_keywords, exclude_keywords, keyword_mode)
+
+        if not filtered_items:
+            warning = f"No presets match keywords: {keyword}"
+            print(f"[Prompt Preset Selector-Mika] Aviso: {warning}")
+            return ("", preset_list, warning)
+
+        state_key = f"{abs_path}|{file_to_load}_{keyword}_{keyword_mode}"
+
+        if selection_mode in ("Manual", "Sequential"):
+            selected_index = preset_index % len(filtered_items)
+            original_index, selected_text = filtered_items[selected_index]
+            print(f"[Prompt Preset Selector-Mika] {selection_mode}: index={selected_index} -> {selected_text}")
+
+        elif selection_mode == "Sequential (continue)":
+            if state_key not in self._continue_state:
+                self._continue_state[state_key] = preset_index % len(filtered_items)
+
+            selected_index = self._continue_state[state_key]
+            original_index, selected_text = filtered_items[selected_index]
+            self._continue_state[state_key] = (selected_index + 1) % len(filtered_items)
+            print(f"[Prompt Preset Selector-Mika] Sequential (continue): index={selected_index} -> {selected_text}")
+
+        else:  # Random
+            rng = random_module.Random(seed)
+            selected_index = rng.randint(0, len(filtered_items) - 1)
+            original_index, selected_text = filtered_items[selected_index]
+            print(f"[Prompt Preset Selector-Mika] Random (seed={seed}): index={selected_index} -> {selected_text}")
+
+        info = f"Selected: {original_index}: {selected_text}\nMode: {selection_mode}\nFiltered: {len(filtered_items)}/{len(all_lines)} presets"
+
+        return (self.strip_key_hierarchy(selected_text), preset_list, info)
+
+
+class PromptPresetStepperMika(PromptPresetSelectorMika):
+    """
+    Prompt Preset Stepper-Mika: Prompt Preset Selector-Mika con el motor
+    escalonado del Index Stepper-Mika.
+
+    En cada ejecución selecciona un bloque de `steps` presets empezando en
+    `start_index` (sobre la lista ya filtrada por keywords, cíclico) y auto-
+    avanza `start_index` al final del bloque para la siguiente ejecución.
+
+    Con auto_advance=False `start_index` queda fijo y cada ejecución
+    devuelve el mismo bloque.
+
+    Salidas:
+    - text: LISTA de STRING con los presets del bloque (uno por elemento).
+    - preset_list: listado numerado completo (referencia).
+    - selected_info: detalle del bloque seleccionado.
+    - index_list / current_start / current_end / range_text: misma
+      semántica que Index Stepper-Mika.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "preset_file": (cls._get_preset_files(),),
+                "absolute_path": ("STRING", {"default": "", "multiline": False, "placeholder": "Opcional: carpeta externa o /ruta/archivo.txt o .yaml"}),
+                "keyword": ("STRING", {"default": "", "multiline": False}),
+                "keyword_mode": (["OFF", "AND", "OR"], {"default": "OFF"}),
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 1, "min": 1, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "auto_advance": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "INT", "INT", "INT", "STRING")
+    RETURN_NAMES = ("text", "preset_list", "selected_info", "index_list", "current_start", "current_end", "range_text")
+    OUTPUT_IS_LIST = (True, False, False, True, False, False, False)
+    FUNCTION = "step_preset"
+    CATEGORY = "Mika Utilidades/text"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    def step_preset(self, preset_file, absolute_path, keyword, keyword_mode, start_index, steps, auto_advance=True):
+        auto_advance = _mika_coerce_bool(auto_advance)
+
+        # absolute_path puede ser un archivo suelto o una carpeta externa.
+        abs_path = (absolute_path or "").strip().strip('"')
+
+        if abs_path and os.path.isfile(abs_path):
+            file_to_load = abs_path
+        else:
+            file_to_load = preset_file
+
+        if file_to_load == "(No preset files found)":
+            msg = f"No preset files found in: {abs_path}" if abs_path else "No preset files found in presets/"
+            print(f"[Prompt Preset Stepper-Mika] Aviso: {msg}")
+            return {
+                "ui": {"start_index": [int(start_index)]},
+                "result": ([], "(No preset files found)", msg, [], 0, 0, "0-0"),
+            }
+
+        all_lines = self.load_preset_lines(file_to_load, abs_path)
+        preset_list = self.generate_preset_list(all_lines)
+
+        if not all_lines:
+            return {
+                "ui": {"start_index": [int(start_index)]},
+                "result": ([], preset_list, "File is empty or failed to load", [], 0, 0, "0-0"),
+            }
+
+        include_keywords, exclude_keywords = self.parse_keywords(keyword)
+        filtered_items = self.filter_by_keywords(all_lines, include_keywords, exclude_keywords, keyword_mode)
+
+        if not filtered_items:
+            warning = f"No presets match keywords: {keyword}"
+            print(f"[Prompt Preset Stepper-Mika] Aviso: {warning}")
+            return {
+                "ui": {"start_index": [int(start_index)]},
+                "result": ([], preset_list, warning, [], 0, 0, "0-0"),
+            }
+
+        total = len(filtered_items)
+        steps = max(1, int(steps))
+
+        start = int(start_index) % total
+        count = min(steps, total)
+        index_list = [((start + i) % total) for i in range(count)]
+
+        current_start = index_list[0]
+        current_end = index_list[-1]
+
+        if auto_advance:
+            next_start = (start + count) % total
+        else:
+            next_start = int(start_index)
+
+        # Selección del bloque sobre la lista filtrada (salida tipo lista).
+        texts = []
+        originals = []
+        for idx in index_list:
+            original_index, line = filtered_items[idx]
+            originals.append(str(original_index))
+            texts.append(self.strip_key_hierarchy(line))
+
+        info = (
+            f"Selected block: {current_start}-{current_end} "
+            f"(original indices: {', '.join(originals)})\n"
+            f"Steps: {count}\n"
+            f"Filtered: {total}/{len(all_lines)} presets"
+        )
+
+        print(f"[Prompt Preset Stepper-Mika] block {current_start}-{current_end} (next start: {next_start})")
+
+        return {
+            "ui": {"start_index": [next_start]},
+            "result": (texts, preset_list, info, index_list, current_start, current_end, f"{current_start}-{current_end}"),
+        }
+
+
 class LoadImageNameMika:
     """
     Load Image + Name-Mika: similar al Load Image nativo de ComfyUI,
@@ -5629,6 +6221,8 @@ NODE_CLASS_MAPPINGS = {
     "StringSelectorMika": StringSelectorMika,
     "StringSelectorCutMika": StringSelectorCutMika,
     "FilePickerMika": FilePickerMika,
+    "SwitchMika": SwitchMika,
+    "TextAffixMika": TextAffixMika,
     "ScoreListExtendable": ScoreListExtendable,
     "PrimitiveMika": PrimitiveMika,
     "TextBoxClipboard": TextBoxClipboard,
@@ -5659,6 +6253,8 @@ NODE_CLASS_MAPPINGS = {
     "ImageSaveAutoMika": ImageSaveAutoMika,
     "IndexIntMika": IndexIntMika,
     "IndexStepperMika": IndexStepperMika,
+    "PromptPresetSelectorMika": PromptPresetSelectorMika,
+    "PromptPresetStepperMika": PromptPresetStepperMika,
     "LoadImageNameMika": LoadImageNameMika,
     "LoadImageDirMika": LoadImageDirMika,
     "IfAnyMika": IfAnyMika,
@@ -5683,6 +6279,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "StringSelectorMika": "String Selector-Mika",
     "StringSelectorCutMika": "String Selector Cut-Mika",
     "FilePickerMika": "File Picker-Mika",
+    "SwitchMika": "Switch-Mika",
+    "TextAffixMika": "Text Affix-Mika",
     "ScoreListExtendable": "Score List",
     "PrimitiveMika": "Primitive-Mika",
     "TextBoxClipboard": "Text Box-Mika",
@@ -5713,6 +6311,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageSaveAutoMika": "Image Save Auto-Mika",
     "IndexIntMika": "Index Int-Mika",
     "IndexStepperMika": "Index Stepper-Mika",
+    "PromptPresetSelectorMika": "Prompt Preset Selector-Mika",
+    "PromptPresetStepperMika": "Prompt Preset Stepper-Mika",
     "LoadImageNameMika": "Load Image + Name-Mika",
     "LoadImageDirMika": "Load Image from Dir-Mika",
     "IfAnyMika": "If Any-Mika",

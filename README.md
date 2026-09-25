@@ -45,8 +45,11 @@ Sin dependencias extra: usa lo que ComfyUI ya trae. La traducción requiere
 | **Note-Mika** | Nota con botones de portapapeles. |
 | **Visor-Mika** | Muestra cualquier valor con preview en vivo. |
 | **Tag Filter-Mika** | Conserva los primeros N segmentos de un texto. |
+| **Text Affix-Mika** | Añade texto al inicio/final o reemplaza, en modo párrafo o por línea (lista). |
 | **Text Replace Dynamic-Mika** | Pares find/replace dinámicos, regex opcional. |
 | **Text Concatenate Dynamic-Mika** | Concatena varios textos con separador. |
+| **Prompt Preset Selector-Mika** | Clon del Prompt Preset Selector. Lee presets (.txt/.yaml/.yml) desde la carpeta dedicada `presets/` o desde una carpeta externa escrita en `absolute_path` (el dropdown `preset_file` se rellena con sus archivos; recursivo). |
+| **Prompt Preset Stepper-Mika** | Prompt Preset Selector-Mika con el motor escalonado del Index Stepper: selecciona bloques de `steps` presets (salida `text` como lista) y auto-avanza. |
 | **Text Line Selector-Mika** | Rango de líneas como LISTA. |
 | **Text Line Stepper-Mika** | Recorrido escalonado de líneas con auto-avance. |
 | **Primitive-Mika** | Primitivo genérico que adopta las opciones del slot conectado. |
@@ -80,6 +83,7 @@ Sin dependencias extra: usa lo que ComfyUI ya trae. La traducción requiere
 | Nodo | Descripción |
 |---|---|
 | **⏱ Tiempos de Ejecución** | Panel flotante y badges de tiempo por nodo. |
+| **Switch-Mika** | Switch de hasta 50 inputs dinámicos con modos by index / by random / automatic. |
 | **Fast Groups/Nodes Bypasser/Muter-Mika** | Toggles de bypass/mute por grupo o por nodo. |
 | **Anima Resolutions-Mika** | Resoluciones Anima, con modo random. |
 | **Sampler/Scheduler Selector-Mika** | Lista los samplers y schedulers instalados. |
