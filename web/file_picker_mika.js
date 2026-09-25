@@ -72,9 +72,15 @@ app.registerExtension({
                 extSel.appendChild(new Option("Todos", ""));
                 for (const e of exts) extSel.appendChild(new Option(e, e));
 
+                // Botón de confirmación de la selección múltiple (Ctrl+click).
+                const confirmBtn = document.createElement("button");
+                confirmBtn.style.cssText =
+                    "padding:6px 12px;background:#2a5a2a;color:#ddd;border:1px solid #4a4;border-radius:4px;cursor:pointer;white-space:nowrap;display:none";
+
                 header.appendChild(filter);
                 header.appendChild(extSel);
                 header.appendChild(imgOnlyLabel);
+                header.appendChild(confirmBtn);
 
                 const list = document.createElement("div");
                 list.style.cssText =
@@ -100,7 +106,43 @@ app.registerExtension({
                     );
                 };
 
-                const closePicker = () => overlay.remove();
+                const closePicker = () => {
+                    overlay.remove();
+                };
+
+                // Selección múltiple con Ctrl+click; Enter confirma y entrega
+                // los nombres como lista (una línea por archivo).
+                const selected = new Set();
+                const confirmSelection = () => {
+                    if (selected.size === 0) return;
+                    const names = files.filter((f) => selected.has(f));
+                    const value = names.join("\n");
+                    if (filenameWidget) {
+                        filenameWidget.value = value;
+                        if (typeof filenameWidget.callback === "function") {
+                            filenameWidget.callback(value);
+                        }
+                    }
+                    node.setDirtyCanvas(true, true);
+                    closePicker();
+                };
+                const onKeydown = (e) => {
+                    if (e.key === "Enter") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (selected.size > 0) confirmSelection();
+                    }
+                };
+                // En el overlay y en el input del buscador (que se traga
+                // los keydown antes de que burbujeen fuera con foco dado).
+                overlay.addEventListener("keydown", onKeydown);
+                filter.addEventListener("keydown", onKeydown);
+                confirmBtn.onclick = confirmSelection;
+                const updateConfirmBtn = () => {
+                    confirmBtn.textContent = `✔ Seleccionar (${selected.size})`;
+                    confirmBtn.style.display =
+                        selected.size > 0 ? "inline-block" : "none";
+                };
 
                 const renderWindow = () => {
                     const width = list.clientWidth - 20; // padding lateral
@@ -163,7 +205,20 @@ app.registerExtension({
                             "font-size:11px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
                         item.appendChild(label);
 
-                        item.onclick = () => {
+                        item.onclick = (e) => {
+                            if (e.ctrlKey || e.metaKey) {
+                                // Multi-selección: marca/desmarca sin cerrar.
+                                if (selected.has(f)) {
+                                    selected.delete(f);
+                                    item.style.outline = "";
+                                } else {
+                                    selected.add(f);
+                                    item.style.outline = "2px solid #4d9fff";
+                                }
+                                updateConfirmBtn();
+                                return;
+                            }
+                            // Click normal: selección única, como siempre.
                             if (filenameWidget) {
                                 filenameWidget.value = f;
                                 if (typeof filenameWidget.callback === "function") {

@@ -550,11 +550,15 @@ class FilePickerMika:
 
     def doit(self, folder, filename, con_extension=True):
         folder = str(folder).strip()
-        filename = os.path.basename(str(filename).strip())
-        full_path = os.path.join(folder, filename) if folder and filename else ""
+        names = [
+            os.path.basename(n.strip())
+            for n in str(filename).splitlines() if n.strip()
+        ]
         if not con_extension:
-            filename = os.path.splitext(filename)[0]
-        return (filename, full_path)
+            names = [os.path.splitext(n)[0] for n in names]
+        full_path = (
+            os.path.join(folder, names[0]) if folder and names else "")
+        return ("\n".join(names), full_path)
 
 
 if PromptServer is not None and PromptServer.instance is not None:
