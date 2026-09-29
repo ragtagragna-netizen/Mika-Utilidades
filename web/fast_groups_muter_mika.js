@@ -74,7 +74,10 @@ app.registerExtension({
     }
 
     // Construye los targets {n, active} a partir del mapping y aplica el motor.
-    function syncApply(node, mapping) {
+    // releaseStale=false solo lo usan los rebuilds automáticos: sembrar el
+    // estado sin soltar nada (sin eso, copiar el nodo o editar el filtro
+    // reactivaba todos los grupos).
+    function syncApply(node, mapping, releaseStale = true) {
       const graph = getGraph(node);
       const targets = [];
       for (const entry of mapping) {
@@ -85,7 +88,7 @@ app.registerExtension({
           targets.push({ n: m, active: Boolean(entry._active) });
         }
       }
-      enforceModes(node, targets, OFF_MODE);
+      enforceModes(node, targets, OFF_MODE, releaseStale);
     }
 
     // Widget PROMOVIDO en el contenedor del subgrafo (el nodo padre). Cuando
@@ -167,7 +170,7 @@ app.registerExtension({
         }
       }
 
-      syncApply(node, node._mikaMuteMapping);
+      syncApply(node, node._mikaMuteMapping, false);
       const visibleCount = (node.widgets || []).filter((w) => !w.hidden).length;
       const h = Math.max(visibleCount * 20 + 6, 36);
       const w = Math.max(node.size?.[0] || 200, 200);

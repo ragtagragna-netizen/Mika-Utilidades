@@ -82,8 +82,13 @@ function setMode(n, mode, graph) {
 
 // Fuerza `offMode` sobre los targets activos (expandiendo subgrafos).
 // `targets`: array de { n: LGraphNode, active: boolean }.
-// Lo que este controlador forzaba y ya no es objetivo vuelve a activo.
-export function enforceModes(controller, targets, offMode) {
+// Con `releaseStale` (por defecto, acción explícita del usuario) lo que
+// este controlador forzaba y ya no es objetivo vuelve a activo. En los
+// rebuilds automáticos (copia, edición de filtro, carga) se pasa `false`:
+// el rebuild solo siembra el estado actual y NUNCA debe soltar nodos,
+// porque en esos momentos los `children` de los grupos pueden no estar
+// calculados aún y un release erróneo reactivaría grupos bypassados.
+export function enforceModes(controller, targets, offMode, releaseStale = true) {
   if (!controller) return;
   const graph = controller.graph || app.graph;
   const want = new Set();
@@ -93,11 +98,15 @@ export function enforceModes(controller, targets, offMode) {
     }
   }
   const prev = lastForced.get(controller) || new Set();
-  for (const n of prev) {
-    if (!want.has(n)) setMode(n, 0, graph);
+  if (releaseStale) {
+    for (const n of prev) {
+      if (!want.has(n)) setMode(n, 0, graph);
+    }
+    lastForced.set(controller, want);
+  } else {
+    lastForced.set(controller, new Set([...prev, ...want]));
   }
   for (const n of want) setMode(n, offMode, graph);
-  lastForced.set(controller, want);
 }
 
 // OFF explícito: los miembros dados a activo. Solo ellos: los que sigan

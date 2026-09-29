@@ -28,7 +28,7 @@ app.registerExtension({
 		}
 
 		// Construye los targets {n, active} a partir del mapping y aplica el motor.
-		function syncApply(node, mapping) {
+		function syncApply(node, mapping, releaseStale = true) {
 			const graph = getGraph(node);
 			const targets = [];
 			for (const entry of mapping) {
@@ -36,7 +36,7 @@ app.registerExtension({
 				if (!targetNode) continue;
 				targets.push({ n: targetNode, active: Boolean(entry._active) });
 			}
-			enforceModes(node, targets, OFF_MODE);
+			enforceModes(node, targets, OFF_MODE, releaseStale);
 		}
 
 		function toBool(value) {
@@ -409,7 +409,7 @@ app.registerExtension({
 				}
 			}
 
-			syncApply(node, node._mikaNodeMapping);
+			syncApply(node, node._mikaNodeMapping, false);
 
 			const visibleWidgets = (node.widgets || []).filter((w) => !w.hidden);
 			const h = Math.max(visibleWidgets.length * 20 + 6, 36);

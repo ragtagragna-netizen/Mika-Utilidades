@@ -84,6 +84,7 @@ Sin dependencias extra: usa lo que ComfyUI ya trae. La traducción requiere
 |---|---|
 | **⏱ Tiempos de Ejecución** | Panel flotante y badges de tiempo por nodo. |
 | **Switch-Mika** | Switch de hasta 50 inputs dinámicos con modos by index / by random / automatic. |
+| **Switch Bypass-Mika** | Switch que devuelve el primer input cuyo nodo origen no está en bypass/mute. |
 | **Fast Groups/Nodes Bypasser/Muter-Mika** | Toggles de bypass/mute por grupo o por nodo. |
 | **Anima Resolutions-Mika** | Resoluciones Anima, con modo random. |
 | **Sampler/Scheduler Selector-Mika** | Lista los samplers y schedulers instalados. |

@@ -488,8 +488,10 @@ class StringSelectorMika:
     FUNCTION = "doit"
     CATEGORY = "Mika Utilidades/string"
 
-    def doit(self, strings, select):
-        lines = [s for s in strings.split("\n") if s.strip() != ""]
+    def doit(self, strings, select, skip_empty_lines=True):
+        lines = strings.split("\n")
+        if skip_empty_lines:
+            lines = [s for s in lines if s.strip() != ""]
 
         if len(lines) == 0:
             return ("",)
@@ -502,7 +504,9 @@ class StringSelectorCutMika:
     String Selector Cut-Mika: selecciona una única línea por índice con
     wraparound y control fixed/increment/decrement/randomize en select.
     Igual que String Selector-Mika pero con el botón "cortar primera
-    línea" de String Selector Multi-Mika (cut_first_line.js).
+    línea" de String Selector Multi-Mika (cut_first_line.js) y con
+    skip_empty_lines para decidir si las líneas vacías se descartan
+    (True, por defecto) o entran en la selección (False).
     """
 
     @classmethod
@@ -514,6 +518,7 @@ class StringSelectorCutMika:
                     "default": 0, "min": 0, "max": 999999,
                     "control_after_generate": True,
                 }),
+                "skip_empty_lines": ("BOOLEAN", {"default": True}),
             }
         }
 
@@ -522,8 +527,8 @@ class StringSelectorCutMika:
     FUNCTION = "doit"
     CATEGORY = "Mika Utilidades/string"
 
-    def doit(self, strings, select):
-        return StringSelectorMika().doit(strings, select)
+    def doit(self, strings, select, skip_empty_lines=True):
+        return StringSelectorMika().doit(strings, select, skip_empty_lines)
 
 
 class TextAffixMika:
@@ -630,6 +635,53 @@ class SwitchMika:
         if selection_mode == "by random" and not opt_seed:
             return float("nan")
         return False
+
+
+class SwitchBypassMika:
+    """
+    Switch Bypass-Mika: devuelve el primer input cuyo nodo origen NO
+    esté en bypass (marcado por el frontend en los widgets ocultos
+    bypass_1..N; el bypass es solo visual y nunca llega al backend).
+    Si todos los inputs con valor están en bypass, cae al primer input
+    no nulo.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "number_of_inputs": ("INT", {"default": 2, "min": 2, "max": 50, "step": 1}),
+            },
+            "optional": {
+                **{f"bypass_{i}": ("BOOLEAN", {"default": False}) for i in range(1, 51)}
+            },
+            "hidden": {
+                **{f"input_{i}": ("*", {"forceInput": True}) for i in range(1, 51)},
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("output",)
+    FUNCTION = "switch"
+    CATEGORY = "Mika Utilidades/utils"
+
+    def switch(self, number_of_inputs, unique_id=None, **kwargs):
+        for i in range(1, number_of_inputs + 1):
+            value = kwargs.get(f"input_{i}")
+            if value is not None and not _mika_coerce_bool(kwargs.get(f"bypass_{i}"), False):
+                return (value,)
+        # Todos con bypass (o el estado no llegó): primer no nulo.
+        for i in range(1, number_of_inputs + 1):
+            value = kwargs.get(f"input_{i}")
+            if value is not None:
+                return (value,)
+        return (None,)
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Re-ejecutar si cambia el estado de bypass de cualquier input.
+        return tuple(bool(kwargs.get(f"bypass_{i}")) for i in range(1, 51))
 
 
 class FilePickerMika:
@@ -6222,6 +6274,7 @@ NODE_CLASS_MAPPINGS = {
     "StringSelectorCutMika": StringSelectorCutMika,
     "FilePickerMika": FilePickerMika,
     "SwitchMika": SwitchMika,
+    "SwitchBypassMika": SwitchBypassMika,
     "TextAffixMika": TextAffixMika,
     "ScoreListExtendable": ScoreListExtendable,
     "PrimitiveMika": PrimitiveMika,
@@ -6280,6 +6333,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "StringSelectorCutMika": "String Selector Cut-Mika",
     "FilePickerMika": "File Picker-Mika",
     "SwitchMika": "Switch-Mika",
+    "SwitchBypassMika": "Switch Bypass-Mika",
     "TextAffixMika": "Text Affix-Mika",
     "ScoreListExtendable": "Score List",
     "PrimitiveMika": "Primitive-Mika",
