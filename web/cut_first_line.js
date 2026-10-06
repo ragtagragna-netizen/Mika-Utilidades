@@ -41,6 +41,11 @@ app.registerExtension({
                 () => {
                     if (!stringsWidget) return;
 
+                    // Cooldown de 1s contra doble clicks.
+                    const now = Date.now();
+                    if (this._mikaCutCooldown && now < this._mikaCutCooldown) return;
+                    this._mikaCutCooldown = now + 1000;
+
                     const value = stringsWidget.value ?? "";
                     const idx = value.indexOf("\n");
 

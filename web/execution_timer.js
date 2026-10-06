@@ -169,14 +169,17 @@ function ensurePanel() {
 	toggle.textContent = "–";
 	toggle.style.cursor = "pointer";
 	toggle.style.fontSize = "14px";
-	toggle.onclick = (e) => {
-		e.stopPropagation();
+	const toggleCollapsed = () => {
 		collapsed = !collapsed;
 		body.style.display = collapsed ? "none" : "flex";
 		totalWrap.style.display = collapsed ? "none" : "flex";
 		liveTimeEl.style.display = collapsed ? "inline" : "none";
 		toggle.textContent = collapsed ? "+" : "–";
 		renderPanel();
+	};
+	toggle.onclick = (e) => {
+		e.stopPropagation();
+		toggleCollapsed();
 	};
 
 	header.appendChild(titleWrap);
@@ -224,14 +227,17 @@ function ensurePanel() {
 
 	document.body.appendChild(panelEl);
 
-	// Arrastrar el panel desde el header.
+	// Arrastrar el panel desde el header: si el ratón apenas se mueve,
+	// el click colapsa/expande; si se mueve, es un arrastre.
 	let dragging = false;
+	let moved = false;
 	let offX = 0;
 	let offY = 0;
 
 	header.addEventListener("mousedown", (e) => {
 		if (e.target === toggle) return;
 		dragging = true;
+		moved = false;
 		const rect = panelEl.getBoundingClientRect();
 		offX = e.clientX - rect.left;
 		offY = e.clientY - rect.top;
@@ -240,14 +246,20 @@ function ensurePanel() {
 
 	window.addEventListener("mousemove", (e) => {
 		if (!dragging) return;
+		if (Math.abs(e.clientX - offX - panelEl.getBoundingClientRect().left) > 4 ||
+			Math.abs(e.clientY - offY - panelEl.getBoundingClientRect().top) > 4) {
+			moved = true;
+		}
 		panelEl.style.left = `${e.clientX - offX}px`;
 		panelEl.style.top = `${e.clientY - offY}px`;
 		panelEl.style.right = "auto";
 		panelEl.style.bottom = "auto";
 	});
 
-	window.addEventListener("mouseup", () => {
+	window.addEventListener("mouseup", (e) => {
+		if (!dragging) return;
 		dragging = false;
+		if (!moved && e.target !== toggle) toggleCollapsed();
 	});
 }
 

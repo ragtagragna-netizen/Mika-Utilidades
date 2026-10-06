@@ -897,8 +897,8 @@ class ScoreListExtendable:
 
     Los datos se guardan como JSON en un único widget oculto ("datos"),
     serializado por el mecanismo estándar de ComfyUI. La UI
-    (score_list_mika.js) solo dibuja las filas con botones + / -; este
-    nodo no procesa más que sumar los valores.
+    (score_list_mika.js) solo dibuja las filas con botones + / -; el
+    nodo es puramente visual, sin salidas.
     """
 
     @classmethod
@@ -909,33 +909,14 @@ class ScoreListExtendable:
             },
         }
 
-    RETURN_TYPES = ("INT", "STRING")
-    RETURN_NAMES = ("int_out", "detalle")
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    OUTPUT_NODE = True
     FUNCTION = "doit"
     CATEGORY = "Mika Utilidades/score"
 
     def doit(self, datos="[]", **_kwargs):
-        try:
-            rows = json.loads(datos) or []
-        except (TypeError, ValueError):
-            rows = []
-        if not isinstance(rows, list):
-            rows = []
-
-        total = 0
-        details = []
-        for i, row in enumerate(rows[:MAX_SCORES], start=1):
-            if not isinstance(row, dict):
-                continue
-            try:
-                value = int(row.get("valor", 0))
-            except (TypeError, ValueError):
-                continue
-            total += value
-            label = str(row.get("nombre", "")).strip() or str(i)
-            details.append(f"{label}: {value}")
-
-        return (total, "\n".join(details))
+        return ()
 
 
 class PrimitiveMika:
@@ -6264,6 +6245,38 @@ class PromptTranslateToText:
         return (text,)
 
 
+class ClipboardToMultiRefMika:
+    """
+    Clipboard to MultiRef-Mika: la imagen del portapapeles cae en la ranura
+    elegida (image_1 ... image_10) del nodo "Academia SD Multi Image
+    Reference" cuyo título coincida con `target_node_title`.
+
+    Todo ocurre en el navegador (web/clipboard_to_multiref_mika.js): sube la
+    imagen a input/ y llama a `asdReceiveImage` del nodo destino. En
+    ejecución este nodo no hace nada.
+    """
+
+    SLOT_COUNT = 10
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "target_node_title": ("STRING", {"default": ""}),
+                "slot": ([f"image_{i}" for i in range(1, cls.SLOT_COUNT + 1)],
+                         {"default": "image_1"}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/image"
+    OUTPUT_NODE = True
+
+    def doit(self, target_node_title="", slot="image_1"):
+        return ()
+
+
 # ======================================================================
 # MAPPINGS
 # ======================================================================
@@ -6325,6 +6338,7 @@ NODE_CLASS_MAPPINGS = {
     "LoadMarianMTCheckPoint": LoadMarianMTCheckPoint,
     "SmartPromptTranslate": SmartPromptTranslate,
     "PromptTranslateToText": PromptTranslateToText,
+    "ClipboardToMultiRefMika": ClipboardToMultiRefMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -6384,4 +6398,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadMarianMTCheckPoint": "Load MarianMT CheckPoint-Mika",
     "SmartPromptTranslate": "Smart Prompt Translate-Mika",
     "PromptTranslateToText": "Prompt Translate to Text-Mika",
+    "ClipboardToMultiRefMika": "Clipboard to MultiRef-Mika",
 }

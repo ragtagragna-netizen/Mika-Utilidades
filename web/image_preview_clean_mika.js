@@ -198,13 +198,40 @@ app.registerExtension({
       return r;
     };
 
+    // El widget de preview del frontend fija minHeight=220 (no deja
+    // encoger el nodo por debajo de la imagen). Se relaja ese mínimo.
+    const relaxPreviewMinSize = (node) => {
+      const w = node.widgets?.find(
+        (x) => x && x.name === "$$canvas-image-preview" && !x._mikaRelaxed
+      );
+      if (!w) return;
+      w._mikaRelaxed = true;
+      w.computeLayoutSize = () => ({ minHeight: 60, minWidth: 1 });
+    };
+
     // Dibujar icono en el header (modo expandido)
     const onDrawForeground = nodeType.prototype.onDrawForeground;
     nodeType.prototype.onDrawForeground = function (ctx) {
       const r = onDrawForeground ? onDrawForeground.apply(this, arguments) : undefined;
       if (!this.flags?.collapsed) {
         try {
+          relaxPreviewMinSize(this);
           drawHeaderIcon(this, ctx);
+          // La imagen opaca del preview cubre el tinte púrpura que el
+          // canvas da al cuerpo en bypass; se vuelve a pintar encima.
+          if (this.mode === 4) {
+            const LG = window.LiteGraph ?? {};
+            const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
+            ctx.save();
+            // drawNode aplica alpha~0.2 en bypass; se compensa.
+            ctx.globalAlpha = 0.9;
+            ctx.fillStyle = "rgba(190, 60, 220, 0.25)";
+            ctx.beginPath();
+            ctx.roundRect(0, -titleHeight, this.size[0], this.size[1] + titleHeight, 8);
+            ctx.fill();
+            ctx.restore();
+            drawHeaderIcon(this, ctx);
+          }
         } catch (e) { /* no-op */ }
       }
       return r;
@@ -241,7 +268,8 @@ app.registerExtension({
         }
 
         const radius = LG.ROUND_RADIUS ?? 8;
-        ctx.fillStyle = this.bgcolor ?? LG.NODE_DEFAULT_BGCOLOR ?? "#353535";
+        // renderingBgColor aplica el tinte púrpura en bypass (mode 4).
+        ctx.fillStyle = this.renderingBgColor ?? this.bgcolor ?? LG.NODE_DEFAULT_BGCOLOR ?? "#353535";
         ctx.beginPath();
         if (!ctx.roundRect) {
           ctx.rect(0, -titleHeight, width, titleHeight);

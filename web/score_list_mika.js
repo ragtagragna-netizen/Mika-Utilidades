@@ -50,6 +50,9 @@ app.registerExtension({
 			if (!w) return;
 			w.hidden = true;
 
+			// Quitar salidas heredadas (in_out, detalle) de workflows antiguos.
+			while (node.outputs?.length) node.removeOutput(0);
+
 			// Eliminar la vista anterior.
 			const prev = node._mikaDomWidget;
 			if (prev) {
