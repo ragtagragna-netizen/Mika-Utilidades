@@ -1520,24 +1520,13 @@ class TextConcatenateDynamic:
 
 class LoadImageMika:
     """
-    Load Image-Mika: carga una imagen desde ruta local o URL, con opción
-    RGBA, máscara de alfa, dimensiones opcionales y nombre de archivo.
-
-    Soporte MaskEditor: el widget opcional "image" (combo con image_upload)
-    recibe lo que guarda el editor de máscaras nativo y tiene prioridad
-    sobre "image_path". La extensión web (load_image_mika_mask.js) genera
-    el preview (node.imgs) para que aparezca "Open in MaskEditor".
+    Load Image Path-Mika: carga una imagen solo desde ruta local o URL,
+    con opción RGBA, máscara de alfa, dimensiones opcionales y nombre de
+    archivo. Sin preview ni MaskEditor.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
-        try:
-            image_list = LoadImageNameMika._get_image_list()
-        except Exception:
-            image_list = [""]
-        # "" primero y por defecto: el widget "image" solo se usa cuando el
-        # MaskEditor/upload escribe en él; si no, manda "image_path".
-        image_list = [""] + [f for f in image_list if f]
         return {
             "required": {
                 "image_path": ("STRING", {"default": "./ComfyUI/input/example.png", "multiline": False}),
@@ -1546,7 +1535,6 @@ class LoadImageMika:
             "optional": {
                 "output_dimensions": ("BOOLEAN", {"default": True}),
                 "filename_text_extension": ("BOOLEAN", {"default": True}),
-                "image": (image_list, {"image_upload": True, "default": ""}),
             },
         }
 
@@ -1555,55 +1543,29 @@ class LoadImageMika:
     FUNCTION = "load_image"
     CATEGORY = "Mika Utilidades/image"
 
-    def load_image(self, image_path, RGBA=False, output_dimensions=True, filename_text_extension=True, image=""):
-        if isinstance(image, (list, tuple)):
-            image = image[0] if len(image) > 0 else ""
-        if image is None:
-            image = ""
-        if not isinstance(image, str):
-            image = str(image)
-        image = image.strip()
+    def load_image(self, image_path, RGBA=False, output_dimensions=True, filename_text_extension=True):
+        if not isinstance(image_path, str):
+            image_path = str(image_path) if image_path is not None else ""
+        raw_path = image_path.strip()
+        source_path = raw_path
 
         i = None
-        source_path = ""
 
-        # 1) Widget "image": lo escribe el MaskEditor nativo al guardar
-        # (ej. "clipspace-painted-masked-123.png [temp]"). Prioritario.
-        if image:
-            try:
-                resolved, _ = LoadImageNameMika._resolve_path(image)
-            except Exception:
-                resolved = None
-            if resolved and os.path.exists(resolved):
+        if raw_path.startswith('http'):
+            i = self.download_image(raw_path)
+            if i is not None:
+                i = ImageOps.exif_transpose(i)
+        else:
+            resolved_path = _mika_resolve_local_path(raw_path)
+            if resolved_path is not None:
+                source_path = resolved_path
                 try:
-                    i = Image.open(resolved)
+                    i = Image.open(resolved_path)
                     i = ImageOps.exif_transpose(i)
-                    source_path = resolved
                 except OSError:
-                    i = None
-
-        # 2) Fallback: ruta local o URL de "image_path" (original).
-        if i is None:
-            if not isinstance(image_path, str):
-                image_path = str(image_path) if image_path is not None else ""
-            raw_path = image_path.strip()
-            source_path = raw_path
-
-            if raw_path.startswith('http'):
-                i = self.download_image(raw_path)
-                if i is not None:
-                    i = ImageOps.exif_transpose(i)
+                    print(f"Load Image Path-Mika: La imagen '{raw_path.strip()}' no existe!")
             else:
-                resolved_path = _mika_resolve_local_path(raw_path)
-                if resolved_path is not None:
-                    source_path = resolved_path
-                    try:
-                        i = Image.open(resolved_path)
-                        i = ImageOps.exif_transpose(i)
-                    except OSError:
-                        print(f"Load Image-Mika: La imagen '{raw_path.strip()}' no existe!")
-                else:
-                    print(f"Load Image-Mika: La imagen '{raw_path.strip()}' no existe!")
+                print(f"Load Image Path-Mika: La imagen '{raw_path.strip()}' no existe!")
 
         if i is None:
             i = Image.new(mode='RGB', size=(512, 512), color=(0, 0, 0))
@@ -1640,44 +1602,25 @@ class LoadImageMika:
             response.raise_for_status()
 
             if len(response.content) > 200 * 1024 * 1024:
-                print(f"Load Image-Mika: descarga demasiado grande ({url}): {len(response.content)} bytes")
+                print(f"Load Image Path-Mika: descarga demasiado grande ({url}): {len(response.content)} bytes")
                 return None
 
             img = Image.open(BytesIO(response.content))
             img.load()
             return img
         except requests.exceptions.HTTPError as errh:
-            print(f"Load Image-Mika HTTP Error ({url}): {errh}")
+            print(f"Load Image Path-Mika HTTP Error ({url}): {errh}")
         except requests.exceptions.ConnectionError as errc:
-            print(f"Load Image-Mika Connection Error ({url}): {errc}")
+            print(f"Load Image Path-Mika Connection Error ({url}): {errc}")
         except requests.exceptions.Timeout as errt:
-            print(f"Load Image-Mika Timeout ({url}): {errt}")
+            print(f"Load Image Path-Mika Timeout ({url}): {errt}")
         except Exception as e:
-            print(f"Load Image-Mika Error: {e}")
+            print(f"Load Image Path-Mika Error: {e}")
 
         return None
 
     @classmethod
-    def VALIDATE_INPUTS(cls, **kwargs):
-        # Acepta valores temporales/anotados que escribe el MaskEditor
-        # (ej. clipspace). Igual que Load Image + Name-Mika.
-        return True
-
-    @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        image = kwargs.get('image', '')
-        if isinstance(image, (list, tuple)):
-            image = image[0] if len(image) > 0 else ''
-        if isinstance(image, str) and image.strip():
-            try:
-                resolved, _ = LoadImageNameMika._resolve_path(image)
-            except Exception:
-                resolved = None
-            if resolved and os.path.exists(resolved):
-                return _mika_hash_file(resolved) or None
-            return None
-
-        image_path = kwargs.get('image_path', '')
+    def IS_CHANGED(cls, image_path='', **kwargs):
         if isinstance(image_path, (list, tuple)):
             image_path = image_path[0] if len(image_path) > 0 else ''
         if not isinstance(image_path, str):
@@ -3885,7 +3828,7 @@ class PromptPresetStepperMika(PromptPresetSelectorMika):
 
 class LoadImageNameMika:
     """
-    Load Image + Name-Mika: similar al Load Image nativo de ComfyUI,
+    Load Image-Mika: similar al Load Image nativo de ComfyUI,
     pero además devuelve el nombre de la imagen seleccionada.
 
     Compatible con imágenes editadas en inpaint / mask editor,
@@ -4040,7 +3983,7 @@ class LoadImageNameMika:
         image_name = os.path.splitext(filename)[0]
 
         if not image_path or not os.path.exists(image_path):
-            print(f"Load Image + Name-Mika: no se encontró la imagen '{image}'.")
+            print(f"Load Image-Mika: no se encontró la imagen '{image}'.")
 
             black = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
             mask = torch.zeros((1, 64, 64), dtype=torch.float32)
@@ -4079,7 +4022,7 @@ class LoadImageNameMika:
             return (image_tensor, mask, image_name)
 
         except Exception as e:
-            print(f"Load Image + Name-Mika: error cargando '{image_path}': {e}")
+            print(f"Load Image-Mika: error cargando '{image_path}': {e}")
 
             black = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
             mask = torch.zeros((1, 64, 64), dtype=torch.float32)
@@ -4098,6 +4041,15 @@ class LoadImageNameMika:
             return None
 
         return _mika_hash_file(image_path) or None
+
+
+class LoadImageNameMaskMika(LoadImageNameMika):
+    """
+    Load Image Mask-Mika: copia exacta de Load Image-Mika
+    con un botón "Abrir MaskEditor" (web/load_image_mask_mika.js) que
+    copia la imagen al clipspace y abre el editor de máscaras nativo.
+    Al guardar, el MaskEditor escribe el resultado en el widget "image".
+    """
 
 
 class IfAnyMika:
@@ -6650,6 +6602,7 @@ NODE_CLASS_MAPPINGS = {
     "PromptPresetSelectorMika": PromptPresetSelectorMika,
     "PromptPresetStepperMika": PromptPresetStepperMika,
     "LoadImageNameMika": LoadImageNameMika,
+    "LoadImageNameMaskMika": LoadImageNameMaskMika,
     "LoadImageDirMika": LoadImageDirMika,
     "IfAnyMika": IfAnyMika,
     "BypassDetectorMika": BypassDetectorMika,
@@ -6690,7 +6643,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TagFilter": "Tag Filter-Mika",
     "TextReplaceDynamic": "Text Replace Dynamic-Mika",
     "TextConcatenateDynamic": "Text Concatenate-Mika",
-    "LoadImageMika": "Load Image-Mika",
+    "LoadImageMika": "Load Image Path-Mika",
     "SmartTagFilterMika": "Smart Tag Filter-Mika",
     "TagIfMika": "Tag If-Mika",
     "TagRemoverMika": "Tag Remover-Mika",
@@ -6713,7 +6666,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IndexStepperMika": "Index Stepper-Mika",
     "PromptPresetSelectorMika": "Prompt Preset Selector-Mika",
     "PromptPresetStepperMika": "Prompt Preset Stepper-Mika",
-    "LoadImageNameMika": "Load Image + Name-Mika",
+    "LoadImageNameMika": "Load Image-Mika",
+    "LoadImageNameMaskMika": "Load Image Mask-Mika",
     "LoadImageDirMika": "Load Image from Dir-Mika",
     "IfAnyMika": "If Any-Mika",
     "BypassDetectorMika": "Bypass Detector-Mika",

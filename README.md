@@ -74,7 +74,8 @@ Sin dependencias extra: usa lo que ComfyUI ya trae. La traducción requiere
 
 | Nodo | Descripción |
 |---|---|
-| **Load Image-Mika** | Carga desde ruta local o URL (RGBA, máscara, nombre). |
+| **Load Image Path-Mika** | Carga desde ruta local o URL (RGBA, máscara, nombre). Sin preview. |
+| **Load Image Mask-Mika** | Igual que Load Image-Mika, con botón para abrir el MaskEditor. |
 | **Image Preview Clean-Mika** | Preview sin metadata ni workflow. |
 | **Image Save Auto-Mika** | Guarda automáticamente cada imagen. |
 
