@@ -77,8 +77,9 @@ app.registerExtension({
 				container.style.display = "flex";
 				container.style.gap = "4px";
 				container.style.width = "100%";
-				container.style.height = ROW_HEIGHT + "px";
-				container.style.alignItems = "center";
+			container.style.height = ROW_HEIGHT + "px";
+			container.style.flexShrink = "0";
+			container.style.alignItems = "center";
 
 				// Nombre: 2/3 del ancho.
 				const nameInput = document.createElement("input");
@@ -122,6 +123,7 @@ app.registerExtension({
 			footer.style.display = "flex";
 			footer.style.gap = "4px";
 			footer.style.height = ROW_HEIGHT + "px";
+		footer.style.flexShrink = "0";
 
 			for (const [text, action] of [
 				["+", () => { rows.push({ nombre: "", valor: 0 }); }],
@@ -145,32 +147,42 @@ app.registerExtension({
 			}
 			root.appendChild(footer);
 
-			const domWidget = node.addDOMWidget("mika_score_rows", "div", root);
-			domWidget.serialize = false;
+		const domWidget = node.addDOMWidget("mika_score_rows", "div", root);
+		domWidget.serialize = false;
 
-			const totalH =
-				rows.length * ROW_HEIGHT +
-				rows.length * ROW_GAP +
-				ROW_HEIGHT;
+		// Alto de reserva mientras el DOM no está maquetado (offscreen da 0).
+		const fallbackH =
+			rows.length * ROW_HEIGHT +
+			rows.length * ROW_GAP +
+			ROW_HEIGHT;
+
+		// El alto real lo manda el contenido medido (scrollHeight no se ve
+		// afectado por el scale CSS del zoom y evita el bucle medir→resize).
+		const fitNode = () => {
 			try {
-				domWidget.computeSize = function () {
-					return [node.size?.[0] ?? 200, totalH];
-				};
+				const contentH = root.scrollHeight || fallbackH;
+				domWidget.computeSize = () => [node.size?.[0] ?? 200, contentH];
+				const size = node.computeSize();
+				const w = Math.max(220, size?.[0] || 220);
+				const h = Math.max(50, size?.[1] || 50);
+				if (Math.abs((node.size?.[1] ?? 0) - h) > 1 || node.size?.[0] !== w) {
+					node.setSize([w, h]);
+				}
 			} catch (e) { /* no-op */ }
+			node.setDirtyCanvas(true, true);
+		};
 
-			node._mikaDomWidget = domWidget;
+		try { node._mikaRowObserver?.disconnect(); } catch (e) { /* no-op */ }
+		try {
+			const ro = new ResizeObserver(() => fitNode());
+			ro.observe(root);
+			node._mikaRowObserver = ro;
+		} catch (e) { /* no-op */ }
 
-			requestAnimationFrame(() => {
-				try {
-					const size = node.computeSize();
-					node.setSize([
-						Math.max(220, size?.[0] || 220),
-						Math.max(50, size?.[1] || 50),
-					]);
-				} catch (e) { /* no-op */ }
-				node.setDirtyCanvas(true, true);
-			});
-		}
+		node._mikaDomWidget = domWidget;
+
+		requestAnimationFrame(fitNode);
+	}
 
 		const onNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function () {

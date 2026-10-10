@@ -16,6 +16,7 @@ import folder_paths
 import time
 import random as random_module
 import comfy.samplers
+from nodes import LoraLoader, LoraLoaderModelOnly
 
 
 # ======================================================================
@@ -1391,7 +1392,7 @@ DEFAULT_CONCAT_SLOTS = 3
 
 class TextConcatenateDynamic:
     """
-    Text Concatenate Dynamic-Mika.
+    Text Concatenate-Mika.
 
     Slots dinámicos controlados por text_count.
 
@@ -1422,7 +1423,7 @@ class TextConcatenateDynamic:
         optional = {}
 
         for i in range(1, MAX_CONCAT_SLOTS + 1):
-            optional[f"text_{i}"] = ("STRING", {"default": "", "multiline": False})
+            optional[f"text_{i}"] = ("STRING", {"default": ""})
 
         optional["separator"] = ("STRING", {"default": ""})
         optional["clean_output"] = ("BOOLEAN", {"default": False})
@@ -1521,10 +1522,22 @@ class LoadImageMika:
     """
     Load Image-Mika: carga una imagen desde ruta local o URL, con opción
     RGBA, máscara de alfa, dimensiones opcionales y nombre de archivo.
+
+    Soporte MaskEditor: el widget opcional "image" (combo con image_upload)
+    recibe lo que guarda el editor de máscaras nativo y tiene prioridad
+    sobre "image_path". La extensión web (load_image_mika_mask.js) genera
+    el preview (node.imgs) para que aparezca "Open in MaskEditor".
     """
 
     @classmethod
     def INPUT_TYPES(cls):
+        try:
+            image_list = LoadImageNameMika._get_image_list()
+        except Exception:
+            image_list = [""]
+        # "" primero y por defecto: el widget "image" solo se usa cuando el
+        # MaskEditor/upload escribe en él; si no, manda "image_path".
+        image_list = [""] + [f for f in image_list if f]
         return {
             "required": {
                 "image_path": ("STRING", {"default": "./ComfyUI/input/example.png", "multiline": False}),
@@ -1533,6 +1546,7 @@ class LoadImageMika:
             "optional": {
                 "output_dimensions": ("BOOLEAN", {"default": True}),
                 "filename_text_extension": ("BOOLEAN", {"default": True}),
+                "image": (image_list, {"image_upload": True, "default": ""}),
             },
         }
 
@@ -1541,19 +1555,55 @@ class LoadImageMika:
     FUNCTION = "load_image"
     CATEGORY = "Mika Utilidades/image"
 
-    def load_image(self, image_path, RGBA=False, output_dimensions=True, filename_text_extension=True):
-        i = None
+    def load_image(self, image_path, RGBA=False, output_dimensions=True, filename_text_extension=True, image=""):
+        if isinstance(image, (list, tuple)):
+            image = image[0] if len(image) > 0 else ""
+        if image is None:
+            image = ""
+        if not isinstance(image, str):
+            image = str(image)
+        image = image.strip()
 
-        if image_path.startswith('http'):
-            i = self.download_image(image_path)
-            if i is not None:
-                i = ImageOps.exif_transpose(i)
-        else:
+        i = None
+        source_path = ""
+
+        # 1) Widget "image": lo escribe el MaskEditor nativo al guardar
+        # (ej. "clipspace-painted-masked-123.png [temp]"). Prioritario.
+        if image:
             try:
-                i = Image.open(image_path)
-                i = ImageOps.exif_transpose(i)
-            except OSError:
-                print(f"Load Image-Mika: La imagen '{image_path.strip()}' no existe!")
+                resolved, _ = LoadImageNameMika._resolve_path(image)
+            except Exception:
+                resolved = None
+            if resolved and os.path.exists(resolved):
+                try:
+                    i = Image.open(resolved)
+                    i = ImageOps.exif_transpose(i)
+                    source_path = resolved
+                except OSError:
+                    i = None
+
+        # 2) Fallback: ruta local o URL de "image_path" (original).
+        if i is None:
+            if not isinstance(image_path, str):
+                image_path = str(image_path) if image_path is not None else ""
+            raw_path = image_path.strip()
+            source_path = raw_path
+
+            if raw_path.startswith('http'):
+                i = self.download_image(raw_path)
+                if i is not None:
+                    i = ImageOps.exif_transpose(i)
+            else:
+                resolved_path = _mika_resolve_local_path(raw_path)
+                if resolved_path is not None:
+                    source_path = resolved_path
+                    try:
+                        i = Image.open(resolved_path)
+                        i = ImageOps.exif_transpose(i)
+                    except OSError:
+                        print(f"Load Image-Mika: La imagen '{raw_path.strip()}' no existe!")
+                else:
+                    print(f"Load Image-Mika: La imagen '{raw_path.strip()}' no existe!")
 
         if i is None:
             i = Image.new(mode='RGB', size=(512, 512), color=(0, 0, 0))
@@ -1578,9 +1628,9 @@ class LoadImageMika:
             mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
 
         if filename_text_extension:
-            filename = os.path.basename(image_path)
+            filename = os.path.basename(source_path)
         else:
-            filename = os.path.splitext(os.path.basename(image_path))[0]
+            filename = os.path.splitext(os.path.basename(source_path))[0]
 
         return (image, mask, filename, width, height)
 
@@ -1608,23 +1658,40 @@ class LoadImageMika:
         return None
 
     @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        # Acepta valores temporales/anotados que escribe el MaskEditor
+        # (ej. clipspace). Igual que Load Image + Name-Mika.
+        return True
+
+    @classmethod
     def IS_CHANGED(cls, **kwargs):
-        image_path = kwargs.get('image_path', '')
-
-        if image_path.startswith('http'):
-            return float("NaN")
-
-        if not os.path.exists(image_path):
+        image = kwargs.get('image', '')
+        if isinstance(image, (list, tuple)):
+            image = image[0] if len(image) > 0 else ''
+        if isinstance(image, str) and image.strip():
+            try:
+                resolved, _ = LoadImageNameMika._resolve_path(image)
+            except Exception:
+                resolved = None
+            if resolved and os.path.exists(resolved):
+                return _mika_hash_file(resolved) or None
             return None
 
-        try:
-            sha256_hash = hashlib.sha256()
-            with open(image_path, 'rb') as f:
-                for chunk in iter(lambda: f.read(4096), b''):
-                    sha256_hash.update(chunk)
-            return sha256_hash.hexdigest()
-        except Exception:
+        image_path = kwargs.get('image_path', '')
+        if isinstance(image_path, (list, tuple)):
+            image_path = image_path[0] if len(image_path) > 0 else ''
+        if not isinstance(image_path, str):
+            image_path = str(image_path) if image_path is not None else ''
+
+        if image_path.strip().startswith('http'):
             return float("NaN")
+
+        resolved = _mika_resolve_local_path(image_path)
+        if not resolved:
+            return None
+
+        h = _mika_hash_file(resolved)
+        return h if h is not None else float("NaN")
 
 
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".jfif")
@@ -1646,6 +1713,48 @@ def _mika_list_images(directory):
         return []
 
     return sorted(files)
+
+
+def _mika_resolve_local_path(path):
+    """Normaliza una ruta local y devuelve la primera candidata existente.
+
+    Acepta comillas envolventes (copiar/pegar), ~, variables de entorno y
+    rutas relativas a CWD, a la base de ComfyUI o a input/output/temp.
+    Devuelve None si ninguna candidata existe.
+    """
+    if path is None:
+        return None
+    if not isinstance(path, str):
+        path = str(path)
+    p = path.strip().strip('"').strip("'").strip()
+    if not p:
+        return None
+
+    p = os.path.expanduser(os.path.expandvars(p))
+
+    candidates = [p]
+    if not os.path.isabs(p):
+        candidates.append(os.path.abspath(p))
+        try:
+            candidates.append(os.path.join(folder_paths.base_path, p))
+        except Exception:
+            pass
+        for fn in ("get_input_directory", "get_output_directory", "get_temp_directory"):
+            try:
+                d = getattr(folder_paths, fn)()
+            except Exception:
+                continue
+            if d:
+                candidates.append(os.path.join(d, p))
+                candidates.append(os.path.join(d, os.path.basename(p)))
+
+    for c in candidates:
+        try:
+            if c and os.path.isfile(c):
+                return os.path.abspath(c)
+        except Exception:
+            continue
+    return None
 
 
 class LoadImageDirMika:
@@ -6277,11 +6386,230 @@ class ClipboardToMultiRefMika:
         return ()
 
 
+def _lora_list():
+    return sorted(folder_paths.get_filename_list("loras"))
+
+
+class LoadLoraMika:
+    """
+    Load Lora-Mika: carga un LoRA navegando por carpetas/subcarpetas.
+
+    El combo `lora` guarda la ruta relativa completa; web/load_lora_mika.js
+    muestra el desplegable como menú en cascada por directorios.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "lora": (_lora_list(),),
+                "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0,
+                                             "max": 100.0, "step": 0.01}),
+                "strength_clip": ("FLOAT", {"default": 1.0, "min": -100.0,
+                                            "max": 100.0, "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL", "CLIP")
+    FUNCTION = "load_lora"
+    CATEGORY = "Mika Utilidades/loaders"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, lora, **_kwargs):
+        if not folder_paths.get_full_path("loras", lora):
+            return f"LoRA no encontrado: {lora}"
+        return True
+
+    def load_lora(self, model, clip, lora, strength_model, strength_clip):
+        return LoraLoader().load_lora(
+            model, clip, lora, strength_model, strength_clip
+        )
+
+
+class LoadLoraMikaNoClip:
+    """Load Lora (no CLIP)-Mika: igual que Load Lora-Mika pero solo MODEL."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "lora": (_lora_list(),),
+                "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0,
+                                             "max": 100.0, "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_lora"
+    CATEGORY = "Mika Utilidades/loaders"
+
+    VALIDATE_INPUTS = LoadLoraMika.VALIDATE_INPUTS
+
+    def load_lora(self, model, lora, strength_model):
+        model_out, _ = LoraLoader().load_lora(model, None, lora, strength_model, 0.0)
+        return (model_out,)
+
+
+MAX_LORA_STACK = 10
+DEFAULT_LORA_STACK = 3
+
+
+class LoadLoraStackMika:
+    """
+    Load Lora Stack-Mika: apila hasta MAX_LORA_STACK LoRAs en orden
+    (1 -> N). Cada slot tiene su combo `lora_N` (con menú en cascada),
+    fuerzas propias y toggle `enable_N` para prender/apagar sin borrar
+    la selección. `lora_count` controla cuántos slots se usan y se ven.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = _lora_list()
+        optional = {
+            "lora_count": ("INT", {"default": DEFAULT_LORA_STACK,
+                                   "min": 1, "max": MAX_LORA_STACK,
+                                   "step": 1}),
+        }
+        for i in range(1, MAX_LORA_STACK + 1):
+            optional[f"lora_{i}"] = (loras,)
+            optional[f"enable_{i}"] = ("BOOLEAN", {"default": True})
+            optional[f"strength_model_{i}"] = ("FLOAT", {"default": 1.0,
+                                                        "min": -100.0,
+                                                        "max": 100.0,
+                                                        "step": 0.01})
+            optional[f"strength_clip_{i}"] = ("FLOAT", {"default": 1.0,
+                                                       "min": -100.0,
+                                                       "max": 100.0,
+                                                       "step": 0.01})
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("MODEL", "CLIP")
+    FUNCTION = "load_loras"
+    CATEGORY = "Mika Utilidades/loaders"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        try:
+            count = int(kwargs.get("lora_count", DEFAULT_LORA_STACK))
+        except Exception:
+            count = DEFAULT_LORA_STACK
+        count = max(1, min(MAX_LORA_STACK, count))
+        for i in range(1, count + 1):
+            if not _mika_coerce_bool(kwargs.get(f"enable_{i}", True), True):
+                continue
+            lora = kwargs.get(f"lora_{i}", "")
+            if lora and not folder_paths.get_full_path("loras", lora):
+                return f"LoRA no encontrado: {lora}"
+        return True
+
+    def load_loras(self, model, clip, lora_count=DEFAULT_LORA_STACK, **kwargs):
+        try:
+            count = int(lora_count)
+        except Exception:
+            count = DEFAULT_LORA_STACK
+        count = max(1, min(MAX_LORA_STACK, count))
+        for i in range(1, count + 1):
+            if not _mika_coerce_bool(kwargs.get(f"enable_{i}", True), True):
+                continue
+            lora = kwargs.get(f"lora_{i}", "")
+            if not lora:
+                continue
+            try:
+                strength_model = float(kwargs.get(f"strength_model_{i}", 1.0))
+            except Exception:
+                strength_model = 1.0
+            try:
+                strength_clip = float(kwargs.get(f"strength_clip_{i}", 1.0))
+            except Exception:
+                strength_clip = 1.0
+            model, clip = LoraLoader().load_lora(
+                model, clip, lora, strength_model, strength_clip)
+        return (model, clip)
+
+
+class LoadLoraStackNoClipMika:
+    """Load Lora Stack (no CLIP)-Mika: igual que el stack pero solo MODEL."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = _lora_list()
+        optional = {
+            "lora_count": ("INT", {"default": DEFAULT_LORA_STACK,
+                                   "min": 1, "max": MAX_LORA_STACK,
+                                   "step": 1}),
+        }
+        for i in range(1, MAX_LORA_STACK + 1):
+            optional[f"lora_{i}"] = (loras,)
+            optional[f"enable_{i}"] = ("BOOLEAN", {"default": True})
+            optional[f"strength_model_{i}"] = ("FLOAT", {"default": 1.0,
+                                                        "min": -100.0,
+                                                        "max": 100.0,
+                                                        "step": 0.01})
+        return {
+            "required": {
+                "model": ("MODEL",),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_loras"
+    CATEGORY = "Mika Utilidades/loaders"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        try:
+            count = int(kwargs.get("lora_count", DEFAULT_LORA_STACK))
+        except Exception:
+            count = DEFAULT_LORA_STACK
+        count = max(1, min(MAX_LORA_STACK, count))
+        for i in range(1, count + 1):
+            if not _mika_coerce_bool(kwargs.get(f"enable_{i}", True), True):
+                continue
+            lora = kwargs.get(f"lora_{i}", "")
+            if lora and not folder_paths.get_full_path("loras", lora):
+                return f"LoRA no encontrado: {lora}"
+        return True
+
+    def load_loras(self, model, lora_count=DEFAULT_LORA_STACK, **kwargs):
+        try:
+            count = int(lora_count)
+        except Exception:
+            count = DEFAULT_LORA_STACK
+        count = max(1, min(MAX_LORA_STACK, count))
+        for i in range(1, count + 1):
+            if not _mika_coerce_bool(kwargs.get(f"enable_{i}", True), True):
+                continue
+            lora = kwargs.get(f"lora_{i}", "")
+            if not lora:
+                continue
+            try:
+                strength_model = float(kwargs.get(f"strength_model_{i}", 1.0))
+            except Exception:
+                strength_model = 1.0
+            model, _ = LoraLoader().load_lora(
+                model, None, lora, strength_model, 0.0)
+        return (model,)
+
+
 # ======================================================================
 # MAPPINGS
 # ======================================================================
 
 NODE_CLASS_MAPPINGS = {
+    "LoadLoraMika": LoadLoraMika,
+    "LoadLoraMikaNoClip": LoadLoraMikaNoClip,
+    "LoadLoraStackMika": LoadLoraStackMika,
+    "LoadLoraStackNoClipMika": LoadLoraStackNoClipMika,
     "StringSelectorCut": StringSelectorCut,
     "StringSelectorMika": StringSelectorMika,
     "StringSelectorCutMika": StringSelectorCutMika,
@@ -6342,6 +6670,10 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "LoadLoraMika": "Load Lora-Mika",
+    "LoadLoraMikaNoClip": "Load Lora (no CLIP)-Mika",
+    "LoadLoraStackMika": "Load Lora Stack-Mika",
+    "LoadLoraStackNoClipMika": "Load Lora Stack (no CLIP)-Mika",
     "StringSelectorCut": "String Selector Multi-Mika",
     "StringSelectorMika": "String Selector-Mika",
     "StringSelectorCutMika": "String Selector Cut-Mika",
@@ -6357,7 +6689,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TextBoxVisor": "Visor-Mika",
     "TagFilter": "Tag Filter-Mika",
     "TextReplaceDynamic": "Text Replace Dynamic-Mika",
-    "TextConcatenateDynamic": "Text Concatenate Dynamic-Mika",
+    "TextConcatenateDynamic": "Text Concatenate-Mika",
     "LoadImageMika": "Load Image-Mika",
     "SmartTagFilterMika": "Smart Tag Filter-Mika",
     "TagIfMika": "Tag If-Mika",

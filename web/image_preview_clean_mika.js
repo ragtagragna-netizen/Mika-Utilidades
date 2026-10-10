@@ -36,30 +36,29 @@ function flashIcon(node, ok) {
   }, FEEDBACK_MS);
 }
 
-// Copia la imagen al portapapeles SIN metadata
+// Copia la imagen visible del preview al portapapeles SIN metadata
 async function copyImageToClipboard(node) {
   try {
-    // Método 1: Buscar el img element renderizado por ComfyUI
+    // Índice de la imagen visible en el preview (null = mosaico de batch)
+    let idx = node.imageIndex;
+    if (typeof idx !== "number" || idx == null || idx < 0) idx = 0;
+
+    // Método 1: node.imgs contiene los HTMLImageElement de todo el batch;
+    // imageIndex indica cuál se está mostrando
     let imgElement = null;
-    
-    // ComfyUI guarda las imágenes en node.imgs (array de objetos con info)
-    // y las renderiza como <img> dentro del contenedor del nodo
     if (node.imgs && node.imgs.length > 0) {
-      // Buscar el elemento img en el DOM del nodo
-      const nodeEl = document.querySelector(`[data-node-id="${node.id}"]`);
-      if (nodeEl) {
-        imgElement = nodeEl.querySelector("img");
-      }
+      imgElement = node.imgs[Math.min(idx, node.imgs.length - 1)];
     }
-    
-    // Método 2: Si no se encontró en el DOM, intentar obtener desde la URL
-    if (!imgElement && node._mikaImageUrl) {
+
+    // Método 2: Si no hay imgs cargadas, obtener desde la URL guardada
+    if ((!imgElement || !imgElement.complete) && node._mikaImageUrls?.length) {
+      const url = node._mikaImageUrls[Math.min(idx, node._mikaImageUrls.length - 1)];
       imgElement = new Image();
       imgElement.crossOrigin = "anonymous";
       await new Promise((resolve, reject) => {
         imgElement.onload = resolve;
         imgElement.onerror = reject;
-        imgElement.src = node._mikaImageUrl;
+        imgElement.src = url;
       });
     }
     
@@ -327,11 +326,12 @@ app.registerExtension({
     nodeType.prototype.onExecuted = function (message) {
       onExecuted?.apply(this, arguments);
       
-      // Guardar la URL de la imagen para poder acceder después
+      // Guardar las URLs de todas las imágenes del batch
       if (message?.images && message.images.length > 0) {
-        const imgInfo = message.images[0];
-        const url = `/view?filename=${imgInfo.filename}&type=${imgInfo.type}&subfolder=${imgInfo.subfolder || ""}`;
-        this._mikaImageUrl = url;
+        this._mikaImageUrls = message.images.map((imgInfo) =>
+          `/view?filename=${imgInfo.filename}&type=${imgInfo.type}&subfolder=${imgInfo.subfolder || ""}`
+        );
+        this._mikaImageUrl = this._mikaImageUrls[0];
       }
     };
   },

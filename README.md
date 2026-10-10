@@ -47,7 +47,7 @@ Sin dependencias extra: usa lo que ComfyUI ya trae. La traducción requiere
 | **Tag Filter-Mika** | Conserva los primeros N segmentos de un texto. |
 | **Text Affix-Mika** | Añade texto al inicio/final o reemplaza, en modo párrafo o por línea (lista). |
 | **Text Replace Dynamic-Mika** | Pares find/replace dinámicos, regex opcional. |
-| **Text Concatenate Dynamic-Mika** | Concatena varios textos con separador. |
+| **Text Concatenate-Mika** | Concatena varios textos con separador. |
 | **Prompt Preset Selector-Mika** | Clon del Prompt Preset Selector. Lee presets (.txt/.yaml/.yml) desde la carpeta dedicada `presets/` o desde una carpeta externa escrita en `absolute_path` (el dropdown `preset_file` se rellena con sus archivos; recursivo). |
 | **Prompt Preset Stepper-Mika** | Prompt Preset Selector-Mika con el motor escalonado del Index Stepper: selecciona bloques de `steps` presets (salida `text` como lista) y auto-avanza. |
 | **Text Line Selector-Mika** | Rango de líneas como LISTA. |
@@ -77,6 +77,13 @@ Sin dependencias extra: usa lo que ComfyUI ya trae. La traducción requiere
 | **Load Image-Mika** | Carga desde ruta local o URL (RGBA, máscara, nombre). |
 | **Image Preview Clean-Mika** | Preview sin metadata ni workflow. |
 | **Image Save Auto-Mika** | Guarda automáticamente cada imagen. |
+
+### Loaders
+
+| Nodo | Descripción |
+|---|---|
+| **Load Lora-Mika** | LoRA con combo buscable de rutas completas (`carpeta\archivo.safetensors`), incluye `strength_model` y `strength_clip`. |
+| **Load Lora (no CLIP)-Mika** | Igual que arriba pero solo MODEL (sin CLIP). |
 
 ### Varios
 

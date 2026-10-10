@@ -65,61 +65,92 @@ app.registerExtension({
       }
     }
 
-    function isTextSlotWidget(widget) {
-      return (
-        widget &&
-        widget.name &&
-        /^text_\d+$/.test(widget.name)
-      );
+    function isTextSlotName(name) {
+      return !!name && /^text_\d+$/.test(name);
     }
 
-    // Los widgets ocultos conservan slots de input que el canvas dibuja
-    // apilados junto al header (y aceptan conexiones por error). Se
-    // sincronizan los slots con los widgets text_N visibles: solo hay un
-    // slot por widget visible; al ocultar un widget su slot se elimina
-    // siempre, desconectando cualquier link que tuviera enganchado.
-    function syncInputs(node) {
-      if (!Array.isArray(node.inputs)) node.inputs = [];
-      if (!Array.isArray(node.widgets)) return;
+    // En frontends nuevos los inputs forceInput ya no generan widgets
+    // ocultos: existen solo como sockets. Consideramos el slot visible si su
+    // widget no está oculto o si su input existe. Un input con link nunca se
+    // elimina aunque el slot quede fuera del conteo visible.
+    function getSlotInfo(node) {
+      const widgets = new Map();
+      const inputs = new Map();
 
-      const wanted = new Set(
-        node.widgets
-          .filter((w) => isTextSlotWidget(w) && !w.hidden)
-          .map((w) => w.name)
-      );
-
-      for (let i = node.inputs.length - 1; i >= 0; i--) {
-        const inp = node.inputs[i];
-        if (inp && inp.name && /^text_\d+$/.test(inp.name) && !wanted.has(inp.name)) {
-          if (inp.link != null) {
-            try {
-              node.disconnectInput(i, true);
-            } catch (e) {
-              /* no-op */
-            }
-          }
-          node.removeInput(i);
+      if (Array.isArray(node.widgets)) {
+        for (const w of node.widgets) {
+          if (w && isTextSlotName(w.name)) widgets.set(w.name, w);
         }
       }
 
-      for (const w of node.widgets) {
-        if (!isTextSlotWidget(w) || w.hidden) continue;
-        if (node.inputs.some((i) => i && i.name === w.name)) continue;
-        node.addInput(w.name, "STRING", { widget: { name: w.name } });
+      if (Array.isArray(node.inputs)) {
+        for (const inp of node.inputs) {
+          if (inp && isTextSlotName(inp.name)) inputs.set(inp.name, inp);
+        }
       }
+
+      const names = new Set([...widgets.keys(), ...inputs.keys()]);
+      const slots = [];
+
+      for (const name of names) {
+        const index = parseInt(name.split("_")[1], 10);
+
+        if (Number.isNaN(index)) continue;
+
+        slots.push({
+          index,
+          name,
+          widget: widgets.get(name) ?? null,
+          input: inputs.get(name) ?? null,
+        });
+      }
+
+      return slots.sort((a, b) => a.index - b.index);
     }
 
-    function getTextSlots(node) {
-      if (!Array.isArray(node.widgets)) return [];
+    function syncInputs(node, target, extraVisible) {
+      if (!Array.isArray(node.inputs)) node.inputs = [];
 
-      return node.widgets
-        .filter((w) => isTextSlotWidget(w))
-        .map((widget) => ({
-          index: parseInt(widget.name.split("_")[1], 10),
-          widget,
-        }))
-        .filter((slot) => !Number.isNaN(slot.index))
-        .sort((a, b) => a.index - b.index);
+      const slots = new Map(
+        getSlotInfo(node).map((slot) => [slot.index, slot])
+      );
+
+      for (let n = 1; n <= MAX_SLOTS; n++) {
+        const name = `text_${n}`;
+        const slot = slots.get(n) ?? {
+          index: n,
+          name,
+          widget: null,
+          input: null,
+        };
+
+        // Un socket con link nunca se elimina: queda visible para no
+        // perder la conexión aunque el conteo sea menor.
+        const hasLink =
+          (!!slot.input && slot.input.link != null) ||
+          (!!extraVisible && extraVisible.has(name));
+        const visible = n <= target || hasLink;
+
+        if (slot.widget) {
+          slot.widget.hidden = !visible;
+        }
+
+        if (visible) {
+          if (!slot.input) {
+            const config = slot.widget
+              ? { widget: { name: slot.widget.name } }
+              : {};
+
+            node.addInput(name, "STRING", config);
+          }
+        } else if (slot.input) {
+          const i = node.inputs.indexOf(slot.input);
+
+          if (i !== -1) {
+            node.removeInput(i);
+          }
+        }
+      }
     }
 
     function hasBackendCount(node) {
@@ -176,26 +207,25 @@ app.registerExtension({
       return countWidget;
     }
 
-    function setVisibleCount(node, target, syncWidget = true) {
+    function setVisibleCount(node, target, syncWidget = true, extraVisible) {
       target = clampCount(target);
-
-      const slots = getTextSlots(node);
 
       // Si el backend no tiene text_count, limpiamos los slots ocultos
       // para que el backend original no los concatene.
       const clearHidden = !hasBackendCount(node);
 
-      for (const slot of slots) {
-        const visible = slot.index <= target;
-
-        slot.widget.hidden = !visible;
-
-        if (!visible && clearHidden) {
+      for (const slot of getSlotInfo(node)) {
+        if (
+          clearHidden &&
+          slot.widget &&
+          slot.index > target &&
+          (!slot.input || slot.input.link == null)
+        ) {
           slot.widget.value = "";
         }
       }
 
-      syncInputs(node);
+      syncInputs(node, target, extraVisible);
 
       if (syncWidget) {
         const countWidget = getCountWidget(node);
@@ -258,9 +288,22 @@ app.registerExtension({
         }
       };
 
-      const initial = clampCount(countWidget.value ?? DEFAULT_VISIBLE);
-
-      setVisibleCount(this, initial, true);
+      // Diferir el ajuste inicial para no eliminar sockets antes de que
+      // configure() restaure los links del workflow. Se lee el valor del
+      // widget en el momento de ejecutar, por si configure() ya restauró
+      // el conteo guardado.
+      setTimeout(() => {
+        try {
+          const current = getCountWidget(this);
+          setVisibleCount(
+            this,
+            clampCount(current?.value ?? DEFAULT_VISIBLE),
+            false
+          );
+        } catch (e) {
+          /* no-op */
+        }
+      }, 0);
 
       return r;
     };
@@ -273,7 +316,7 @@ app.registerExtension({
         : undefined;
 
       const countWidget = getCountWidget(this);
-      const slots = getTextSlots(this);
+      const slots = getSlotInfo(this);
 
       let count = DEFAULT_VISIBLE;
 
@@ -281,7 +324,7 @@ app.registerExtension({
         count = clampCount(countWidget.value);
       } else {
         const visibleCount = slots.filter(
-          (slot) => !slot.widget.hidden
+          (slot) => !slot.widget || !slot.widget.hidden
         ).length;
 
         count = clampCount(visibleCount || DEFAULT_VISIBLE);
@@ -294,7 +337,9 @@ app.registerExtension({
       const vals = {};
 
       for (const slot of slots) {
-        vals[`text_${slot.index}`] = slot.widget.value;
+        if (slot.widget) {
+          vals[slot.name] = slot.widget.value;
+        }
       }
 
       o.mikaTextValues = vals;
@@ -320,13 +365,9 @@ app.registerExtension({
 
       // Restaurar valores guardados antes de aplicar visibilidad.
       if (info.mikaTextValues) {
-        const slots = getTextSlots(this);
-
-        for (const slot of slots) {
-          const key = `text_${slot.index}`;
-
-          if (key in info.mikaTextValues) {
-            slot.widget.value = info.mikaTextValues[key];
+        for (const slot of getSlotInfo(this)) {
+          if (slot.widget && slot.name in info.mikaTextValues) {
+            slot.widget.value = info.mikaTextValues[slot.name];
           }
         }
 
@@ -369,7 +410,26 @@ app.registerExtension({
         this._mikaCountChanging = false;
       }
 
-      setVisibleCount(this, target, false);
+      // Los links del grafo se reconectan después de configure(); se miran
+      // los ids serializados en info.inputs para no eliminar sockets cuyo
+      // link aún no ha sido re-adjuntado al nodo.
+      const linkedNames = new Set();
+
+      if (Array.isArray(info.inputs)) {
+        for (const inp of info.inputs) {
+          if (
+            inp &&
+            isTextSlotName(inp.name) &&
+            (inp.link != null ||
+              (Array.isArray(inp._widgetLinkIds) &&
+                inp._widgetLinkIds.length))
+          ) {
+            linkedNames.add(inp.name);
+          }
+        }
+      }
+
+      setVisibleCount(this, target, false, linkedNames);
 
       // Refuerzo para subgrafos / cambio de pestaña.
       setTimeout(() => {
