@@ -3,7 +3,7 @@ try:
 except Exception:
     PromptServer = None
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw, ImageFont
 from io import BytesIO
 import numpy as np
 import torch
@@ -16,7 +16,8 @@ import folder_paths
 import time
 import random as random_module
 import comfy.samplers
-from nodes import LoraLoader, LoraLoaderModelOnly
+from comfy_api.latest import io as grid_io
+from nodes import LoraLoader, LoraLoaderModelOnly, UNETLoader, CheckpointLoaderSimple, NODE_CLASS_MAPPINGS as CORE_NODE_MAPPINGS
 
 
 # ======================================================================
@@ -6554,6 +6555,436 @@ class LoadLoraStackNoClipMika:
 
 
 # ======================================================================
+# PLOT DE PRUEBAS XY (alimenta al nodo XYZ-GridPlot)
+# ======================================================================
+
+_MIKA_PLOT_TARGETS = [
+    "prompt", "negative", "sampler", "scheduler",
+    "cfg", "steps", "seed", "denoise", "model", "checkpoint", "none",
+]
+_MIKA_PLOT_MAX_COMBOS = 100
+
+
+def _mika_plot_values(text):
+    return [l.strip() for l in str(text).splitlines() if l.strip()]
+
+
+def _mika_plot_typed(target, raw):
+    try:
+        if target in ("steps", "seed"):
+            v = int(float(raw))
+        elif target in ("cfg", "denoise"):
+            v = float(raw)
+        else:
+            return str(raw).strip()
+    except Exception:
+        raise ValueError(f"[Mika] valor no válido para '{target}': {raw!r}")
+    if target == "steps" and v < 1:
+        raise ValueError("[Mika] steps debe ser >= 1")
+    if target == "seed" and v < 0:
+        raise ValueError("[Mika] seed debe ser >= 0")
+    if target == "cfg" and v < 0:
+        raise ValueError("[Mika] cfg debe ser >= 0")
+    return v
+
+
+def _mika_plot_check(target, value):
+    if target == "sampler" and value not in comfy.samplers.SAMPLER_NAMES:
+        hint = " (¿es un prompt? cambia el target a prompt)" if " " in str(value) else ""
+        raise ValueError(f"[Mika] sampler desconocido: {value!r}{hint}")
+    if target == "scheduler" and value not in comfy.samplers.SCHEDULER_NAMES:
+        hint = " (¿es un prompt? cambia el target a prompt)" if " " in str(value) else ""
+        raise ValueError(f"[Mika] scheduler desconocido: {value!r}{hint}")
+
+
+def _mika_plot_load(target, name, cache):
+    name = str(name).strip()
+    key = (target, name)
+    if key in cache:
+        return cache[key]
+    folder = "diffusion_models" if target == "model" else "checkpoints"
+    if name not in folder_paths.get_filename_list(folder):
+        raise ValueError(f"[Mika] '{name}' no está en {folder}")
+    try:
+        if target == "model":
+            model, = UNETLoader().load_unet(name, "default")
+        else:
+            model, _, _ = CheckpointLoaderSimple().load_checkpoint(name)
+    except Exception as e:
+        raise ValueError(f"[Mika] no se pudo cargar '{name}': {e}")
+    cache[key] = model
+    return model
+
+
+def _mika_plot_value(target, raw, cache):
+    if target in ("model", "checkpoint"):
+        return _mika_plot_load(target, raw, cache)
+    return _mika_plot_typed(target, raw)
+
+
+class SinglePlotRunnerMika:
+    """
+    Single Plot Runner-Mika: versión de un solo eje del XY Plot Runner.
+    Una salida universal (*) con los valores tipados (un valor sale normal,
+    varios salen como lista) + labels. Ideal para plots 1D.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "target": (_MIKA_PLOT_TARGETS,),
+                "values": ("STRING", {"multiline": True, "default": "euler\ndpmpp_2m"}),
+            },
+        }
+
+    RETURN_TYPES = ("*", "STRING")
+    RETURN_NAMES = ("out", "labels")
+    OUTPUT_IS_LIST = [True, True]
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/plot"
+
+    def run(self, target, values):
+        raw = [] if target == "none" else _mika_plot_values(values)
+        if len(raw) > _MIKA_PLOT_MAX_COMBOS:
+            raise ValueError(f"[Mika] máximo {_MIKA_PLOT_MAX_COMBOS} valores")
+        cache = {}
+        vals = [_mika_plot_value(target, v, cache) for v in raw]
+        for v in vals:
+            _mika_plot_check(target, v)
+        labels = [f"{target}={v}" for v in raw] or [target]
+        if len(vals) == 0:
+            self.OUTPUT_IS_LIST = [True, True]
+            return ([], labels)
+        if len(vals) == 1:
+            self.OUTPUT_IS_LIST = [False, True]
+            return (vals[0], labels)
+        self.OUTPUT_IS_LIST = [True, True]
+        return (vals, labels)
+
+
+class XYPlotRunnerMika:
+    """
+    XY Plot Runner-Mika: listas de valores tipados para plots de pruebas.
+    X e Y son salidas universales (*) con el producto cruzado aplanado en
+    orden por filas: texto si eliges prompt, sampler si eliges sampler,
+    MODELO cargado si eliges model/checkpoint, etc. Un solo valor sale
+    como valor normal, varios salen como lista. Conéctalas DIRECTO al
+    KSampler externo sin loops: con listas de igual largo ejecuta un
+    combo por vez. Cada eje puede quedar vacío (no se conecta y el
+    KSampler usa su widget). row/col_labels van a XY Grid-Mika o
+    XYZ-GridPlot (X=columnas, Y=filas).
+
+    Ojo con model/checkpoint: compara UNETs (o checkpoints por su MODEL,
+    con tu CLIP/VAE fijos) pero carga todos en RAM: no pases de 2-4.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "x_target": (_MIKA_PLOT_TARGETS,),
+                "x_values": ("STRING", {"multiline": True, "default": "euler\ndpmpp_2m"}),
+                "y_target": (_MIKA_PLOT_TARGETS,),
+                "y_values": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("*", "*", "STRING", "STRING")
+    RETURN_NAMES = ("x", "y", "row_labels", "col_labels")
+    OUTPUT_IS_LIST = [True, True, True, True]
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/plot"
+
+    def run(self, x_target, x_values, y_target, y_values):
+        # Eje vacío o target none = no se conecta; el KSampler usa su widget.
+        x_vals = [] if x_target == "none" else _mika_plot_values(x_values)
+        y_vals = [] if y_target == "none" else _mika_plot_values(y_values)
+        total = (len(x_vals) or 1) * (len(y_vals) or 1)
+        if total > _MIKA_PLOT_MAX_COMBOS:
+            raise ValueError(f"[Mika] grid de {len(x_vals) or 1}x{len(y_vals) or 1}: máximo {_MIKA_PLOT_MAX_COMBOS} combinaciones")
+
+        cache = {}
+        xs = [_mika_plot_value(x_target, v, cache) for v in x_vals]
+        ys = [_mika_plot_value(y_target, v, cache) for v in y_vals]
+        for v in xs:
+            _mika_plot_check(x_target, v)
+        for v in ys:
+            _mika_plot_check(y_target, v)
+
+        # x/y unificadas: el producto cruzado aplanado en orden por filas.
+        # Con listas de igual largo el KSampler ejecuta un combo por vez.
+        if x_vals and y_vals:
+            x_flat = [x for _ in ys for x in xs]
+            y_flat = [y for y in ys for _ in xs]
+        else:
+            x_flat = list(xs)
+            y_flat = list(ys)
+
+        row_labels = [f"{y_target}={v}" for v in y_vals] or [y_target]
+        col_labels = [f"{x_target}={v}" for v in x_vals] or [x_target]
+
+        # Salidas x/y dinámicas: un solo valor sale como valor normal,
+        # varios salen como lista (combo).
+        def _dyn(vals):
+            if len(vals) == 0:
+                return [], True
+            if len(vals) == 1:
+                return vals[0], False
+            return vals, True
+
+        x_out, x_list = _dyn(x_flat)
+        y_out, y_list = _dyn(y_flat)
+        self.OUTPUT_IS_LIST = [x_list, y_list, True, True]
+        return (x_out, y_out, row_labels, col_labels)
+
+
+class ListPickMika:
+    """
+    List Pick-Mika: devuelve el item i-ésimo de una lista (con wrap
+    opcional). Para leer los parámetros hermanos dentro de un loop
+    IterateBegin/IterateEnd usando su salida index.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "list_in": ("*", {"forceInput": True}),
+                "index": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "wrap": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("value",)
+    FUNCTION = "pick"
+    CATEGORY = "Mika Utilidades/plot"
+
+    def pick(self, list_in, index, wrap):
+        items = list(list_in) if isinstance(list_in, (list, tuple)) else [list_in]
+        if not items:
+            raise ValueError("[Mika] lista vacía, nada que elegir")
+        i = int(index)
+        if wrap:
+            i %= len(items)
+        elif i >= len(items):
+            raise ValueError(f"[Mika] índice {i} fuera de rango (0..{len(items) - 1})")
+        return (items[i],)
+
+
+class TextListMika:
+    """
+    Text List-Mika: convierte un texto multilínea en lista de strings.
+    Útil para alimentar a mano row_labels/col_labels de XYZ-GridPlot.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("list",)
+    OUTPUT_IS_LIST = [True]
+    FUNCTION = "make"
+    CATEGORY = "Mika Utilidades/plot"
+
+    def make(self, text):
+        return (_mika_plot_values(text),)
+
+
+class OptionListMika:
+    """
+    Option List-Mika: conecta su única salida a cualquier slot y hace
+    inspect: copia las opciones de ese slot a su caja `text` (una por
+    línea), lista para copiar a mano. El cable es solo el gesto de
+    inspección y se quita solo.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("any",)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/plot"
+
+    def run(self, text=""):
+        return (text,)
+
+
+def _mika_grid_first(value, default):
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _mika_grid_strs(value):
+    if isinstance(value, (list, tuple)) and len(value) == 1 and isinstance(value[0], (list, tuple)):
+        value = value[0]
+    if not isinstance(value, (list, tuple)):
+        value = [value]
+    return [str(v).strip() for v in value]
+
+
+def _mika_grid_font(size):
+    for path in (r"C:\Windows\Fonts\arial.ttf",
+                 r"C:\Windows\Fonts\DejaVuSans.ttf"):
+        try:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, int(size))
+        except Exception:
+            pass
+    try:
+        return ImageFont.load_default(size=int(size))
+    except Exception:
+        return ImageFont.load_default()
+
+
+class XYGridMika(grid_io.ComfyNode):
+    """
+    XY Grid-Mika: cuadrícula rows×cols desde un batch en orden por filas.
+    A diferencia de XYZ-GridPlot, la forma la mandan las etiquetas:
+    columnas = len(col_labels) o `columns`, filas = resto.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return grid_io.Schema(
+            description="Grid de imágenes en filas×columnas con etiquetas. Conecta el batch en orden por filas (como sale de x_combo/y_combo), column_labels/row_labels del XY Plot Runner y fija `columns` al nº de columnas.",
+            node_id="XYGridMika",
+            display_name="XY Grid-Mika",
+            category="Mika Utilidades/plot",
+            is_input_list=True,
+            inputs=[
+                grid_io.Image.Input("images", display_name="images"),
+                grid_io.Int.Input("columns", display_name="columns", default=2, min=1, max=100),
+                grid_io.AnyType.Input("row_labels", display_name="row_labels", optional=True),
+                grid_io.AnyType.Input("column_labels", display_name="column_labels", optional=True),
+                grid_io.Int.Input("gap", display_name="gap", default=0, min=0, max=1024),
+                grid_io.Float.Input("font_size", display_name="font_size", default=40, min=6, max=500),
+            ],
+            outputs=[
+                grid_io.Image.Output("image", display_name="image", is_output_list=True),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, images: list = [], columns: list = [2],
+                column_labels: list = [], row_labels: list = [],
+                gap: list = [0], font_size: list = [40]):
+        flats = []
+        for img in images:
+            if not torch.is_tensor(img):
+                raise ValueError(f"[Mika] XY Grid: esperaba imágenes, llegó {type(img).__name__}")
+            if img.ndim == 4:
+                for b in range(img.shape[0]):
+                    flats.append(img[b])
+            elif img.ndim == 3:
+                flats.append(img)
+            else:
+                raise ValueError(f"[Mika] XY Grid: forma rara {tuple(img.shape)}, se espera BHWC")
+        if not flats:
+            blank = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            return grid_io.NodeOutput([blank])
+
+        cols = max(1, _mika_grid_first(columns, 2))
+        rows = (len(flats) + cols - 1) // cols
+
+        col_labels = _mika_grid_strs(column_labels)
+        row_labels_s = _mika_grid_strs(row_labels)
+
+        # Las etiquetas mandan: definen la forma del grid.
+        if col_labels:
+            cols = len(col_labels)
+        if row_labels_s:
+            rows = len(row_labels_s)
+        if not col_labels and not row_labels_s:
+            rows = (len(flats) + cols - 1) // cols
+        gap = max(0, _mika_grid_first(gap, 0))
+        fsize = max(6, _mika_grid_first(font_size, 40))
+
+        # Celdas exactas: sobran se recortan, faltan se rellenan en blanco.
+        need = rows * cols
+        flats = flats[:need]
+        col_labels = col_labels[:cols] + [""] * (cols - len(col_labels))
+        row_labels_s = row_labels_s[:rows] + [""] * (rows - len(row_labels_s))
+
+        pil_imgs = []
+        for t in flats:
+            arr = (t.detach().float().clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+            if arr.shape[2] == 1:
+                arr = np.repeat(arr, 3, axis=2)
+            pil_imgs.append(Image.fromarray(arr[:, :, :3]))
+        # Anchos por columna y altos por fila (como el XYZ-GridPlot de
+        # referencia): sin reescalar, sin blanco de más.
+        col_ws = [0] * cols
+        row_hs = [0] * rows
+        for idx, im in enumerate(pil_imgs):
+            r, c = divmod(idx, cols)
+            col_ws[c] = max(col_ws[c], im.width)
+            row_hs[r] = max(row_hs[r], im.height)
+
+        font = _mika_grid_font(fsize)
+        pad = max(2, fsize // 8)
+        probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+        col_h = 0
+        if any(col_labels):
+            col_h = max(probe.textbbox((0, 0), t, font=font)[3] for t in col_labels if t) + 2 * pad
+        row_w = 0
+        if any(row_labels_s):
+            row_w = max(probe.textbbox((0, 0), t, font=font)[2] for t in row_labels_s if t) + 2 * pad
+
+        W = row_w + sum(col_ws) + (cols - 1) * gap
+        H = col_h + sum(row_hs) + (rows - 1) * gap
+        canvas = Image.new("RGB", (W, H), "white")
+        draw = ImageDraw.Draw(canvas)
+
+        col_x = []
+        x = row_w
+        for w in col_ws:
+            col_x.append(x)
+            x += w + gap
+        row_y = []
+        y = col_h
+        for h in row_hs:
+            row_y.append(y)
+            y += h + gap
+
+        for c, t in enumerate(col_labels):
+            if not t:
+                continue
+            bb = draw.textbbox((0, 0), t, font=font)
+            draw.text((col_x[c] + (col_ws[c] - (bb[2] - bb[0])) / 2, pad), t, font=font, fill="black")
+        for r, t in enumerate(row_labels_s):
+            if not t:
+                continue
+            bb = draw.textbbox((0, 0), t, font=font)
+            draw.text((pad, row_y[r] + (row_hs[r] - (bb[3] - bb[1])) / 2), t, font=font, fill="black")
+
+        for idx, im in enumerate(pil_imgs):
+            r, c = divmod(idx, cols)
+            x = col_x[c] + (col_ws[c] - im.width) // 2
+            y = row_y[r] + (row_hs[r] - im.height) // 2
+            canvas.paste(im, (x, y))
+
+        out = torch.from_numpy(np.ascontiguousarray(canvas).astype(np.float32) / 255.0).unsqueeze(0).contiguous()
+        return grid_io.NodeOutput([out])
+
+
+# ======================================================================
 # MAPPINGS
 # ======================================================================
 
@@ -6620,6 +7051,12 @@ NODE_CLASS_MAPPINGS = {
     "SmartPromptTranslate": SmartPromptTranslate,
     "PromptTranslateToText": PromptTranslateToText,
     "ClipboardToMultiRefMika": ClipboardToMultiRefMika,
+    "XYPlotRunnerMika": XYPlotRunnerMika,
+    "SinglePlotRunnerMika": SinglePlotRunnerMika,
+    "XYGridMika": XYGridMika,
+    "ListPickMika": ListPickMika,
+    "OptionListMika": OptionListMika,
+    "TextListMika": TextListMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -6685,4 +7122,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SmartPromptTranslate": "Smart Prompt Translate-Mika",
     "PromptTranslateToText": "Prompt Translate to Text-Mika",
     "ClipboardToMultiRefMika": "Clipboard to MultiRef-Mika",
+    "XYPlotRunnerMika": "Combo PlotXY-Mika",
+    "SinglePlotRunnerMika": "Single PlotXY-Mika",
+    "XYGridMika": "XY Grid-Mika",
+    "ListPickMika": "List Pick-Mika",
+    "OptionListMika": "Option List-Mika",
+    "TextListMika": "Text List-Mika",
 }

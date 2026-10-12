@@ -96,6 +96,12 @@ Sin dependencias extra: usa lo que ComfyUI ya trae. La traducción requiere
 | **Fast Groups/Nodes Bypasser/Muter-Mika** | Toggles de bypass/mute por grupo o por nodo. |
 | **Anima Resolutions-Mika** | Resoluciones Anima, con modo random. |
 | **Sampler/Scheduler Selector-Mika** | Lista los samplers y schedulers instalados. |
+| **Combo PlotXY-Mika** | Listas tipadas para plots: x/y universales `*` ya con el producto cruzado (un valor sale normal, varios salen combo: texto, sampler, scheduler, cfg, steps, seed, denoise, **model**, **checkpoint**, **none**) directo al KSampler, sin loops; cada eje puede quedar vacío. `row/col_labels` a XY Grid-Mika o XYZ-GridPlot. Ojo: model/checkpoint cargan todo en RAM (2-4 como mucho) y checkpoint compara solo el MODEL con tu CLIP/VAE fijos. |
+| **Single PlotXY-Mika** | Versión de un eje: una salida universal `*` (normal/combo dinámica) + labels. Para plots 1D. |
+| **XY Grid-Mika** | Cuadrícula rows×cols real desde batch en orden de filas + etiquetas compactas (PIL, sin skia). **Las etiquetas mandan**: con row/col_labels conectados definen la forma (el `columns` solo vale sin etiquetas). Celdas sobrantes se recortan, faltantes en blanco. Mezcla de tamaños se auto-ajusta a la menor. |
+| **Option List-Mika** | Inspector de slots: conectá su única salida a cualquier slot y copia SUS opciones a su caja `text` (una por línea), lista para copiar con el botón del header. El cable es solo el gesto de inspección y se quita solo. |
+| **List Pick-Mika** | Item i-ésimo de una lista (con wrap). Para leer parámetros hermanos con el index del loop. |
+| **Text List-Mika** | Multilínea a lista de strings (para row/col labels manuales de XYZ-GridPlot). |
 | **Index Int-Mika / Index Stepper-Mika** | Índices con modos fixed/increment/random y auto-avance. |
 
 ## Notas

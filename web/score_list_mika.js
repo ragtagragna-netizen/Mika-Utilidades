@@ -180,9 +180,35 @@ app.registerExtension({
 		} catch (e) { /* no-op */ }
 
 		node._mikaDomWidget = domWidget;
+		// Auto-corrección continua (ver el barrido global abajo): repara
+		// nodos que quedaron altos por estirado manual, tamaño viejo del
+		// workflow o transitorios de reconstrucción.
+		node._mikaFitNode = fitNode;
 
 		requestAnimationFrame(fitNode);
 	}
+
+		// Barrido global cada segundo: encoge los Score List que estén más
+		// altos que su contenido. A propósito NO va en onDrawForeground:
+		// ese hook puede no correr (canvas quieto/oculto) y además otro
+		// override por instancia (badges del timer) lo puede tapar.
+		if (!globalThis.__mikaScoreFitTimer) {
+			globalThis.__mikaScoreFitTimer = setInterval(() => {
+				try {
+					for (const n of app.graph?._nodes ?? []) {
+						if (n?.comfyClass !== "ScoreListExtendable") continue;
+						if (typeof n._mikaFitNode === "function") n._mikaFitNode();
+					}
+				} catch (e) { /* no-op */ }
+			}, 1000);
+		}
+
+		const onRemove = nodeType.prototype.onRemove;
+		nodeType.prototype.onRemove = function () {
+			try { this._mikaRowObserver?.disconnect(); } catch (e) { /* no-op */ }
+			this._mikaFitNode = null;
+			return onRemove ? onRemove.apply(this, arguments) : undefined;
+		};
 
 		const onNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function () {
