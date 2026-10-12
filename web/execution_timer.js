@@ -111,11 +111,11 @@ function ensurePanel() {
 		bottom: "60px",
 		width: "260px",
 		maxHeight: "50vh",
-		background: "rgba(20,20,24,0.92)",
-		color: "#eee",
-		font: "13px/1.5 monospace",
-		border: "1px solid #444",
-		borderRadius: "8px",
+		background: "var(--p-panel-background, #18181b)",
+		color: "var(--p-content-color, #ffffff)",
+		font: "13px/1.5 Inter, Arial, sans-serif",
+		border: "1px solid var(--p-panel-border-color, #3f3f46)",
+		borderRadius: "var(--p-panel-border-radius, 6px)",
 		boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
 		zIndex: 10000,
 		display: "flex",
@@ -126,10 +126,10 @@ function ensurePanel() {
 
 	const header = document.createElement("div");
 	Object.assign(header.style, {
-		padding: "6px 10px",
-		background: "#2a2a30",
+		padding: "8px 12px 6px",
+		background: "transparent",
 		cursor: "move",
-		fontWeight: "bold",
+		fontWeight: "600",
 		display: "flex",
 		justifyContent: "space-between",
 		alignItems: "center",
@@ -188,7 +188,7 @@ function ensurePanel() {
 	const body = document.createElement("div");
 	Object.assign(body.style, {
 		overflowY: "auto",
-		padding: "6px 10px",
+		padding: "6px 12px",
 		display: "flex",
 		flexDirection: "column",
 		gap: "4px",
@@ -202,11 +202,11 @@ function ensurePanel() {
 
 	const totalWrap = document.createElement("div");
 	Object.assign(totalWrap.style, {
-		padding: "6px 10px",
-		borderTop: "1px solid #444",
+		padding: "6px 12px",
+		borderTop: "1px solid var(--p-panel-border-color, #3f3f46)",
 		display: "flex",
 		justifyContent: "space-between",
-		fontWeight: "bold",
+		fontWeight: "600",
 	});
 
 	const totalLabel = document.createElement("span");
@@ -307,6 +307,7 @@ function renderPanel() {
 		const time = document.createElement("span");
 		time.textContent = fmt(v.last);
 		time.style.opacity = "0.85";
+		time.style.fontVariantNumeric = "tabular-nums";
 
 		row.appendChild(bar);
 		row.appendChild(label);

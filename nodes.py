@@ -1200,8 +1200,8 @@ class TextBoxVisor:
 
             shown = items[:max_items]
             lines = [
-                f"{pad}[{i}] {self._format(item, depth + 1, max_items)}"
-                for i, item in enumerate(shown)
+                f"{pad}{self._format(item, depth + 1, max_items)}"
+                for item in shown
             ]
 
             if len(items) > len(shown):
@@ -2530,6 +2530,124 @@ class TagSwapListMika:
 
         prompts = [build(r) for r in replacements]
         return (prompts[0], prompts, replacements)
+
+
+class TagEnchantListMika:
+    """
+    Tag Enchant List-Mika: variante de Tag Enchant que actúa sobre una
+    lista (un item por línea). Sin expandir: salen las mismas líneas,
+    cada una encantada con su peso según start/step.
+
+    - Línea no vacía i -> peso start + i*step (el índice avanza por
+      línea no vacía, haya o no match en esa línea).
+    - text: salida simple multilínea; weights: pesos usados (lista).
+    Las líneas vacías o sin el tag salen intactas.
+    Con INPUT_IS_LIST recibe la lista cableada completa en una sola
+    ejecución (si no, ComfyUI ejecutaría una vez por línea y todas
+    saldrían con el peso inicial).
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _unwrap_text(value):
+        if value is None:
+            return ""
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return ""
+            if len(value) == 1:
+                inner = value[0]
+                if isinstance(inner, (list, tuple)):
+                    return "\n".join(str(x) for x in inner)
+                return inner if isinstance(inner, str) else str(inner)
+            return "\n".join(str(x) for x in value)
+        return value if isinstance(value, str) else str(value)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
+                "tag": ("STRING", {"default": "", "multiline": False}),
+                "start": ("FLOAT", {"default": 1.1, "min": -10.0, "max": 10.0, "step": 0.05}),
+                "step": ("FLOAT", {"default": 0.1, "min": -5.0, "max": 5.0, "step": 0.05}),
+            },
+            "optional": {
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "weights")
+    OUTPUT_IS_LIST = (False, True)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/tags"
+
+    # Recibir la lista cableada COMPLETA sin que ComfyUI la expanda
+    # (una ejecución por línea daría peso fijo = start en todas).
+    INPUT_IS_LIST = True
+
+    def doit(self, text="", tag="", start=1.1, step=0.1,
+             case_sensitive=False):
+        text = self._unwrap_text(text)
+        tag = str(self._scalar(tag, ""))
+        case_sensitive = _mika_coerce_bool(
+            self._scalar(case_sensitive, False), False)
+
+        try:
+            start = float(self._scalar(start, 1.1))
+        except (TypeError, ValueError):
+            start = 1.1
+        try:
+            step = float(self._scalar(step, 0.1))
+        except (TypeError, ValueError):
+            step = 0.1
+
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+        target = TagEnchantMika._normalize(tag, case_sensitive)
+        if not target:
+            return (text, [])
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        word_pat = re.compile(
+            r"(?<![A-Za-z0-9])"
+            + re.escape(target).replace("_", r"[ _\-]+")
+            + r"(?![A-Za-z0-9])",
+            flags,
+        )
+
+        out_lines = []
+        wstrs = []
+        idx = 0
+        for line in lines:
+            if not line.strip():
+                out_lines.append(line)
+                continue
+            wstr = TagEnchantMika._fmt_weight(round(start + idx * step, 3))
+            idx += 1
+            wstrs.append(wstr)
+
+            parts = []
+            for seg in TagEnchantMika._split_top_level(line):
+                parsed = _parse_smart_tag(seg, case_sensitive)
+                if parsed is not None and parsed["base"] == target:
+                    core = TagEnchantMika._strip_weight(seg) or tag.strip()
+                    parts.append(f"({core}:{wstr})")
+                elif word_pat.search(TagEnchantMika._strip_weight(seg)):
+                    core = TagEnchantMika._strip_weight(seg)
+                    parts.append(word_pat.sub(
+                        lambda m: f"({m.group(0)}:{wstr})", core, count=1))
+                else:
+                    parts.append(seg)
+            out_lines.append(", ".join(parts))
+
+        return ("\n".join(out_lines), wstrs)
 
 
 class FloatOutputList:
@@ -7339,6 +7457,7 @@ NODE_CLASS_MAPPINGS = {
     "TagRemoverMika": TagRemoverMika,
     "TagEnchantMika": TagEnchantMika,
     "TagSwapListMika": TagSwapListMika,
+    "TagEnchantListMika": TagEnchantListMika,
     "FloatOutputList": FloatOutputList,
     "ExecutionTimerConfig": ExecutionTimerConfig,
     "PromptEditLoopMika": PromptEditLoopMika,
@@ -7413,6 +7532,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TagRemoverMika": "Tag Remover-Mika",
     "TagEnchantMika": "Tag Enchant-Mika",
     "TagSwapListMika": "Tag Swap List-Mika",
+    "TagEnchantListMika": "Tag Enchant List-Mika",
     "FloatOutputList": "Float OutputList",
     "ExecutionTimerConfig": "⏱ Tiempos de Ejecución (config)",
     "PromptEditLoopMika": "Prompt Edit (Loop)-Mika",

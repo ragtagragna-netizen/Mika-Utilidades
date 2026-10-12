@@ -245,11 +245,11 @@ function ensurePanel() {
     right: "16px",
     bottom: "110px", // justo encima del Mika - Timer
     width: "260px",
-    background: "rgba(20,20,24,0.92)",
-    color: "#eee",
-    font: "13px/1.5 monospace",
-    border: "1px solid #444",
-    borderRadius: "8px",
+    background: "var(--p-panel-background, #18181b)",
+    color: "var(--p-content-color, #ffffff)",
+    font: "13px/1.5 Inter, Arial, sans-serif",
+    border: "1px solid var(--p-panel-border-color, #3f3f46)",
+    borderRadius: "var(--p-panel-border-radius, 6px)",
     boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
     zIndex: 10000,
     display: "flex",
@@ -260,10 +260,10 @@ function ensurePanel() {
 
   const header = document.createElement("div");
   Object.assign(header.style, {
-    padding: "6px 10px",
-    background: "#2a2a30",
+    padding: "8px 12px 6px",
+    background: "transparent",
     cursor: "move",
-    fontWeight: "bold",
+    fontWeight: "600",
     display: "flex",
     alignItems: "center",
     gap: "6px",
@@ -312,12 +312,12 @@ function ensurePanel() {
     Object.assign(input.style, {
       width: "100%",
       boxSizing: "border-box",
-      background: "#1a1a1e",
-      color: "#eee",
-      border: "1px solid #444",
-      borderRadius: "4px",
-      padding: "4px 6px",
-      font: "12px/1.4 monospace",
+      background: "var(--comfy-input-bg, #161b22)",
+      color: "var(--p-inputtext-color, #ffffff)",
+      border: "1px solid var(--p-inputtext-border-color, #52525b)",
+      borderRadius: "var(--p-inputtext-border-radius, 6px)",
+      padding: "6px 8px",
+      font: "12px/1.5 Inter, Arial, sans-serif",
     });
     body.appendChild(input);
     return input;
@@ -340,13 +340,13 @@ function ensurePanel() {
     btn.title = title;
     Object.assign(btn.style, {
       flex: "1",
-      background: "#2a2a30",
-      color: "#eee",
-      border: "1px solid #555",
-      borderRadius: "4px",
-      padding: "4px 0",
+      background: "var(--p-surface-800, #27272a)",
+      color: "var(--p-content-color, #ffffff)",
+      border: "1px solid var(--p-content-border-color, #3f3f46)",
+      borderRadius: "var(--p-panel-border-radius, 6px)",
+      padding: "6px 0",
       cursor: "pointer",
-      font: "12px/1.4 monospace",
+      font: "12px/1.5 Inter, Arial, sans-serif",
     });
     btn.onclick = onClick;
     btnRow.appendChild(btn);
@@ -366,13 +366,13 @@ function ensurePanel() {
     btn.title = title;
     Object.assign(btn.style, {
       flex: "1",
-      background: "#2a2a30",
-      color: "#eee",
-      border: "1px solid #555",
-      borderRadius: "4px",
-      padding: "4px 0",
+      background: "var(--p-surface-800, #27272a)",
+      color: "var(--p-content-color, #ffffff)",
+      border: "1px solid var(--p-content-border-color, #3f3f46)",
+      borderRadius: "var(--p-panel-border-radius, 6px)",
+      padding: "6px 0",
       cursor: "pointer",
-      font: "12px/1.4 monospace",
+      font: "12px/1.5 Inter, Arial, sans-serif",
     });
     btn.onclick = onClick;
     btnNativeRow.appendChild(btn);

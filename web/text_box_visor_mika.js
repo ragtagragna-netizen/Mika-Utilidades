@@ -252,6 +252,30 @@ function drawHeaderIcons(node, ctx) {
   else node._mikaExpandedIconRects = rects;
 }
 
+// Contador de líneas sobre la fila del output (igual que Text Box-Mika).
+// Solo expandido y con salidas. Lee el widget "text" (lo actualiza el
+// backend por websocket en cada ejecución, así el contador va en vivo).
+function drawLineCount(node, ctx) {
+  try {
+    if (!node.outputs?.length || node.flags?.collapsed) return;
+    const w = node.mikaTextWidget;
+    if (!w) return;
+    const text = String(w.value ?? "");
+    const n = text === "" ? 0 : text.split("\n").length;
+    const label = `${n} línea${n === 1 ? "" : "s"}`;
+    const pos = node.getConnectionPos?.(false, 0, [0, 0]);
+    if (!pos || pos[1] == null) return;
+    const LG = window.LiteGraph ?? {};
+    ctx.save();
+    ctx.font = "11px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = LG.NODE_TITLE_COLOR ?? "#999";
+    ctx.fillText(label, (node.size?.[0] ?? 200) / 2, pos[1] - node.pos[1]);
+    ctx.restore();
+  } catch (e) { /* no-op */ }
+}
+
 // Detecta la forma configurada (box/round/circle/card) igual que ComfyUI.
 function nodeShape(node) {
   const LG = window.LiteGraph ?? {};
@@ -392,6 +416,7 @@ app.registerExtension({
       try {
         bindPaste(this, this.mikaTextWidget);
         drawHeaderIcons(this, ctx);
+        drawLineCount(this, ctx);
       } catch (e) { /* no-op */ }
       return r;
     };
