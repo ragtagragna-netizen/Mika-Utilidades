@@ -125,7 +125,7 @@ function readOriginal(ta) {
   return out;
 }
 
-function copyStyle(ta, bd, isInput) {
+function copyStyle(ta, bd) {
   if (!ta._mikaHlColor || isTransparent(ta._mikaHlColor)) {
     const o = readOriginal(ta);
     if (!isTransparent(o.color)) ta._mikaHlColor = o.color;
@@ -134,16 +134,16 @@ function copyStyle(ta, bd, isInput) {
   const cs = getComputedStyle(ta);
   const props = [
     "fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing",
-    "lineHeight", "textTransform", "wordSpacing", "textIndent",
+    "lineHeight", "textTransform", "textIndent",
     "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
     "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
     "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle",
     "boxSizing", "borderRadius",
   ];
   for (const p of props) bd.style[p] = cs[p];
-  bd.style.whiteSpace = isInput ? "pre" : "pre-wrap";
-  bd.style.wordWrap = isInput ? "normal" : "break-word";
-  bd.style.overflowWrap = isInput ? "normal" : "break-word";
+  bd.style.whiteSpace = "pre-wrap";
+  bd.style.wordWrap = "break-word";
+  bd.style.overflowWrap = "break-word";
   bd.style.background = ta._mikaHlBg;
   bd.style.color = ta._mikaHlColor;
 }
@@ -184,11 +184,12 @@ function ensureCss() {
 
 function attach(ta) {
   if (!ta || ta._mikaHl) return;
-  if (ta.tagName !== "TEXTAREA" && ta.tagName !== "INPUT") return;
+  // Solo multilínea: los inputs de una línea no se tocan (eran la
+  // mayoría de los resaltados fantasma en nodos ajenos al foco).
+  if (ta.tagName !== "TEXTAREA") return;
   ensureCss();
   ta._mikaHl = true;
 
-  const isInput = ta.tagName === "INPUT";
   const parent = ta.parentElement;
   if (parent && getComputedStyle(parent).position === "static") {
     parent.classList.add("mika-hl-wrap");
@@ -201,14 +202,16 @@ function attach(ta) {
   inner.className = "mika-hl-backdrop-inner";
   bd.appendChild(inner);
   ta.before(bd);
-  ta.classList.add("mika-hl-ta");
+  bd.style.display = "none";
+  // Sin clase transparente hasta que haya algo que resaltar.
 
-  const syncStyle = () => copyStyle(ta, bd, isInput);
-  syncStyle();
+  const syncStyle = () => copyStyle(ta, bd);
 
   const update = () => {
     try {
-      if (!enabled) {
+      // Solo la caja CON foco resalta; el resto muestra su texto nativo.
+      const query = enabled && document.activeElement === ta ? currentQuery(ta) : null;
+      if (!query) {
         bd.style.display = "none";
         ta.classList.remove("mika-hl-ta");
         return;
@@ -217,21 +220,6 @@ function attach(ta) {
       ta.classList.add("mika-hl-ta");
       syncStyle();
       const text = ta.value ?? "";
-      const q = isInput
-        ? (ta.value.length >= MIN_LEN ? { word: ta.value, start: 0, end: ta.value.length } : null)
-        : currentQuery(ta);
-      // En inputs de una línea se resaltan coincidencias dentro del
-      // propio valor solo si hay selección parcial; si no, sin marcas.
-      let query = q;
-      if (isInput && ta.selectionStart != null && ta.selectionEnd != null &&
-          ta.selectionEnd > ta.selectionStart) {
-        const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd);
-        query = sel.length >= MIN_LEN
-          ? { word: sel, start: ta.selectionStart, end: ta.selectionEnd }
-          : null;
-      } else if (isInput) {
-        query = null;
-      }
       inner.innerHTML = buildHtml(text, query);
       bd.scrollTop = ta.scrollTop;
       bd.scrollLeft = ta.scrollLeft;
@@ -244,6 +232,7 @@ function attach(ta) {
   ta.addEventListener("keyup", update);
   ta.addEventListener("click", update);
   ta.addEventListener("select", update);
+  ta.addEventListener("blur", update);
   ta.addEventListener("scroll", () => {
     bd.scrollTop = ta.scrollTop;
     bd.scrollLeft = ta.scrollLeft;

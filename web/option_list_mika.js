@@ -1,7 +1,7 @@
 import { app } from "/scripts/app.js";
 
 // -----------------------------------------------------------------------
-// Mika · Option List-Mika
+// Mika · Inspector-Mika
 // -----------------------------------------------------------------------
 // Una sola salida: se conecta a cualquier slot, lee SUS opciones (como
 // Primitive-Mika: del widget vivo del destino) y las deja en la caja

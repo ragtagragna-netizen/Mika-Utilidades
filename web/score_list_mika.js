@@ -1,11 +1,21 @@
 import { app } from "/scripts/app.js";
 
+// -----------------------------------------------------------------------
+// Mika · Score List
+// -----------------------------------------------------------------------
+// Anotador de scores para pruebas: filas expandibles nombre+valor (+/–).
+// Los datos viven en el widget STRING oculto ("datos", JSON) que
+// serializa ComfyUI de forma estándar; el DOM solo es la vista.
+//
+// Tamaño: el nodo es 100% ajustable por el usuario. Solo se re-encaja
+// al cambiar filas (exacto al crear / + / –, solo-encoger al cargar
+// workflow). Nada de observers, intervalos ni overrides de dibujo que
+// peleen con el resize manual.
+// -----------------------------------------------------------------------
+
 const ROW_HEIGHT = 22; // alto fijo de cada fila (compacto)
 const ROW_GAP = 4;
 
-// Score List: los datos viven en un único widget STRING ("datos", JSON)
-// que serializa ComfyUI de forma estándar. El DOM solo es la vista de ese
-// valor, así los datos sobreviven al cambiar de pestaña/workflow.
 app.registerExtension({
 	name: "Mika.ScoreListLayout",
 
@@ -44,13 +54,13 @@ app.registerExtension({
 			el.style.fontSize = "11px";
 		}
 
-		function buildRows(node) {
+		function buildRows(node, fitMode) {
 			if (typeof node.addDOMWidget !== "function") return;
 			const w = datosWidget(node);
 			if (!w) return;
 			w.hidden = true;
 
-			// Quitar salidas heredadas (in_out, detalle) de workflows antiguos.
+			// Quitar salidas heredadas de workflows antiguos.
 			while (node.outputs?.length) node.removeOutput(0);
 
 			// Eliminar la vista anterior.
@@ -77,9 +87,9 @@ app.registerExtension({
 				container.style.display = "flex";
 				container.style.gap = "4px";
 				container.style.width = "100%";
-			container.style.height = ROW_HEIGHT + "px";
-			container.style.flexShrink = "0";
-			container.style.alignItems = "center";
+				container.style.height = ROW_HEIGHT + "px";
+				container.style.flexShrink = "0";
+				container.style.alignItems = "center";
 
 				// Nombre: 2/3 del ancho.
 				const nameInput = document.createElement("input");
@@ -123,7 +133,7 @@ app.registerExtension({
 			footer.style.display = "flex";
 			footer.style.gap = "4px";
 			footer.style.height = ROW_HEIGHT + "px";
-		footer.style.flexShrink = "0";
+			footer.style.flexShrink = "0";
 
 			for (const [text, action] of [
 				["+", () => { rows.push({ nombre: "", valor: 0 }); }],
@@ -141,79 +151,43 @@ app.registerExtension({
 				btn.addEventListener("click", () => {
 					action();
 					writeRows(node, rows);
-					buildRows(node);
+					buildRows(node, "exact");
 				});
 				footer.appendChild(btn);
 			}
 			root.appendChild(footer);
 
-		const domWidget = node.addDOMWidget("mika_score_rows", "div", root);
-		domWidget.serialize = false;
+			const domWidget = node.addDOMWidget("mika_score_rows", "div", root);
+			domWidget.serialize = false;
+			// Altura fija por fórmula (las filas usan alto fijo): mismo
+			// valor lo mida quien lo mida, sin carreras con el layout.
+			const contentH = rows.length * (ROW_HEIGHT + ROW_GAP) + ROW_HEIGHT;
+			domWidget.computeSize = () => [node.size?.[0] ?? 220, contentH];
+			node._mikaDomWidget = domWidget;
 
-		// Alto de reserva mientras el DOM no está maquetado (offscreen da 0).
-		const fallbackH =
-			rows.length * ROW_HEIGHT +
-			rows.length * ROW_GAP +
-			ROW_HEIGHT;
-
-		// El alto real lo manda el contenido medido (scrollHeight no se ve
-		// afectado por el scale CSS del zoom y evita el bucle medir→resize).
-		const fitNode = () => {
-			try {
-				const contentH = root.scrollHeight || fallbackH;
-				domWidget.computeSize = () => [node.size?.[0] ?? 200, contentH];
-				const size = node.computeSize();
-				const w = Math.max(220, size?.[0] || 220);
-				const h = Math.max(50, size?.[1] || 50);
-				if (Math.abs((node.size?.[1] ?? 0) - h) > 1 || node.size?.[0] !== w) {
-					node.setSize([w, h]);
-				}
-			} catch (e) { /* no-op */ }
-			node.setDirtyCanvas(true, true);
-		};
-
-		try { node._mikaRowObserver?.disconnect(); } catch (e) { /* no-op */ }
-		try {
-			const ro = new ResizeObserver(() => fitNode());
-			ro.observe(root);
-			node._mikaRowObserver = ro;
-		} catch (e) { /* no-op */ }
-
-		node._mikaDomWidget = domWidget;
-		// Auto-corrección continua (ver el barrido global abajo): repara
-		// nodos que quedaron altos por estirado manual, tamaño viejo del
-		// workflow o transitorios de reconstrucción.
-		node._mikaFitNode = fitNode;
-
-		requestAnimationFrame(fitNode);
-	}
-
-		// Barrido global cada segundo: encoge los Score List que estén más
-		// altos que su contenido. A propósito NO va en onDrawForeground:
-		// ese hook puede no correr (canvas quieto/oculto) y además otro
-		// override por instancia (badges del timer) lo puede tapar.
-		if (!globalThis.__mikaScoreFitTimer) {
-			globalThis.__mikaScoreFitTimer = setInterval(() => {
+			// Un único re-encaje tras reconstruir. "exact" (crear, +/–):
+			// el nodo calza al contenido. "shrink" (cargar workflow):
+			// solo encoge (cura el área gris vieja) sin pisar un tamaño
+			// manual más chico que el usuario haya guardado. Solo altura:
+			// el ancho lo manda el usuario.
+			const refit = () => {
 				try {
-					for (const n of app.graph?._nodes ?? []) {
-						if (n?.comfyClass !== "ScoreListExtendable") continue;
-						if (typeof n._mikaFitNode === "function") n._mikaFitNode();
+					const size = node.computeSize();
+					const h = Math.max(50, size?.[1] || 50);
+					if (fitMode === "exact" || (node.size?.[1] ?? 0) - h > 1) {
+						node.setSize([node.size?.[0] ?? 220, h]);
 					}
 				} catch (e) { /* no-op */ }
-			}, 1000);
+				node.setDirtyCanvas(true, true);
+			};
+			requestAnimationFrame(refit);
+			setTimeout(refit, 400);
 		}
-
-		const onRemove = nodeType.prototype.onRemove;
-		nodeType.prototype.onRemove = function () {
-			try { this._mikaRowObserver?.disconnect(); } catch (e) { /* no-op */ }
-			this._mikaFitNode = null;
-			return onRemove ? onRemove.apply(this, arguments) : undefined;
-		};
 
 		const onNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function () {
 			const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
-			setTimeout(() => buildRows(this), 100);
+			setTimeout(() => buildRows(this, "exact"), 100);
 			return r;
 		};
 
@@ -221,8 +195,18 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (info) {
 			const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
 			// Reconstruir con los datos restaurados del workflow.
-			setTimeout(() => buildRows(this), 100);
+			setTimeout(() => buildRows(this, "shrink"), 100);
 			return r;
+		};
+
+		const onRemove = nodeType.prototype.onRemove;
+		nodeType.prototype.onRemove = function () {
+			const prev = this._mikaDomWidget;
+			if (prev) {
+				try { prev.element?.remove(); } catch (e) { /* no-op */ }
+				this._mikaDomWidget = null;
+			}
+			return onRemove ? onRemove.apply(this, arguments) : undefined;
 		};
 	},
 });

@@ -921,6 +921,36 @@ class ScoreListExtendable:
         return ()
 
 
+class ExcelMika:
+    """
+    Excel-Mika: tabla editable estilo Excel para anotar scores/pruebas.
+
+    Los datos se guardan como JSON en un único widget oculto ("datos"),
+    serializado por el mecanismo estándar de ComfyUI. La UI
+    (excel_mika.js) dibuja la cuadrícula con filas/columnas expandibles
+    (+/–), steppers por celda numérica y pegado estilo Excel:
+    multilínea rellena hacia abajo desde la celda (tabs rellenan a la
+    derecha). El nodo es puramente visual, sin salidas.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "datos": ("STRING", {"default": '{"rows": 4, "cols": 2, "cells": []}', "multiline": True}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/score"
+
+    def doit(self, datos="", **_kwargs):
+        return ()
+
+
 class PrimitiveMika:
     """
     Primitive-Mika: nodo primitivo genérico. Al conectarlo a un slot de
@@ -2213,6 +2243,293 @@ class TagRemoverMika:
         removed_str = ", ".join(removed)
 
         return (result, removed_str, len(removed))
+
+
+class TagEnchantMika:
+    """
+    Tag Enchant-Mika: encanta un tag o palabra del prompt con sintaxis
+    (tag:peso) y saca el prompt completo.
+
+    - tag: tag o palabra a encantar (ej. "fat").
+    - start/step/count: rango automático de pesos (start, start+step,
+      ...) tan largo como count.
+    - prompt: salida simple con el primer peso; prompt_list: un
+      prompt completo por peso (OUTPUT_IS_LIST, ideal para XY plot
+      o loops). weights: los pesos usados.
+    Si el tag no está en el prompt, el prompt se devuelve intacto.
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _split_top_level(text):
+        tags = []
+        current = ''
+        depth = 0
+        escaped = False
+
+        for char in text:
+            if escaped:
+                current += char
+                escaped = False
+            elif char == '\\':
+                current += char
+                escaped = True
+            elif char == '(':
+                depth += 1
+                current += char
+            elif char == ')' and depth > 0:
+                depth -= 1
+                current += char
+            elif char == ',' and depth == 0:
+                if current.strip():
+                    tags.append(current.strip())
+                current = ''
+            else:
+                current += char
+
+        if current.strip():
+            tags.append(current.strip())
+
+        return tags
+
+    @staticmethod
+    def _normalize(text, case_sensitive=False):
+        t = text.strip()
+        if not case_sensitive:
+            t = t.lower()
+        return t.replace(' ', '_').replace('-', '_')
+
+    @staticmethod
+    def _strip_weight(segment):
+        seg = segment.strip()
+        while seg.startswith('(') and seg.endswith(')'):
+            inner = seg[1:-1].strip()
+            if ':' in inner:
+                head, _, tail = inner.rpartition(':')
+                try:
+                    float(tail.strip())
+                    seg = head.strip()
+                    break
+                except ValueError:
+                    seg = inner
+            else:
+                seg = inner
+        return seg
+
+    @staticmethod
+    def _fmt_weight(w):
+        return f"{w:.3f}".rstrip('0').rstrip('.')
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
+                "tag": ("STRING", {"default": "", "multiline": False}),
+                "start": ("FLOAT", {"default": 1.1, "min": -10.0, "max": 10.0, "step": 0.05}),
+                "step": ("FLOAT", {"default": 0.1, "min": -5.0, "max": 5.0, "step": 0.05}),
+                "count": ("INT", {"default": 5, "min": 1, "max": 50, "step": 1}),
+            },
+            "optional": {
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("prompt", "prompt_list", "weights")
+    OUTPUT_IS_LIST = (False, True, True)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/tags"
+
+    def doit(self, prompt="", tag="", start=1.1, step=0.1,
+             count=5, case_sensitive=False):
+        prompt = str(self._scalar(prompt, ""))
+        tag = str(self._scalar(tag, ""))
+        case_sensitive = _mika_coerce_bool(
+            self._scalar(case_sensitive, False), False)
+
+        try:
+            start = float(self._scalar(start, 1.1))
+        except (TypeError, ValueError):
+            start = 1.1
+        try:
+            step = float(self._scalar(step, 0.1))
+        except (TypeError, ValueError):
+            step = 0.1
+        try:
+            count = int(self._scalar(count, 5))
+        except (TypeError, ValueError):
+            count = 5
+        count = max(1, min(50, count))
+
+        weights = [round(start + i * step, 3) for i in range(count)]
+        wstrs = [self._fmt_weight(w) for w in weights]
+
+        target = self._normalize(tag, case_sensitive)
+        if not target or not prompt.strip():
+            return (prompt, [prompt] * count, wstrs)
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        word_pat = re.compile(
+            r"(?<![A-Za-z0-9])"
+            + re.escape(target).replace("_", r"[ _\-]+")
+            + r"(?![A-Za-z0-9])",
+            flags,
+        )
+
+        plan = []
+        for seg in self._split_top_level(prompt):
+            parsed = _parse_smart_tag(seg, case_sensitive)
+            if parsed is not None and parsed["base"] == target:
+                core = self._strip_weight(seg) or tag.strip()
+                plan.append((seg, "full", core))
+            elif word_pat.search(self._strip_weight(seg)):
+                plan.append((seg, "word", self._strip_weight(seg)))
+            else:
+                plan.append((seg, "keep", seg))
+
+        def build(wstr):
+            out = []
+            for seg, kind, core in plan:
+                if kind == "full":
+                    out.append(f"({core}:{wstr})")
+                elif kind == "word":
+                    out.append(word_pat.sub(
+                        lambda m: f"({m.group(0)}:{wstr})", core, count=1))
+                else:
+                    out.append(seg)
+            return ", ".join(out)
+
+        prompts = [build(w) for w in wstrs]
+        return (prompts[0], prompts, wstrs)
+
+
+MAX_SWAPS = 30
+DEFAULT_SWAPS_VISIBLE = 3
+
+
+class TagSwapListMika:
+    """
+    Tag Swap List-Mika: cambia el tag seleccionado por una serie de
+    tags y saca el prompt completo con cada reemplazo.
+
+    - tag: tag o palabra a reemplazar (ej. "fat").
+    - repl_1..N: tags de reemplazo, expandibles manualmente con
+      replacement_count (solo cuentan los primeros N no vacíos).
+    - prompt: salida simple con el primer reemplazo; prompt_list:
+      un prompt completo por reemplazo (OUTPUT_IS_LIST, ideal para
+      XY plot o loops). replaced: la lista de tags de reemplazo
+      usados (un item por prompt de la lista).
+    Si el tag no está en el prompt, el prompt se devuelve intacto.
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+
+        for i in range(1, MAX_SWAPS + 1):
+            optional[f"repl_{i}"] = ("STRING", {"default": "", "multiline": False})
+
+        optional["replacement_count"] = (
+            "INT",
+            {
+                "default": DEFAULT_SWAPS_VISIBLE,
+                "min": 1,
+                "max": MAX_SWAPS,
+                "step": 1,
+                "display": "number",
+            },
+        )
+        optional["case_sensitive"] = ("BOOLEAN", {"default": False})
+
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
+                "tag": ("STRING", {"default": "", "multiline": False}),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("prompt", "prompt_list", "replaced")
+    OUTPUT_IS_LIST = (False, True, True)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/tags"
+
+    def doit(self, prompt="", tag="",
+             replacement_count=DEFAULT_SWAPS_VISIBLE,
+             case_sensitive=False, **kwargs):
+        prompt = str(self._scalar(prompt, ""))
+        tag = str(self._scalar(tag, ""))
+        case_sensitive = _mika_coerce_bool(
+            self._scalar(case_sensitive, False), False)
+
+        try:
+            visible = int(self._scalar(replacement_count, DEFAULT_SWAPS_VISIBLE))
+        except (TypeError, ValueError):
+            visible = DEFAULT_SWAPS_VISIBLE
+        visible = max(1, min(MAX_SWAPS, visible))
+
+        replacements = []
+        for i in range(1, visible + 1):
+            value = self._scalar(kwargs.get(f"repl_{i}", ""), "")
+            value = str(value).strip() if value is not None else ""
+            if value:
+                replacements.append(value)
+
+        if not replacements or not prompt.strip():
+            return (prompt, [prompt], [])
+
+        target = TagEnchantMika._normalize(tag, case_sensitive)
+        if not target:
+            return (prompt, [prompt] * len(replacements), [])
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        word_pat = re.compile(
+            r"(?<![A-Za-z0-9])"
+            + re.escape(target).replace("_", r"[ _\-]+")
+            + r"(?![A-Za-z0-9])",
+            flags,
+        )
+
+        plan = []
+        for seg in TagEnchantMika._split_top_level(prompt):
+            parsed = _parse_smart_tag(seg, case_sensitive)
+            if parsed is not None and parsed["base"] == target:
+                plan.append((seg, "full"))
+            elif word_pat.search(TagEnchantMika._strip_weight(seg)):
+                plan.append((seg, "word"))
+            else:
+                plan.append((seg, "keep"))
+
+        if not any(kind != "keep" for _, kind in plan):
+            return (prompt, [prompt] * len(replacements), [])
+
+        def build(repl):
+            out = []
+            for seg, kind in plan:
+                if kind == "full":
+                    out.append(repl)
+                elif kind == "word":
+                    core = TagEnchantMika._strip_weight(seg)
+                    out.append(word_pat.sub(repl, core, count=1))
+                else:
+                    out.append(seg)
+            return ", ".join(out)
+
+        prompts = [build(r) for r in replacements]
+        return (prompts[0], prompts, replacements)
 
 
 class FloatOutputList:
@@ -6799,7 +7116,7 @@ class TextListMika:
 
 class OptionListMika:
     """
-    Option List-Mika: conecta su única salida a cualquier slot y hace
+    Inspector-Mika: conecta su única salida a cualquier slot y hace
     inspect: copia las opciones de ese slot a su caja `text` (una por
     línea), lista para copiar a mano. El cable es solo el gesto de
     inspección y se quita solo.
@@ -6857,13 +7174,15 @@ class XYGridMika(grid_io.ComfyNode):
     """
     XY Grid-Mika: cuadrícula rows×cols desde un batch en orden por filas.
     A diferencia de XYZ-GridPlot, la forma la mandan las etiquetas:
-    columnas = len(col_labels) o `columns`, filas = resto.
+    columnas = len(col_labels), o se deducen (imágenes ÷ filas) si solo
+    hay row_labels, o `columns` manual sin etiquetas; filas =
+    len(row_labels) o el resto.
     """
 
     @classmethod
     def define_schema(cls):
         return grid_io.Schema(
-            description="Grid de imágenes en filas×columnas con etiquetas. Conecta el batch en orden por filas (como sale de x_combo/y_combo), column_labels/row_labels del XY Plot Runner y fija `columns` al nº de columnas.",
+            description="Grid de imágenes en filas×columnas con etiquetas. Conecta el batch en orden por filas (como sale de x_combo/y_combo) y column_labels/row_labels del XY Plot Runner: la forma se deduce sola (`columns` solo se usa sin etiquetas).",
             node_id="XYGridMika",
             display_name="XY Grid-Mika",
             category="Mika Utilidades/plot",
@@ -6906,13 +7225,17 @@ class XYGridMika(grid_io.ComfyNode):
         col_labels = _mika_grid_strs(column_labels)
         row_labels_s = _mika_grid_strs(row_labels)
 
-        # Las etiquetas mandan: definen la forma del grid.
+        # Las etiquetas mandan: definen la forma del grid. Lo que falte
+        # se deduce del batch; sin ninguna etiqueta vale el `columns`
+        # manual.
         if col_labels:
             cols = len(col_labels)
         if row_labels_s:
             rows = len(row_labels_s)
-        if not col_labels and not row_labels_s:
+        if not row_labels_s:
             rows = (len(flats) + cols - 1) // cols
+        elif not col_labels:
+            cols = max(1, (len(flats) + rows - 1) // rows)
         gap = max(0, _mika_grid_first(gap, 0))
         fsize = max(6, _mika_grid_first(font_size, 40))
 
@@ -7001,6 +7324,7 @@ NODE_CLASS_MAPPINGS = {
     "SwitchBypassMika": SwitchBypassMika,
     "TextAffixMika": TextAffixMika,
     "ScoreListExtendable": ScoreListExtendable,
+    "ExcelMika": ExcelMika,
     "PrimitiveMika": PrimitiveMika,
     "TextBoxClipboard": TextBoxClipboard,
     "NoteMika": NoteMika,
@@ -7013,6 +7337,8 @@ NODE_CLASS_MAPPINGS = {
     "SmartTagFilterMika": SmartTagFilterMika,
     "TagIfMika": TagIfMika,
     "TagRemoverMika": TagRemoverMika,
+    "TagEnchantMika": TagEnchantMika,
+    "TagSwapListMika": TagSwapListMika,
     "FloatOutputList": FloatOutputList,
     "ExecutionTimerConfig": ExecutionTimerConfig,
     "PromptEditLoopMika": PromptEditLoopMika,
@@ -7072,6 +7398,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SwitchBypassMika": "Switch Bypass-Mika",
     "TextAffixMika": "Text Affix-Mika",
     "ScoreListExtendable": "Score List",
+    "ExcelMika": "Excel-Mika",
     "PrimitiveMika": "Primitive-Mika",
     "TextBoxClipboard": "Text Box-Mika",
     "NoteMika": "Note-Mika",
@@ -7084,6 +7411,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SmartTagFilterMika": "Smart Tag Filter-Mika",
     "TagIfMika": "Tag If-Mika",
     "TagRemoverMika": "Tag Remover-Mika",
+    "TagEnchantMika": "Tag Enchant-Mika",
+    "TagSwapListMika": "Tag Swap List-Mika",
     "FloatOutputList": "Float OutputList",
     "ExecutionTimerConfig": "⏱ Tiempos de Ejecución (config)",
     "PromptEditLoopMika": "Prompt Edit (Loop)-Mika",
@@ -7126,6 +7455,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SinglePlotRunnerMika": "Single PlotXY-Mika",
     "XYGridMika": "XY Grid-Mika",
     "ListPickMika": "List Pick-Mika",
-    "OptionListMika": "Option List-Mika",
+    "OptionListMika": "Inspector-Mika",
     "TextListMika": "Text List-Mika",
 }

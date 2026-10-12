@@ -80,8 +80,15 @@ function insertTextIntoWidget(node, widget, rawText) {
 
   let newValue;
   if (inputEl && inputEl.isConnected && inputEl.tagName === "TEXTAREA") {
-    const start = inputEl.selectionStart ?? inputEl.value.length;
-    const end = inputEl.selectionEnd ?? inputEl.value.length;
+    let start = inputEl.selectionStart ?? inputEl.value.length;
+    let end = inputEl.selectionEnd ?? inputEl.value.length;
+    // Bloqueado: insertar sobre una selección la reemplazaría (borrar).
+    // Se colapsa el caret al inicio: el texto viejo se conserva y el
+    // nuevo solo se inserta.
+    if (isLockOn(node) && start !== end) {
+      try { inputEl.setSelectionRange(start, start); } catch (e) { /* no-op */ }
+      end = start;
+    }
     const current = inputEl.value ?? "";
     newValue = current.slice(0, start) + text + current.slice(end);
     inputEl.value = newValue;
@@ -134,6 +141,57 @@ function bindPaste(node, widget) {
   });
 }
 
+// Modo "bloquear borrado" (toggle en clic derecho, se guarda en el
+// workflow vía node.properties): impide BORRAR (Backspace, Delete,
+// Ctrl+X, cualquier borrado por arrastre o menú) pero deja escribir
+// texto nuevo y pegar.
+function isLockOn(node) {
+  return !!node?.properties?._mikaTextLock;
+}
+
+function setLockOn(node, v) {
+  if (!node.properties) node.properties = {};
+  node.properties._mikaTextLock = !!v;
+  try { app.graph.setDirtyCanvas(true, true); } catch (e) { /* no-op */ }
+}
+
+// Nodos de caja de texto seleccionados (para bloqueo en grupo).
+function selectedLockables() {
+  try {
+    return (app.graph?._nodes ?? []).filter((n) => n && n.is_selected && n._mikaIsTextBoxEditor);
+  } catch (e) {
+    return [];
+  }
+}
+
+function bindLock(node, widget) {
+  const anchor = getWidgetTextarea(widget);
+  if (!anchor || anchor.tagName !== "TEXTAREA" || anchor._mikaLockBound) return;
+  anchor._mikaLockBound = true;
+  // Repintar al escribir (mantiene vivo el contador de líneas).
+  anchor.addEventListener("input", () => node.setDirtyCanvas(true, true));
+  anchor.addEventListener("keydown", (e) => {
+    if (!isLockOn(node)) return;
+    if (e.key === "Backspace" || e.key === "Delete") {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
+  anchor.addEventListener("cut", (e) => {
+    if (isLockOn(node)) e.preventDefault();
+  });
+  anchor.addEventListener("beforeinput", (e) => {
+    if (!isLockOn(node)) return;
+    const t = typeof e.inputType === "string" ? e.inputType : "";
+    if (t.startsWith("delete")) {
+      e.preventDefault();
+    } else if (t.startsWith("insert") && anchor.selectionStart !== anchor.selectionEnd) {
+      // Escribir o soltar sobre texto seleccionado lo reemplazaría.
+      e.preventDefault();
+    }
+  });
+}
+
 function flashIcon(node, key, ok) {
   if (!node._mikaCollapsedFeedback) node._mikaCollapsedFeedback = {};
   node._mikaCollapsedFeedback[key] = { ok, until: Date.now() + FEEDBACK_MS };
@@ -147,6 +205,12 @@ function flashIcon(node, key, ok) {
 }
 
 function runAction(node, widget, key, onFeedback) {
+  if (!widget && key !== "lock") return;
+  if (key === "lock") {
+    setLockOn(node, !isLockOn(node));
+    onFeedback?.(true);
+    return;
+  }
   if (!widget) return;
   if (key === "copy") {
     writeClipboard(textToCopyFrom(widget))
@@ -197,13 +261,25 @@ function hitTestRects(rects, localX, localY) {
   return null;
 }
 
+// Iconos visibles en el header (candado primero si está bloqueado).
+function shownIcons(node) {
+  return isLockOn(node) ? [LOCK_ICON, ...ICONS] : ICONS;
+}
+
 // -----------------------------------------------------------------------
 // Dibuja los iconos a la derecha del header (título) y guarda sus rects.
+// Con el bloqueo activo se suma el candado (clic = desbloquear).
 // -----------------------------------------------------------------------
+const LOCK_ICON = {
+  key: "lock", title: "Desbloquear borrado",
+  paths: ["M8 11V8a4 4 0 0 1 8 0v3", "M6 11h12v8H6z"],
+};
+
 function drawHeaderIcons(node, ctx) {
   const LG = window.LiteGraph ?? {};
   const titleHeight = LG.NODE_TITLE_HEIGHT ?? 20;
-  const iconsWidth = ICONS.length * (ICON_SIZE + ICON_GAP) + ICON_GAP;
+  const shown = shownIcons(node);
+  const iconsWidth = shown.length * (ICON_SIZE + ICON_GAP) + ICON_GAP;
   const width = node.flags?.collapsed
     ? (node._mikaCollapsedWidth ?? node._collapsed_width ?? node.size?.[0] ?? 200)
     : (node.size?.[0] ?? 200);
@@ -213,8 +289,8 @@ function drawHeaderIcons(node, ctx) {
   const titleColor = LG.NODE_TITLE_COLOR ?? "#999";
   const rects = [];
   const iconRadius = nodeShape(node) === "box" ? 0 : 4;
-  
-  for (const icon of ICONS) {
+
+  for (const icon of shown) {
     const feedback = feedbackMap[icon.key];
     const showFeedback = feedback && feedback.until > Date.now();
 
@@ -227,7 +303,7 @@ function drawHeaderIcons(node, ctx) {
     if (showFeedback) {
       drawIconCanvas(ctx, feedback.ok ? ICON_CHECK : ICON_CROSS, x, cy - ICON_SIZE / 2, ICON_SIZE, feedback.ok ? "#8f8" : "#f88");
     } else {
-      drawIconCanvas(ctx, icon.paths, x, cy - ICON_SIZE / 2, ICON_SIZE, titleColor);
+      drawIconCanvas(ctx, icon.paths, x, cy - ICON_SIZE / 2, ICON_SIZE, icon.key === "lock" ? "#e8b34b" : titleColor);
     }
 
     rects.push({ key: icon.key, x, y: cy - ICON_SIZE / 2, w: ICON_SIZE, h: ICON_SIZE });
@@ -236,6 +312,29 @@ function drawHeaderIcons(node, ctx) {
 
   if (node.flags?.collapsed) node._mikaCollapsedIconRects = rects;
   else node._mikaExpandedIconRects = rects;
+}
+
+// Contador de líneas sobre la fila del output (zona de la imagen).
+// Solo expandido y con salidas (Note-Mika no tiene).
+function drawLineCount(node, ctx) {
+  try {
+    if (!node.outputs?.length || node.flags?.collapsed) return;
+    const w = node.mikaTextWidget;
+    if (!w) return;
+    const text = String(w.value ?? "");
+    const n = text === "" ? 0 : text.split("\n").length;
+    const label = `${n} línea${n === 1 ? "" : "s"}`;
+    const pos = node.getConnectionPos?.(false, 0, [0, 0]);
+    if (!pos || pos[1] == null) return;
+    const LG = window.LiteGraph ?? {};
+    ctx.save();
+    ctx.font = "11px sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = LG.NODE_TITLE_COLOR ?? "#999";
+    ctx.fillText(label, 10, pos[1] - node.pos[1]);
+    ctx.restore();
+  } catch (e) { /* no-op */ }
 }
 
 // Detecta la forma configurada (box/round/circle/card) igual que ComfyUI.
@@ -306,7 +405,9 @@ function ensureGlobalListeners(flagName) {
   window.addEventListener("pointermove", (e) => {
     const hit = findIconAt(e, flagName);
     if (hit) {
-      const icon = ICONS.find((i) => i.key === hit.rect.key);
+      const icon = hit.rect.key === LOCK_ICON.key
+        ? LOCK_ICON
+        : ICONS.find((i) => i.key === hit.rect.key);
       showTooltip(icon?.title ?? "", e.clientX, e.clientY);
     } else {
       hideTooltip();
@@ -346,6 +447,7 @@ app.registerExtension({
       this.mikaTextWidget =
         (this.widgets ?? []).find((w) => w.name === "text" || w.type === "customtext" || w.type === "STRING") ?? null;
       bindPaste(this, this.mikaTextWidget);
+      bindLock(this, this.mikaTextWidget);
 
       if (this.mikaTextWidget?.options) {
         this.mikaTextWidget.options.minNodeSize = [200, 60];
@@ -361,7 +463,9 @@ app.registerExtension({
       if (this.flags?.collapsed) return r;
       try {
         bindPaste(this, this.mikaTextWidget);
+        bindLock(this, this.mikaTextWidget);
         drawHeaderIcons(this, ctx);
+        drawLineCount(this, ctx);
       } catch (e) { /* no-op */ }
       return r;
     };
@@ -378,17 +482,20 @@ app.registerExtension({
         ctx.save();
         ctx.font = titleFont;
 
-        const iconsWidth = ICONS.length * (ICON_SIZE + ICON_GAP) + ICON_GAP;
+        const iconsWidth = shownIcons(this).length * (ICON_SIZE + ICON_GAP) + ICON_GAP;
         const titleWidth = ctx.measureText(titleText).width;
-        const expandedWidth = this.size?.[0] ?? 200;
+        // Ancho adaptativo: calza a título+iconos con tope para no
+        // alargar demasiado (puede superar al nodo expandido).
+        const MAX_COLLAPSED_W = 320;
         const width = Math.max(
           LG.NODE_COLLAPSED_WIDTH ?? 80,
-          Math.min(expandedWidth, titleHeight + titleWidth + 14 + iconsWidth)
+          Math.min(MAX_COLLAPSED_W, titleHeight + titleWidth + 14 + iconsWidth)
         );
         this._mikaCollapsedWidth = width;
 
         // El título se ajusta al ancho del nodo, no al revés (como los nativos).
-        const maxTitleWidth = width - titleHeight - iconsWidth - 22;
+        // 12 = 8px de sangría tras el punto + 4px antes de los iconos.
+        const maxTitleWidth = width - titleHeight - iconsWidth - 12;
         let displayTitle = titleText;
         if (ctx.measureText(displayTitle).width > maxTitleWidth) {
           while (displayTitle.length && ctx.measureText(displayTitle + "…").width > maxTitleWidth) {
@@ -453,6 +560,24 @@ app.registerExtension({
           options.push({
             content: icon.title,
             callback: () => runAction(this, this.mikaTextWidget, icon.key, (ok) => flashIcon(this, icon.key, ok)),
+          });
+        }
+        options.push(null);
+        options.push({
+          content: (isLockOn(this) ? "✓ " : "") + "🔒 Bloquear borrado (permite escribir y pegar)",
+          callback: () => setLockOn(this, !isLockOn(this)),
+        });
+        // Bloqueo en grupo: actúa sobre los nodos de caja de texto
+        // seleccionados (incluye a este si está seleccionado).
+        const group = selectedLockables();
+        if (group.length >= 2) {
+          options.push({
+            content: `🔒 Bloquear borrado en ${group.length} seleccionados`,
+            callback: () => group.forEach((n) => setLockOn(n, true)),
+          });
+          options.push({
+            content: `🔓 Desbloquear ${group.length} seleccionados`,
+            callback: () => group.forEach((n) => setLockOn(n, false)),
           });
         }
       }
