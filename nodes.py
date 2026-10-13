@@ -4,10 +4,12 @@ except Exception:
     PromptServer = None
 
 from PIL import Image, ImageOps, ImageDraw, ImageFont
+from PIL.PngImagePlugin import PngInfo
 from io import BytesIO
 import numpy as np
 import torch
 import os
+from datetime import datetime
 import hashlib
 import requests
 import re
@@ -2540,6 +2542,7 @@ class TagEnchantListMika:
 
     - Línea no vacía i -> peso start + i*step (el índice avanza por
       línea no vacía, haya o no match en esa línea).
+    - modo fijo: todas las líneas con el peso start.
     - text: salida simple multilínea; weights: pesos usados (lista).
     Las líneas vacías o sin el tag salen intactas.
     Con INPUT_IS_LIST recibe la lista cableada completa en una sola
@@ -2576,6 +2579,7 @@ class TagEnchantListMika:
                 "tag": ("STRING", {"default": "", "multiline": False}),
                 "start": ("FLOAT", {"default": 1.1, "min": -10.0, "max": 10.0, "step": 0.05}),
                 "step": ("FLOAT", {"default": 0.1, "min": -5.0, "max": 5.0, "step": 0.05}),
+                "modo": (["incremental", "fijo"], {"default": "incremental"}),
             },
             "optional": {
                 "case_sensitive": ("BOOLEAN", {"default": False}),
@@ -2592,7 +2596,7 @@ class TagEnchantListMika:
     # (una ejecución por línea daría peso fijo = start en todas).
     INPUT_IS_LIST = True
 
-    def doit(self, text="", tag="", start=1.1, step=0.1,
+    def doit(self, text="", tag="", start=1.1, step=0.1, modo="incremental",
              case_sensitive=False):
         text = self._unwrap_text(text)
         tag = str(self._scalar(tag, ""))
@@ -2607,6 +2611,8 @@ class TagEnchantListMika:
             step = float(self._scalar(step, 0.1))
         except (TypeError, ValueError):
             step = 0.1
+        fixed = str(self._scalar(modo, "incremental")).strip().lower() in (
+            "fijo", "fija", "fixed", "fix")
 
         lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
@@ -2629,7 +2635,8 @@ class TagEnchantListMika:
             if not line.strip():
                 out_lines.append(line)
                 continue
-            wstr = TagEnchantMika._fmt_weight(round(start + idx * step, 3))
+            wstr = TagEnchantMika._fmt_weight(
+                round(start, 3) if fixed else round(start + idx * step, 3))
             idx += 1
             wstrs.append(wstr)
 
@@ -7426,6 +7433,472 @@ class XYGridMika(grid_io.ComfyNode):
 
 
 # ======================================================================
+# IMAGE SAVER CLONES MIKA (Local + PC/Colab)
+# Clones del Image Saver de Mira: misma plantilla de filename/path
+# (%date, %time, %model, %width, %height, %seed, %counter,
+# %sampler_name, %steps, %cfg, %scheduler, %basemodelname, %denoise,
+# %clip_skip), misma metadata A1111 + workflow embebido y mismos hashes.
+# - Local: path absoluto (C:/Fotos/...) guarda fuera de output/;
+#   relativo sigue bajo output/ como el original.
+# - PC: pensado para Colab/servidor remoto. Guarda copia en el servidor
+#   y devuelve las imagenes a la UI; la extension web
+#   (image_saver_pc_mika.js) las escribe en la carpeta de tu PC que elijas
+#   en el navegador, recreando la subcarpeta indicada en path.
+# ======================================================================
+
+try:
+    import piexif as _mika_piexif
+    import piexif.helper as _mika_piexif_helper
+except ImportError:
+    _mika_piexif = None
+    _mika_piexif_helper = None
+
+_MIKA_SAVER_basenames = os.path.basename
+
+_MIKA_SAVER_CIVITAI_SAMPLERS = {
+    'euler_ancestral': 'Euler a', 'euler': 'Euler', 'lms': 'LMS',
+    'heun': 'Heun', 'dpm_2': 'DPM2', 'dpm_2_ancestral': 'DPM2 a',
+    'dpmpp_2s_ancestral': 'DPM++ 2S a', 'dpmpp_2m': 'DPM++ 2M',
+    'dpmpp_sde': 'DPM++ SDE', 'dpmpp_2m_sde': 'DPM++ 2M SDE',
+    'dpmpp_3m_sde': 'DPM++ 3M SDE', 'dpm_fast': 'DPM fast',
+    'dpm_adaptive': 'DPM adaptive', 'ddim': 'DDIM', 'plms': 'PLMS',
+    'uni_pc_bh2': 'UniPC', 'uni_pc': 'UniPC', 'lcm': 'LCM',
+}
+
+_MIKA_SAVER_A1111_SCHEDULES = {
+    "karras": "Karras", "exponential": "Exponential",
+    "sgm_uniform": "SGM Uniform", "kl_optimal": "KL Optimal",
+    "simple": "Simple", "normal": "Normal",
+    "ddim_uniform": "DDIM", "beta": "Beta",
+}
+
+_MIKA_SAVER_HASH_RE = re.compile(r'^\s*([^:]+?)(?:\s*:\s*([^\s:][^:]*?))?\s*$')
+_MIKA_SAVER_BAD_CHARS = re.compile(r'[\\/:*?"<>|]')
+
+
+def _mika_saver_timestamp(time_format):
+    try:
+        return datetime.now().strftime(time_format)
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d-%H%M%S")
+
+
+def _mika_saver_ckpt_name(ckpt_name):
+    return os.path.basename(ckpt_name or "")
+
+
+def _mika_saver_ckpt_base(ckpt_name):
+    return os.path.splitext(_mika_saver_ckpt_name(ckpt_name))[0]
+
+
+def _mika_saver_make_pathname(filename, width, height, seed, modelname,
+                              counter, time_format, sampler_name, steps,
+                              cfg, scheduler, denoise, clip_skip):
+    filename = filename.replace("%date", _mika_saver_timestamp("%Y-%m-%d"))
+    filename = filename.replace("%time", _mika_saver_timestamp(time_format))
+    filename = filename.replace("%model", _mika_saver_ckpt_name(modelname))
+    filename = filename.replace("%width", str(width))
+    filename = filename.replace("%height", str(height))
+    filename = filename.replace("%seed", str(seed))
+    filename = filename.replace("%counter", str(counter))
+    filename = filename.replace("%sampler_name", sampler_name)
+    filename = filename.replace("%steps", str(steps))
+    filename = filename.replace("%cfg", str(cfg))
+    filename = filename.replace("%scheduler", scheduler)
+    filename = filename.replace(
+        "%basemodelname", _mika_saver_ckpt_base(modelname))
+    filename = filename.replace("%denoise", str(denoise))
+    filename = filename.replace("%clip_skip", str(clip_skip))
+    return filename
+
+
+def _mika_saver_make_filename(filename, width, height, seed, modelname,
+                              counter, time_format, sampler_name, steps,
+                              cfg, scheduler, denoise, clip_skip):
+    filename = _mika_saver_make_pathname(
+        filename, width, height, seed, modelname, counter, time_format,
+        sampler_name, steps, cfg, scheduler, denoise, clip_skip)
+    return _mika_saver_timestamp(time_format) if filename == "" else filename
+
+
+def _mika_saver_civitai_sampler(sampler_name, scheduler):
+    name = _MIKA_SAVER_CIVITAI_SAMPLERS.get(sampler_name, sampler_name)
+    if sampler_name in _MIKA_SAVER_CIVITAI_SAMPLERS:
+        if scheduler == "karras":
+            name += " Karras"
+        elif scheduler == "exponential":
+            name += " Exponential"
+    return name
+
+
+def _mika_saver_a1111_schedule(scheduler):
+    return _MIKA_SAVER_A1111_SCHEDULES.get(scheduler, scheduler)
+
+
+def _mika_saver_sha256_file(file_path):
+    sha = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1048576), b""):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def _mika_saver_model_hash(modelname):
+    if not modelname:
+        return "", None
+    ckpt_path = folder_paths.get_full_path("checkpoints", modelname)
+    if not ckpt_path:
+        ckpt_path = folder_paths.get_full_path("diffusion_models", modelname)
+    if not ckpt_path:
+        return "", None
+    try:
+        from custom_nodes.ComfyUI_Mira.image_saver.utils import \
+            get_sha256 as _mira_sha
+        return _mira_sha(ckpt_path)[:10], ckpt_path
+    except Exception:
+        try:
+            return _mika_saver_sha256_file(ckpt_path)[:10], ckpt_path
+        except Exception:
+            return "", ckpt_path
+
+
+def _mika_saver_collect_hashes(modelname, positive, negative,
+                              additional_hashes):
+    try:
+        from custom_nodes.ComfyUI_Mira.image_saver.prompt_metadata_extractor \
+            import PromptMetadataExtractor
+        extractor = PromptMetadataExtractor([positive, negative])
+        embeddings = extractor.get_embeddings()
+        loras = extractor.get_loras()
+    except Exception:
+        embeddings, loras = {}, {}
+    modelhash, ckpt_path = _mika_saver_model_hash(modelname)
+    existing = {modelhash.lower()} | \
+        {t[2].lower() for t in loras.values()} | \
+        {t[2].lower() for t in embeddings.values()}
+    manual, unnamed = {}, 0
+    for entry in (additional_hashes or "").replace("\n", ",").split(","):
+        if not entry.strip():
+            continue
+        match = _MIKA_SAVER_HASH_RE.search(entry)
+        if match is None:
+            continue
+        groups = tuple(g for g in match.groups() if g)
+        if not groups:
+            continue
+        name, hashv = groups if len(groups) > 1 else (None, groups[0])
+        if len(hashv) > 16:
+            continue
+        if any(hashv.lower() == h.lower()
+               for _, _, h in manual.values()):
+            continue
+        if hashv.lower() in existing:
+            continue
+        if name is None:
+            unnamed += 1
+            name = f"manual{unnamed}"
+        manual[name] = (None, None, hashv)
+        if len(manual) > 29:
+            break
+    hashes = {k: v[2] for k, v in embeddings.items()} | \
+        {k: v[2] for k, v in loras.items()} | \
+        {k: v[2] for k, v in manual.items()} | {"model": modelhash}
+    chain = {modelname: (ckpt_path, None, modelhash)} | loras | \
+        embeddings | manual
+    return hashes, chain, modelhash
+
+
+def _mika_saver_save_image(img, filepath, extension, quality, lossless,
+                           optimize, a111_params, prompt, extra_pnginfo,
+                           embed_workflow):
+    if extension == "png":
+        metadata = PngInfo()
+        metadata.add_text("parameters", a111_params)
+        if embed_workflow:
+            if extra_pnginfo is not None:
+                for k, v in extra_pnginfo.items():
+                    metadata.add_text(
+                        k, json.dumps(v, separators=(',', ':')))
+            if prompt is not None:
+                metadata.add_text(
+                    "prompt", json.dumps(prompt, separators=(',', ':')))
+        img.save(filepath, pnginfo=metadata, optimize=optimize)
+        return
+    img.save(filepath, optimize=True, quality=quality, lossless=lossless)
+    if _mika_piexif is None:
+        return
+    pnginfo_json, prompt_json = {}, {}
+    try:
+        if embed_workflow:
+            if extra_pnginfo is not None:
+                pnginfo_json = {
+                    _mika_piexif.ImageIFD.Make - i:
+                    f"{k}:{json.dumps(v, separators=(',', ':'))}"
+                    for i, (k, v) in enumerate(extra_pnginfo.items())}
+            if prompt is not None:
+                prompt_json = {_mika_piexif.ImageIFD.Model:
+                               f"prompt:{json.dumps(prompt)}"}
+
+        def _exif():
+            return _mika_piexif.dump(({
+                "0th": pnginfo_json | prompt_json
+            } if pnginfo_json or prompt_json else {}) | {
+                "Exif": {_mika_piexif.ExifIFD.UserComment:
+                         _mika_piexif_helper.UserComment.dump(
+                             a111_params, encoding="unicode")},
+            })
+
+        exif_bytes = _exif()
+        if extension in ("jpg", "jpeg") and len(exif_bytes) > 65535:
+            pnginfo_json, prompt_json = {}, {}
+            exif_bytes = _exif()
+        if len(exif_bytes) <= 65535 or extension not in ("jpg", "jpeg"):
+            _mika_piexif.insert(exif_bytes, filepath)
+    except Exception as e:
+        print(f"[Mika Saver] aviso: sin metadata EXIF ({e})")
+
+
+def _mika_saver_unique_filename(output_path, filename_prefix, extension):
+    existing = [f for f in os.listdir(output_path)
+                if f.startswith(filename_prefix) and f.endswith(extension)]
+    if not existing:
+        return filename_prefix
+    suffixes = []
+    for f in existing:
+        tail = os.path.splitext(f)[0].split("_")[-1]
+        if tail.isdigit():
+            suffixes.append(int(tail))
+    return f"{filename_prefix}_{(max(suffixes) + 1) if suffixes else 1:02d}"
+
+
+def _mika_saver_is_inside(child, parent):
+    try:
+        return os.path.commonpath(
+            [os.path.realpath(child), os.path.realpath(parent)]) == \
+            os.path.realpath(parent)
+    except Exception:
+        return False
+
+
+def _mika_saver_pc_relative(templated):
+    rel = str(templated or "").replace("\\", "/")
+    rel = re.sub(r"^[A-Za-z]:", "", rel).lstrip("/")
+    parts = [p for p in rel.split("/") if p not in ("", ".", "..")]
+    parts = [_MIKA_SAVER_BAD_CHARS.sub("_", p).strip(" .") or "_"
+             for p in parts]
+    return os.path.join(*parts) if parts else ""
+
+
+def _mika_saver_inputs(extra_optional=None):
+    optional = {
+        "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+        "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+        "modelname": ("STRING", {"default": "", "multiline": False}),
+        "sampler_name": ("STRING", {"default": "", "multiline": False}),
+        "scheduler": ("STRING", {"default": "normal", "multiline": False}),
+        "positive": ("STRING", {"default": "unknown", "multiline": True}),
+        "negative": ("STRING", {"default": "unknown", "multiline": True}),
+        "seed_value": ("INT", {"default": 0, "min": 0,
+                               "max": 0xffffffffffffffff}),
+        "width": ("INT", {"default": 512, "min": 0, "max": 16384, "step": 8}),
+        "height": ("INT", {"default": 512, "min": 0, "max": 16384, "step": 8}),
+        "lossless_webp": ("BOOLEAN", {"default": True}),
+        "quality_jpeg_or_webp": ("INT", {"default": 100, "min": 1,
+                                         "max": 100}),
+        "optimize_png": ("BOOLEAN", {"default": False}),
+        "counter": ("INT", {"default": 0, "min": 0,
+                            "max": 0xffffffffffffffff}),
+        "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
+        "clip_skip": ("INT", {"default": 0, "min": -24, "max": 24}),
+        "time_format": ("STRING", {"default": "%Y-%m-%d-%H%M%S",
+                                   "multiline": False}),
+        "save_workflow_as_json": ("BOOLEAN", {"default": False}),
+        "embed_workflow": ("BOOLEAN", {"default": True}),
+        "additional_hashes": ("STRING", {"default": "",
+                                         "multiline": False}),
+    }
+    if extra_optional:
+        optional.update(extra_optional)
+    return {
+        "required": {
+            "images": ("IMAGE",),
+            "filename": ("STRING", {"default": "%time_%basemodelname_%seed",
+                                    "multiline": False}),
+            "path": ("STRING", {"default": "", "multiline": False}),
+            "extension": (["png", "jpeg", "jpg", "webp"],),
+        },
+        "optional": optional,
+        "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+    }
+
+
+def _mika_saver_run(images, filename, path, extension, mode="local",
+                    save_on_server=True, prompt=None, extra_pnginfo=None,
+                    **kw):
+    steps = int(kw.get("steps", 20))
+    cfg = float(kw.get("cfg", 7.0))
+    modelname = str(kw.get("modelname", "") or "")
+    sampler_name = str(kw.get("sampler_name", "") or "")
+    scheduler = str(kw.get("scheduler", "") or "normal")
+    positive = str(kw.get("positive", "unknown"))
+    negative = str(kw.get("negative", "unknown"))
+    seed_value = int(kw.get("seed_value", 0))
+    width = int(kw.get("width", 512))
+    height = int(kw.get("height", 512))
+    lossless = _mika_coerce_bool(kw.get("lossless_webp", True), True)
+    quality = int(kw.get("quality_jpeg_or_webp", 100))
+    optimize = _mika_coerce_bool(kw.get("optimize_png", False), False)
+    counter = int(kw.get("counter", 0))
+    denoise = float(kw.get("denoise", 1.0))
+    clip_skip = int(kw.get("clip_skip", 0))
+    time_format = str(kw.get("time_format", "%Y-%m-%d-%H%M%S"))
+    save_json_flag = _mika_coerce_bool(
+        kw.get("save_workflow_as_json", False), False)
+    embed = _mika_coerce_bool(kw.get("embed_workflow", True), True)
+    additional = str(kw.get("additional_hashes", "") or "")
+
+    fname = _mika_saver_make_filename(
+        filename, width, height, seed_value, modelname, counter,
+        time_format, sampler_name, steps, cfg, scheduler, denoise, clip_skip)
+    templated_path = _mika_saver_make_pathname(
+        path, width, height, seed_value, modelname, counter,
+        time_format, sampler_name, steps, cfg, scheduler, denoise, clip_skip)
+
+    if mode == "pc":
+        rel = _mika_saver_pc_relative(templated_path)
+        output_path = os.path.join(
+            folder_paths.get_output_directory(), rel) if rel else \
+            folder_paths.get_output_directory()
+    else:
+        expanded = os.path.expandvars(
+            os.path.expanduser(templated_path.strip()))
+        if not expanded:
+            output_path = folder_paths.get_output_directory()
+        elif os.path.isabs(expanded):
+            output_path = os.path.normpath(expanded)
+        else:
+            output_path = os.path.join(
+                folder_paths.get_output_directory(), expanded)
+    os.makedirs(output_path, exist_ok=True)
+
+    if mode == "pc" and not _mika_coerce_bool(save_on_server, True):
+        output_path = folder_paths.get_temp_directory()
+        os.makedirs(output_path, exist_ok=True)
+
+    hashes, chain, modelhash = _mika_saver_collect_hashes(
+        modelname, positive, negative, additional)
+    base = _mika_saver_ckpt_base(modelname)
+    clip_str = f", Clip skip: {abs(clip_skip)}" if clip_skip != 0 else ""
+    hash_str = f", Model hash: {modelhash}" if modelhash else ""
+    res_str = f", Hashes: {json.dumps(hashes, separators=(',', ':'))}" \
+        if hashes else ""
+    a111 = (f"{positive.strip()}\nNegative prompt: {negative.strip()}\n"
+            f"Steps: {steps}, Sampler: "
+            f"{_mika_saver_civitai_sampler(sampler_name.replace('_gpu', ''), scheduler)}, "
+            f"Schedule type: {_mika_saver_a1111_schedule(scheduler)}, "
+            f"CFG scale: {cfg}, Seed: {seed_value}, "
+            f"Size: {width}x{height}{clip_str}{hash_str}, "
+            f"Model: {base}{res_str}, Version: ComfyUI")
+
+    saved, array = [], (255. * images.cpu().numpy())
+    array = np.clip(array, 0, 255).astype(np.uint8)
+    for img_arr in array:
+        img = Image.fromarray(img_arr)
+        if extension in ("jpg", "jpeg"):
+            img = img.convert("RGB")
+        prefix = _mika_saver_unique_filename(output_path, fname, extension)
+        name = f"{prefix}.{extension}"
+        full = os.path.join(output_path, name)
+        _mika_saver_save_image(img, full, extension, quality, lossless,
+                               optimize, a111, prompt, extra_pnginfo, embed)
+        if save_json_flag:
+            try:
+                with open(os.path.join(output_path, prefix + ".json"),
+                          "w") as f:
+                    json.dump((extra_pnginfo or {}).get("workflow"), f)
+            except Exception:
+                pass
+        saved.append(name)
+
+    hashes_out = ",".join(
+        f"{os.path.splitext(n.split(':')[-1])[0] + ':' if n else ''}"
+        f"{h}{':' + str(w) if w is not None else ''}"
+        for n, (_, w, h) in chain.items())
+
+    out_root = os.path.realpath(folder_paths.get_output_directory())
+    if _mika_saver_is_inside(output_path, out_root):
+        subfolder = os.path.relpath(os.path.realpath(output_path), out_root)
+        if subfolder == ".":
+            subfolder = ""
+        ui_type = "output"
+        ui_images = [{"filename": n, "subfolder": subfolder,
+                      "type": ui_type} for n in saved]
+    else:
+        tmp = folder_paths.get_temp_directory()
+        ui_images = []
+        for n in saved:
+            try:
+                with Image.open(os.path.join(output_path, n)) as im:
+                    prev = f"mika_local_{hashlib.sha256(n.encode()).hexdigest()[:8]}.png"
+                    im.save(os.path.join(tmp, prev), "PNG")
+                    ui_images.append({"filename": prev, "subfolder": "",
+                                      "type": "temp"})
+            except OSError:
+                pass
+    return {"ui": {"images": ui_images}, "result": (hashes_out,)}
+
+
+class ImageSaverLocalMika:
+    """
+    Image Saver Local-Mika: clon del Image Saver de Mira para guardar en
+    local. Acepta rutas absolutas (C:/Fotos/...) fuera de output/; si path
+    es relativo, guarda bajo output/ igual que el original.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return _mika_saver_inputs()
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("hashes",)
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/image"
+    OUTPUT_NODE = True
+
+    def execute(self, images, filename, path, extension, prompt=None,
+                extra_pnginfo=None, **kwargs):
+        return _mika_saver_run(
+            images, filename, path, extension, mode="local",
+            prompt=prompt, extra_pnginfo=extra_pnginfo, **kwargs)
+
+
+class ImageSaverPcMika:
+    """
+    Image Saver PC-Mika: clon para Colab/servidor remoto. Guarda copia en
+    el servidor y la extension web escribe cada imagen en la carpeta de tu
+    PC que elijas en el navegador (te pedira permiso), recreando como
+    subcarpetas la ruta indicada en path (C:/Fotos/... -> Fotos/...).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return _mika_saver_inputs(
+            {"save_on_server": ("BOOLEAN", {"default": True})})
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("hashes",)
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/image"
+    OUTPUT_NODE = True
+
+    def execute(self, images, filename, path, extension, prompt=None,
+                extra_pnginfo=None, **kwargs):
+        return _mika_saver_run(
+            images, filename, path, extension, mode="pc",
+            prompt=prompt, extra_pnginfo=extra_pnginfo, **kwargs)
+
+
+# ======================================================================
 # MAPPINGS
 # ======================================================================
 
@@ -7502,6 +7975,8 @@ NODE_CLASS_MAPPINGS = {
     "ListPickMika": ListPickMika,
     "OptionListMika": OptionListMika,
     "TextListMika": TextListMika,
+    "ImageSaverLocalMika": ImageSaverLocalMika,
+    "ImageSaverPcMika": ImageSaverPcMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -7577,4 +8052,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ListPickMika": "List Pick-Mika",
     "OptionListMika": "Inspector-Mika",
     "TextListMika": "Text List-Mika",
+    "ImageSaverLocalMika": "Image Saver Local-Mika",
+    "ImageSaverPcMika": "Image Saver PC-Mika",
 }

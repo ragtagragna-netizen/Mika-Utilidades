@@ -39,13 +39,14 @@ app.registerExtension({
 			node.widgets?.find((w) => String(w?.name ?? "").trim() === "datos");
 
 		function readData(node) {
-			let rows = 4, cols = 2, cells = [];
+			let rows = 4, cols = 2, cells = [], names = [];
 			try {
 				const d = JSON.parse(String(datosWidget(node)?.value ?? ""));
 				if (d && typeof d === "object") {
 					if (Number.isFinite(+d.rows)) rows = Math.max(1, Math.min(MAX_ROWS, +d.rows | 0));
 					if (Number.isFinite(+d.cols)) cols = Math.max(1, Math.min(MAX_COLS, +d.cols | 0));
 					if (Array.isArray(d.cells)) cells = d.cells;
+					if (Array.isArray(d.names)) names = d.names;
 				}
 			} catch (e) { /* datos corruptos: grilla vacía */ }
 			const grid = [];
@@ -58,13 +59,17 @@ app.registerExtension({
 				}
 				grid.push(row);
 			}
-			return { rows, cols, cells: grid };
+			const colNames = [];
+			for (let c = 0; c < cols; c++) {
+				colNames.push(String(names[c] ?? colName(c)));
+			}
+			return { rows, cols, cells: grid, names: colNames };
 		}
 
 		function writeData(node, data) {
 			const w = datosWidget(node);
 			if (!w) return;
-			w.value = JSON.stringify({ rows: data.rows, cols: data.cols, cells: data.cells });
+			w.value = JSON.stringify({ rows: data.rows, cols: data.cols, cells: data.cells, names: data.names });
 			w.callback?.(w.value);
 		}
 
@@ -188,14 +193,46 @@ app.registerExtension({
 			corner.style.width = "24px";
 			corner.style.flexShrink = "0";
 			head.appendChild(corner);
+			// Cabeceras editables: doble clic para renombrar la columna
+			// (A/B/C → el nombre que quieras). Enter o salir guarda;
+			// vacío devuelve la letra por defecto.
 			for (let c = 0; c < data.cols; c++) {
-				const lab = document.createElement("div");
+				const lab = document.createElement("input");
+				lab.type = "text";
+				lab.value = data.names[c];
+				lab.title = "Doble clic para renombrar la columna";
+				lab.readOnly = true;
 				lab.style.flex = "1 1 0%";
 				lab.style.minWidth = "0";
-				lab.textContent = colName(c);
+				lab.style.boxSizing = "border-box";
+				lab.style.border = "none";
+				lab.style.background = "transparent";
 				styleHead(lab);
 				lab.style.textAlign = "center";
-				lab.style.lineHeight = HEADER_H + "px";
+				lab.style.height = HEADER_H + "px";
+				lab.style.pointerEvents = "auto";
+				lab.style.cursor = "default";
+				lab.addEventListener("dblclick", () => {
+					lab.readOnly = false;
+					lab.style.background = "var(--comfy-input-bg, #222)";
+					lab.style.border = "1px solid var(--border-color, #444)";
+					lab.focus();
+					lab.select();
+				});
+				const commit = () => {
+					const v = lab.value.trim() || colName(c);
+					data.names[c] = v;
+					lab.value = v;
+					lab.readOnly = true;
+					lab.style.background = "transparent";
+					lab.style.border = "none";
+					writeData(node, data);
+				};
+				lab.addEventListener("blur", commit);
+				lab.addEventListener("keydown", (e) => {
+					if (e.key === "Enter") { e.preventDefault(); lab.blur(); }
+					if (e.key === "Escape") { lab.value = data.names[c]; lab.blur(); }
+				});
 				head.appendChild(lab);
 			}
 			root.appendChild(head);
@@ -311,6 +348,7 @@ app.registerExtension({
 				}
 				while (data.cols < needC) {
 					for (const row of data.cells) row.push("");
+					data.names.push(colName(data.cols));
 					data.cols++;
 				}
 				lines.forEach((line, i) => {
@@ -343,11 +381,13 @@ app.registerExtension({
 				["+Col", "Agregar columna", () => {
 					if (data.cols >= MAX_COLS) return;
 					for (const row of data.cells) row.push("");
+					data.names.push(colName(data.cols));
 					data.cols++;
 				}],
 				["–Col", "Quitar última columna", () => {
 					if (data.cols <= 1) return;
 					for (const row of data.cells) row.pop();
+					data.names.pop();
 					data.cols--;
 				}],
 			]) {
@@ -378,6 +418,27 @@ app.registerExtension({
 			// (ancho mínimo = lo más pequeño posible, tipo nodo A).
 			// "shrink" (cargar workflow / copiar): solo encoge sin pisar
 			// un tamaño manual guardado por el usuario.
+			// Tras el encaje, iguala el hueco gris inferior al lateral
+			// midiéndolos en pantalla: ninguna constante (margen del
+			// wrapper, +38 del frontend, etc.) es fiable entre versiones
+			// del frontend, así que se corrige por medida directa.
+			const equalize = () => {
+				try {
+					const ds = app.canvas?.ds;
+					if (!ds || !node.size) return;
+					const s = ds.scale || 1;
+					const off = ds.offset || [0, 0];
+					const rect = root.getBoundingClientRect();
+					if (!rect.height || !rect.width) return;
+					const sideGap = rect.left - (node.pos[0] * s + off[0]);
+					const bottomGap = (node.pos[1] + node.size[1]) * s + off[1] - rect.bottom;
+					const delta = (bottomGap - sideGap) / s;
+					if (Math.abs(delta) > 0.5) {
+						node.setSize([node.size[0], Math.max(60, node.size[1] - delta)]);
+						relayout(node);
+					}
+				} catch (e) { /* no-op */ }
+			};
 			const refit = () => {
 				try {
 					const size = node.computeSize();
@@ -392,6 +453,7 @@ app.registerExtension({
 					}
 				} catch (e) { /* no-op */ }
 				relayout(node);
+				requestAnimationFrame(equalize);
 			};
 			requestAnimationFrame(refit);
 			setTimeout(refit, 400);

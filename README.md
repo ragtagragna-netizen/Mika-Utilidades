@@ -32,7 +32,7 @@ Sin dependencias extra: usa lo que ComfyUI ya trae. La traducción requiere
 | **Tag Remover-Mika** | Remueve tags de un prompt. |
 | **Tag Enchant-Mika** | Encanta un tag o palabra con sintaxis `(tag:peso)`: rango automático (`start`/`step`/`count` tan largo como quieras), salida simple (primer peso) + `prompt_list` (lista, ideal para XY plot) + `weights`. Si el tag no está, el prompt sale intacto. |
 | **Tag Swap List-Mika** | Cambia el tag seleccionado por una serie de tags: lista `repl_1..N` expandible manualmente con `replacement_count`, salida simple (primer reemplazo) + `prompt_list` (lista) + `replaced` (lista con los tags de reemplazo). |
-| **Tag Enchant List-Mika** | Variante sobre lista (un item por línea): sin expandir, cada línea sale encantada con su peso `start + i·step` + `weights` con los pesos usados. |
+| **Tag Enchant List-Mika** | Variante sobre lista (un item por línea): sin expandir, cada línea sale encantada con su peso (`incremental`: `start + i·step`; `fijo`: `start` en todas) + `weights` con los pesos usados. |
 | **Prompt Clean & Dedupe-Mika** | Normaliza separadores y quita duplicados. |
 | **Prompt Edit (Loop)-Mika** | Edita el prompt con memoria entre ejecuciones. |
 
