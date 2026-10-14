@@ -117,14 +117,30 @@ function isTransparent(c) {
     /^rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)$/.test(c);
 }
 
-// Lee el color/fondo ORIGINAL quitando un momento la clase que
-// transparenta el textarea. Sin esto se guardaba "transparent" y el
-// espejo quedaba con texto invisible (caja sólida).
+// Fondo REAL del textarea: si es transparente (otro addon como el del
+// Prompt Edit Loop lo transparenta por diseño), se sube por los padres
+// hasta el primer fondo sólido. Sin espejo con fondo nunca hay caja
+// ciega: como último recurso, el oscuro de ComfyUI.
+function resolvedBg(ta) {
+  try {
+    let el = ta;
+    for (let i = 0; i < 4 && el; i++) {
+      const bg = getComputedStyle(el).backgroundColor;
+      if (!isTransparent(bg)) return bg;
+      el = el.parentElement;
+    }
+  } catch (e) { /* no-op */ }
+  return "rgb(22, 27, 34)";
+}
+
+// Lee el color ORIGINAL quitando un momento la clase que transparenta
+// el textarea. Sin esto se guardaba "transparent" y el espejo quedaba
+// con texto invisible (caja sólida).
 function readOriginal(ta) {
   const had = ta.classList.contains("mika-hl-ta");
   if (had) ta.classList.remove("mika-hl-ta");
   const cs = getComputedStyle(ta);
-  const out = { color: cs.color, bg: cs.backgroundColor };
+  const out = { color: cs.color };
   if (had && enabled) ta.classList.add("mika-hl-ta");
   return out;
 }
@@ -133,7 +149,9 @@ function copyStyle(ta, bd) {
   if (!ta._mikaHlColor || isTransparent(ta._mikaHlColor)) {
     const o = readOriginal(ta);
     if (!isTransparent(o.color)) ta._mikaHlColor = o.color;
-    if (!isTransparent(o.bg)) ta._mikaHlBg = o.bg;
+  }
+  if (!ta._mikaHlBg || isTransparent(ta._mikaHlBg)) {
+    ta._mikaHlBg = resolvedBg(ta);
   }
   const cs = getComputedStyle(ta);
   const props = [
@@ -327,14 +345,24 @@ function attach(ta) {
         bd.scrollTop = ta.scrollTop;
         bd.scrollLeft = ta.scrollLeft;
       } catch (e) { /* no-op */ }
-      // Autocuración: si el espejo no quedó visible o su texto no es
-      // legible, volver al texto nativo antes de cegar la caja.
+      // Autocuración: si el espejo no quedó visible, sin texto legible
+      // o descalzado de la caja (típico al abrir: layout aún sin asentar
+      // + fondo transparentado por otro addon), volver al texto nativo
+      // antes de cegar la caja.
       try {
         const bcs = getComputedStyle(bd);
         const ics = getComputedStyle(inner);
+        let aligned = false;
+        try {
+          const tr = ta.getBoundingClientRect();
+          const br = bd.getBoundingClientRect();
+          aligned = br.width > 0 && br.height > 0 &&
+            Math.abs(br.width - tr.width) <= 4 &&
+            Math.abs(br.height - tr.height) <= 4;
+        } catch (e) { aligned = false; }
         if (
           bcs.display === "none" || bcs.visibility === "hidden" ||
-          !inner.textContent || isTransparent(ics.color)
+          !inner.textContent || isTransparent(ics.color) || !aligned
         ) {
           blockHeal();
           return;
@@ -356,8 +384,9 @@ function attach(ta) {
       }
       if (!ensureBackdrop()) { hide(); return; }
       if (blocked) {
-        // Reintentar solo cuando el contenido cambie de verdad.
-        if (contentSig() !== lastContent) {
+        // Reintentar ante CUALQUIER cambio (contenido, scroll, tamaño,
+        // layout): al abrir, el layout se asienta sin que cambie el texto.
+        if (sig() !== lastSig) {
           blocked = false;
           update();
         } else {
@@ -415,12 +444,29 @@ function widgetEl(w) {
 
 function scanNode(node) {
   if (!isMikaNode(node)) return;
+  ensureDetachOnRemove(node);
   for (const w of node.widgets ?? []) {
     const t = w?.type;
     if (t !== "customtext" && t !== "STRING" && t !== "text") continue;
     const el = widgetEl(w);
     if (el) attach(el);
   }
+}
+
+// Al borrar el nodo, suelta espejos/observadores/listeners de sus cajas
+// (evita ResizeObserver huérfanos que retienen los textareas).
+function ensureDetachOnRemove(node) {
+  if (!node || node._mikaHlDetachHook) return;
+  node._mikaHlDetachHook = true;
+  const prev = node.onRemoved;
+  node.onRemoved = function () {
+    try {
+      for (const w of this.widgets ?? []) {
+        try { widgetEl(w)?._mikaHlDetach?.(); } catch (e) { /* no-op */ }
+      }
+    } catch (e) { /* no-op */ }
+    return prev ? prev.apply(this, arguments) : undefined;
+  };
 }
 
 function scanAll() {

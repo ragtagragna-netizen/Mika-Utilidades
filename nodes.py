@@ -613,22 +613,30 @@ class SwitchMika:
     FUNCTION = "switch"
     CATEGORY = "Mika Utilidades/utils"
 
+    @staticmethod
+    def _slot_index(key):
+        try:
+            return int(str(key).split("_", 1)[1])
+        except (IndexError, ValueError):
+            return 0
+
     def switch(self, number_of_inputs, selection_mode, selected_index=None, opt_seed=0, **kwargs):
+        ordered = sorted(kwargs, key=self._slot_index)
         if selection_mode == "by index":
             if selected_index is None:
                 return (None,)
             return (kwargs.get(f"input_{selected_index}"),)
 
         if selection_mode == "by random":
-            inputs = [kwargs[k] for k in sorted(kwargs) if kwargs[k] is not None]
+            inputs = [kwargs[k] for k in ordered if kwargs[k] is not None]
             if not inputs:
                 return (None,)
-            if opt_seed:
-                random_module.seed(opt_seed)
-            return (inputs[random_module.randint(0, len(inputs) - 1)],)
+            # RNG local con seed: no contamina el global de otros nodos.
+            rng = random_module.Random(opt_seed) if opt_seed else random_module
+            return (inputs[rng.randint(0, len(inputs) - 1)],)
 
-        # automatic: primer input no nulo.
-        for k in sorted(kwargs):
+        # automatic: primer input no nulo (en orden numérico de slot).
+        for k in ordered:
             if kwargs[k] is not None:
                 return (kwargs[k],)
         return (None,)
@@ -1077,6 +1085,9 @@ if PromptServer is not None and PromptServer.instance is not None:
         if not folder or workflow is None:
             return web.json_response({"status": "error", "message": "Faltan carpeta o workflow"}, status=400)
 
+        if mode not in ("ask", "overwrite", "copy"):
+            return web.json_response({"status": "error", "message": "Modo inválido"}, status=400)
+
         name = _mika_sanitize_name(data.get("name"))
         folder = os.path.abspath(os.path.expanduser(os.path.expandvars(folder)))
         os.makedirs(folder, exist_ok=True)
@@ -1091,9 +1102,6 @@ if PromptServer is not None and PromptServer.instance is not None:
                     i += 1
                 name = f"{name} ({i})"
                 path = os.path.join(folder, name + ".json")
-
-        if mode not in ("ask", "overwrite", "copy"):
-            return web.json_response({"status": "error", "message": "Modo inválido"}, status=400)
 
         import json
         with open(path, "w", encoding="utf-8") as f:
@@ -1610,8 +1618,12 @@ class LoadImageMika:
 
         image = i
 
-        if not RGBA:
-            image = image.convert('RGB')
+        if RGBA:
+            # RGBA exige 4 canales: L/P daban tensores 2D sin canal y
+            # LA daba 2 canales, rompiendo el contrato IMAGE [B,H,W,C].
+            image = i.convert("RGBA")
+        else:
+            image = i.convert("RGB")
 
         image = np.array(image).astype(np.float32) / 255.0
         image = torch.from_numpy(image)[None,]
@@ -1619,8 +1631,11 @@ class LoadImageMika:
         if 'A' in i.getbands():
             mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
             mask = 1. - torch.from_numpy(mask)
+            # La máscara queda batcheada: (1, H, W), igual que NameMika.
+            mask = mask.unsqueeze(0)
         else:
-            mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
+            w, h = i.size
+            mask = torch.zeros((1, h, w), dtype=torch.float32)
 
         if filename_text_extension:
             filename = os.path.basename(source_path)
@@ -1843,8 +1858,12 @@ class LoadImageDirMika:
 
         image = i
 
-        if not RGBA:
-            image = image.convert('RGB')
+        if RGBA:
+            # RGBA exige 4 canales: L/P daban tensores 2D sin canal y
+            # LA daba 2 canales, rompiendo el contrato IMAGE [B,H,W,C].
+            image = i.convert("RGBA")
+        else:
+            image = i.convert("RGB")
 
         image = np.array(image).astype(np.float32) / 255.0
         image = torch.from_numpy(image)[None,]
@@ -1852,8 +1871,11 @@ class LoadImageDirMika:
         if 'A' in i.getbands():
             mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
             mask = 1. - torch.from_numpy(mask)
+            # La máscara queda batcheada: (1, H, W), igual que NameMika.
+            mask = mask.unsqueeze(0)
         else:
-            mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
+            w, h = i.size
+            mask = torch.zeros((1, h, w), dtype=torch.float32)
 
         if filename_text_extension:
             filename = os.path.basename(filename) if filename else ""
@@ -2107,6 +2129,10 @@ class TagIfMika:
         for i in range(1, MAX_TAGIF_SLOTS + 1):
             find_val = kwargs.get(f"find_{i}", "")
             out_val = kwargs.get(f"output_{i}", "")
+            # Los slots linkeados pueden entregar None (o no-strings):
+            # normaliza antes de comparar/unir.
+            find_val = str(find_val) if find_val is not None else ""
+            out_val = str(out_val) if out_val is not None else ""
 
             matched = bool(find_val.strip()) and (self.parse_smart_tag(find_val) in tag_list)
             outputs.append(out_val if matched else "")
@@ -2532,6 +2558,47 @@ class TagSwapListMika:
 
         prompts = [build(r) for r in replacements]
         return (prompts[0], prompts, replacements)
+
+
+class TagSwapOrganizerMika:
+    """
+    Tag Editor-Mika: solo edición, sin entradas ni salidas.
+
+    Organiza reemplazos sobre un nodo de texto (ej. Prompt Edit
+    (Loop)-Mika), detectado por su título. Toda la configuración vive
+    en el nodo y se edita en la ventana flotante del botón "Configurar":
+    - destino (título del nodo) + sensible a mayúsculas,
+    - replaces: pares find/replace (find admite varios tags por coma),
+    - removes: tags a eliminar,
+    - adds: tags a añadir al final si aún no están.
+    Cada entrada tiene su propio botón de acción con el cambio en el
+    nombre ("red shirt → red shorts", "− blue jeans", "+ hat"): aplica
+    SOLO esa entrada, sin cables ni cola de ejecución.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # Orden estable: target_title/datos/case_sensitive ocultos via
+        # JS. Sin slots: el nodo no se ejecuta por cables, solo edita.
+        return {
+            "required": {},
+            "optional": {
+                "target_title": ("STRING", {"default": "", "multiline": False}),
+                "datos": ("STRING", {
+                    "default": '{"replaces": [], "removes": [], "adds": []}',
+                    "multiline": True,
+                }),
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "doit"
+    OUTPUT_NODE = True
+    CATEGORY = "Mika Utilidades/tags"
+
+    def doit(self, target_title="", datos="", case_sensitive=False):
+        return ()
 
 
 class TagEnchantListMika:
@@ -3862,7 +3929,10 @@ class PromptPresetSelectorMika:
                 "selection_mode": (["Manual", "Sequential", "Sequential (continue)", "Random"], {"default": "Manual"}),
                 "preset_index": ("INT", {"default": 0, "min": 0, "max": 9999, "step": 1}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-            }
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
         }
 
     RETURN_TYPES = ("STRING", "STRING", "STRING")
@@ -4076,7 +4146,7 @@ class PromptPresetSelectorMika:
 
     # ---------- ejecución ----------
 
-    def select_preset(self, preset_file, absolute_path, keyword, keyword_mode, selection_mode, preset_index, seed):
+    def select_preset(self, preset_file, absolute_path, keyword, keyword_mode, selection_mode, preset_index, seed, unique_id=None):
         # absolute_path puede ser un archivo suelto o una carpeta externa.
         abs_path = (absolute_path or "").strip().strip('"')
 
@@ -4118,7 +4188,9 @@ class PromptPresetSelectorMika:
             print(f"[Prompt Preset Selector-Mika] Aviso: {warning}")
             return ("", preset_list, warning)
 
-        state_key = f"{abs_path}|{file_to_load}_{keyword}_{keyword_mode}"
+        # Clave por NODO (unique_id): sin esto dos Selectors con el mismo
+        # preset avanzaban el mismo contador (cross-talk).
+        state_key = f"{unique_id}|{abs_path}|{file_to_load}_{keyword}_{keyword_mode}"
 
         if selection_mode in ("Manual", "Sequential"):
             selected_index = preset_index % len(filtered_items)
@@ -4127,6 +4199,9 @@ class PromptPresetSelectorMika:
 
         elif selection_mode == "Sequential (continue)":
             if state_key not in self._continue_state:
+                if len(self._continue_state) > 256:
+                    # Tope rudimentario: descarta la entrada más vieja.
+                    self._continue_state.pop(next(iter(self._continue_state)))
                 self._continue_state[state_key] = preset_index % len(filtered_items)
 
             selected_index = self._continue_state[state_key]
@@ -4965,13 +5040,13 @@ class TextSaveMika:
             if os.path.isfile(filepath):
                 with open(filepath, "r", encoding="utf-8") as f:
                     existing = f.read()
-            content = existing + sep + text
+            content = existing + sep + text if existing and text else existing + text
         elif write_mode == "prepend":
             existing = ""
             if os.path.isfile(filepath):
                 with open(filepath, "r", encoding="utf-8") as f:
                     existing = f.read()
-            content = text + sep + existing
+            content = text + sep + existing if text and existing else text + existing
         else:
             content = text
 
@@ -5602,7 +5677,8 @@ class FiltrosMika:
         def _max_count(genero):
             mejor = 0
             for t in tag_list:
-                m = re.fullmatch(r"(\d+)\+?" + genero + r"s?\+?", t)
+                # Tolera "2girls", "2_girls" y "2 girls" (normalizado o no).
+                m = re.fullmatch(r"(\d+)\+?[\s_]*" + genero + r"s?\+?", t)
                 if m:
                     mejor = max(mejor, int(m.group(1)))
             return mejor
@@ -6220,8 +6296,17 @@ class TextCleanOrganizeMika:
 
         if _mika_coerce_bool(agrupar_similares, False):
             orden = PromptReorganizeMika._agrupar_similares([seg for seg, _ in items])
-            por_texto = {seg: i for i, (seg, _) in enumerate(items)}
-            items = [items[por_texto[seg]] for seg in orden if seg in por_texto]
+            # Colas por texto (no índice único): con repetidos conservados
+            # un dict colapsaba todas las ocurrencias en una sola.
+            por_texto = {}
+            for i, (seg, _) in enumerate(items):
+                por_texto.setdefault(seg, []).append(i)
+            reordenados = []
+            for seg in orden:
+                cola = por_texto.get(seg)
+                if cola:
+                    reordenados.append(items[cola.pop(0)])
+            items = reordenados
 
         return items, eliminados
 
@@ -6415,8 +6500,15 @@ class TextCleanerCompareMika:
 
         if _mika_coerce_bool(scalar(agrupar_similares, False), False):
             orden = PromptReorganizeMika._agrupar_similares([s for s, _ in items])
-            por_texto = {s: i for i, (s, _) in enumerate(items)}
-            items = [items[por_texto[s]] for s in orden if s in por_texto]
+            por_texto = {}
+            for i, (s, _) in enumerate(items):
+                por_texto.setdefault(s, []).append(i)
+            reordenados = []
+            for s in orden:
+                cola = por_texto.get(s)
+                if cola:
+                    reordenados.append(items[cola.pop(0)])
+            items = reordenados
 
         reconstruido = tco._reconstruir(items)
 
@@ -6434,11 +6526,6 @@ class TextCleanerCompareMika:
 # ======================================================================
 # TRADUCCIÓN (Smart Prompt Translate, portado de kkTranslator)
 # ======================================================================
-
-try:
-    from fast_langdetect import detect as _mika_fastdetect
-except Exception:
-    _mika_fastdetect = None
 
 _MIKA_MARIAN_DEFAULTS = [
     "opus-mt-es-en", "opus-mt-zh-en", "opus-mt-rn-en", "opus-mt-taw-en",
@@ -6463,7 +6550,8 @@ def _mika_get_marian_list():
 
 
 def _mika_translate_raw(model, tokenizer, text):
-    translated = model.generate(**tokenizer(text, return_tensors="pt", padding=True))
+    with torch.inference_mode():
+        translated = model.generate(**tokenizer(text, return_tensors="pt", padding=True))
     result = ""
     for t in translated:
         result += tokenizer.decode(t, skip_special_tokens=True)
@@ -6471,6 +6559,51 @@ def _mika_translate_raw(model, tokenizer, text):
     if result.endswith(".") and not text.strip().endswith("."):
         result = result[:-1]
     return result
+
+
+def _mika_translate_mixed(model, tokenizer, prompt_text, use_lang_detect=True, min_words=3):
+    """Traduce solo los segmentos en español, coma a coma; el inglés y
+    los tags conocidos quedan intactos (con sus espacios originales).
+    Devuelve (texto, debug_lines)."""
+    segments = prompt_text.split(",")
+    result_parts = []
+    debug_lines = []
+
+    for seg in segments:
+        stripped = seg.strip()
+        if not stripped:
+            result_parts.append(seg)
+            continue
+
+        if stripped.lower() in _MIKA_SD_TAGS:
+            result_parts.append(seg)
+            debug_lines.append(f"INTACTO   [tag SD]: '{stripped}'")
+            continue
+
+        if stripped.startswith('"') and stripped.endswith('"') and len(stripped) >= 2:
+            result_parts.append(seg)
+            debug_lines.append(f"INTACTO   [entre comillas]: '{stripped}'")
+            continue
+
+        if use_lang_detect:
+            should_translate = _mika_is_spanish(stripped)
+            reason = "es=español" if should_translate else "no=español"
+        else:
+            should_translate = len(stripped.split()) > min_words
+            reason = f">{min_words}pal" if should_translate else f"<={min_words}pal"
+
+        if should_translate:
+            translated = _mika_translate(model, tokenizer, stripped)
+            leading_space = " " if seg.startswith(" ") else ""
+            trailing_space = " " if seg.endswith(" ") else ""
+            result_parts.append(f"{leading_space}{translated}{trailing_space}")
+            debug_lines.append(f"TRADUCIDO [{reason}]: '{stripped}' -> '{translated}'")
+            print(f"[MikaTranslate] '{stripped}' -> '{translated}'")
+        else:
+            result_parts.append(seg)
+            debug_lines.append(f"INTACTO   [{reason}]: '{stripped}'")
+
+    return (",".join(result_parts), "\n".join(debug_lines))
 
 
 def _mika_translate(model, tokenizer, text):
@@ -6538,6 +6671,22 @@ _MIKA_ES_WORDS = {
     "corriendo","saltando","volando","nadando","bailando","cantando",
 }
 
+# Señales inglesas (función + adjetivos/colores típicos de prompts). El
+# inglés sin señales se conserva por defecto; esto solo decide empates
+# a favor de no traducir. Sin solape intencionado con el set español
+# (las de 1 letra no puntúan en ningún lado).
+_MIKA_EN_WORDS = {
+    "the","of","and","or","with","without","from","for","in","on","at",
+    "to","an","is","are","was","were","be","been","being",
+    "this","that","these","those","it","its","he","she","him","her",
+    "his","hers","they","them","their","theirs","we","our","you","your",
+    "yours","as","by","do","does","did","has","have","had","will",
+    "would","can","could","should","very","more","most",
+    "young","old","little","big","small","long","short","tall",
+    "white","black","red","blue","green","yellow","pink","purple",
+    "brown","gray","grey","blonde",
+}
+
 _MIKA_SD_TAGS = {
     "masterpiece","best quality","high quality","ultra detailed","ultra-detailed",
     "highly detailed","extremely detailed","intricate details","professional",
@@ -6553,34 +6702,24 @@ _MIKA_SD_TAGS = {
 
 
 def _mika_is_spanish(text, tokenizer=None):
-    """Detecta español: primero por tokenizer (ratio de <unk>), luego
-    fast-langdetect si está instalado, al final por lista de palabras."""
-    if tokenizer is not None:
-        try:
-            tokens = tokenizer.tokenize(text)
-            if not tokens:
-                return False
-            unk_token = tokenizer.unk_token or "<unk>"
-            unk_ratio = sum(1 for t in tokens if t == unk_token) / len(tokens)
-            return unk_ratio < 0.30
-        except Exception:
-            pass
-
-    if _mika_fastdetect is not None:
-        try:
-            result = _mika_fastdetect(text.lower())
-            if isinstance(result, list):
-                lang = result[0].get("lang", "") if result else ""
-            elif isinstance(result, dict):
-                lang = result.get("lang", "")
-            else:
-                lang = str(result)
-            return lang == "es"
-        except Exception:
-            pass
-
-    words = text.lower().strip().split()
-    return any(w in _MIKA_ES_WORDS for w in words)
+    """Detecta español por señales fuertes, en orden:
+    1. Diacríticos (áéíóúüñ¿¡): el inglés no los usa.
+    2. Duelo de palabras ES vs EN (de 2+ letras).
+    Sin señales o en empate se devuelve False: lo desconocido se
+    conserva intacto para no deformar inglés con traducciones.
+    El ratio <unk> del tokenizer NO sirve como señal: el vocabulario
+    Marian cubre inglés y clasificaba todo como español."""
+    t = (text or "").lower()
+    if not t.strip():
+        return False
+    if re.search(r"[áéíóúüñ¿¡]", t):
+        return True
+    words = re.findall(r"[^\W\d_]+", t)
+    es = sum(1 for w in words if len(w) > 1 and w in _MIKA_ES_WORDS)
+    en = sum(1 for w in words if len(w) > 1 and w in _MIKA_EN_WORDS)
+    if es == 0 and en == 0:
+        return False
+    return es > en
 
 
 _MIKA_MARIAN_CACHE = {}
@@ -6606,6 +6745,9 @@ def _mika_load_marian(checkpoint):
         MarianMTModel.from_pretrained(translate_path),
         MarianTokenizer.from_pretrained(translate_path),
     )
+    # Solo inferencia: sin eval() el dropout sigue activo y la misma
+    # entrada traduce distinto entre ejecuciones.
+    pair[0].eval()
     _MIKA_MARIAN_CACHE[checkpoint] = pair
     return pair
 
@@ -6673,51 +6815,13 @@ class SmartPromptTranslate:
             model, tokenizer = _mika_load_marian(checkpoint)
 
         use_lang_detect = (modo == "detectar idioma")
-
-        segments = prompt_text.split(",")
-        result_parts = []
-        debug_lines = []
-
-        for seg in segments:
-            stripped = seg.strip()
-            if not stripped:
-                result_parts.append(seg)
-                continue
-
-            if stripped.lower() in _MIKA_SD_TAGS:
-                result_parts.append(seg)
-                debug_lines.append(f"INTACTO   [tag SD]: '{stripped}'")
-                continue
-
-            if stripped.startswith('"') and stripped.endswith('"') and len(stripped) >= 2:
-                result_parts.append(seg)
-                debug_lines.append(f"INTACTO   [entre comillas]: '{stripped}'")
-                continue
-
-            if use_lang_detect:
-                should_translate = _mika_is_spanish(stripped, tokenizer)
-                reason = "es=español" if should_translate else "no=español"
-            else:
-                should_translate = len(stripped.split()) > min_words
-                reason = f">{min_words}pal" if should_translate else f"<={min_words}pal"
-
-            if should_translate:
-                translated = _mika_translate(model, tokenizer, stripped)
-                leading_space = " " if seg.startswith(" ") else ""
-                trailing_space = " " if seg.endswith(" ") else ""
-                result_parts.append(f"{leading_space}{translated}{trailing_space}")
-                debug_lines.append(f"TRADUCIDO [{reason}]: '{stripped}' -> '{translated}'")
-                print(f"[SmartTranslate] '{stripped}' -> '{translated}'")
-            else:
-                result_parts.append(seg)
-                debug_lines.append(f"INTACTO   [{reason}]: '{stripped}'")
-
-        return (",".join(result_parts), "\n".join(debug_lines))
+        return _mika_translate_mixed(model, tokenizer, prompt_text, use_lang_detect, min_words)
 
 
 class PromptTranslateToText:
-    """Traduce el texto completo al inglés. El modelo MarianMT se elige con
-    `checkpoint` (cacheado); si hay model/tokenizer conectados, se usan."""
+    """Traduce texto al inglés. Con `solo_español` activo traduce solo los
+    segmentos en español (coma a coma) y conserva el inglés intacto para
+    no deformar prompts; apagado traduce todo como antes."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -6730,6 +6834,7 @@ class PromptTranslateToText:
                 "prompt_text": ("STRING", {"forceInput": True}),
                 "model": ("MODEL",),
                 "tokenizer": ("TOKENIZER",),
+                "solo_español": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -6737,12 +6842,15 @@ class PromptTranslateToText:
     FUNCTION = "run"
     CATEGORY = "Mika Utilidades/translate"
 
-    def run(self, checkpoint, prompt_text="", model=None, tokenizer=None):
+    def run(self, checkpoint, prompt_text="", model=None, tokenizer=None, solo_español=False):
         if not prompt_text or not prompt_text.strip():
             return ("",)
         if model is None or tokenizer is None:
             model, tokenizer = _mika_load_marian(checkpoint)
-        translated = model.generate(**tokenizer(prompt_text, return_tensors="pt", padding=True))
+        if _mika_coerce_bool(solo_español, False):
+            return (_mika_translate_mixed(model, tokenizer, prompt_text)[0],)
+        with torch.inference_mode():
+            translated = model.generate(**tokenizer(prompt_text, return_tensors="pt", padding=True))
         text = ""
         for t in translated:
             text += tokenizer.decode(t, skip_special_tokens=True)
@@ -7095,13 +7203,10 @@ class SinglePlotRunnerMika:
         for v in vals:
             _mika_plot_check(target, v)
         labels = [f"{target}={v}" for v in raw] or [target]
-        if len(vals) == 0:
-            self.OUTPUT_IS_LIST = [True, True]
-            return ([], labels)
         if len(vals) == 1:
-            self.OUTPUT_IS_LIST = [False, True]
-            return (vals[0], labels)
-        self.OUTPUT_IS_LIST = [True, True]
+            # Siempre lista (OUTPUT_IS_LIST fijo): un solo valor sale
+            # como lista de uno, sin mutar el contrato por ejecución.
+            return ([vals[0]], labels)
         return (vals, labels)
 
 
@@ -7110,8 +7215,8 @@ class XYPlotRunnerMika:
     XY Plot Runner-Mika: listas de valores tipados para plots de pruebas.
     X e Y son salidas universales (*) con el producto cruzado aplanado en
     orden por filas: texto si eliges prompt, sampler si eliges sampler,
-    MODELO cargado si eliges model/checkpoint, etc. Un solo valor sale
-    como valor normal, varios salen como lista. Conéctalas DIRECTO al
+    MODELO cargado si eliges model/checkpoint, etc. Siempre salen como
+    lista (un solo valor = lista de uno). Conéctalas DIRECTO al
     KSampler externo sin loops: con listas de igual largo ejecuta un
     combo por vez. Cada eje puede quedar vacío (no se conecta y el
     KSampler usa su widget). row/col_labels van a XY Grid-Mika o
@@ -7166,19 +7271,9 @@ class XYPlotRunnerMika:
         row_labels = [f"{y_target}={v}" for v in y_vals] or [y_target]
         col_labels = [f"{x_target}={v}" for v in x_vals] or [x_target]
 
-        # Salidas x/y dinámicas: un solo valor sale como valor normal,
-        # varios salen como lista (combo).
-        def _dyn(vals):
-            if len(vals) == 0:
-                return [], True
-            if len(vals) == 1:
-                return vals[0], False
-            return vals, True
-
-        x_out, x_list = _dyn(x_flat)
-        y_out, y_list = _dyn(y_flat)
-        self.OUTPUT_IS_LIST = [x_list, y_list, True, True]
-        return (x_out, y_out, row_labels, col_labels)
+        # Salidas x/y siempre listas (OUTPUT_IS_LIST fijo): con un solo
+        # valor sale lista de uno; el KSampler ejecuta un combo por vez.
+        return (x_flat, y_flat, row_labels, col_labels)
 
 
 class ListPickMika:
@@ -7366,6 +7461,8 @@ class XYGridMika(grid_io.ComfyNode):
 
         # Celdas exactas: sobran se recortan, faltan se rellenan en blanco.
         need = rows * cols
+        if len(flats) != need:
+            print(f"[Mika] XY Grid: {len(flats)} imágenes para grid {rows}x{cols} ({need} celdas): se recorta/rellena para encajar.")
         flats = flats[:need]
         col_labels = col_labels[:cols] + [""] * (cols - len(col_labels))
         row_labels_s = row_labels_s[:rows] + [""] * (rows - len(row_labels_s))
@@ -7930,6 +8027,7 @@ NODE_CLASS_MAPPINGS = {
     "TagRemoverMika": TagRemoverMika,
     "TagEnchantMika": TagEnchantMika,
     "TagSwapListMika": TagSwapListMika,
+    "TagSwapOrganizerMika": TagSwapOrganizerMika,
     "TagEnchantListMika": TagEnchantListMika,
     "FloatOutputList": FloatOutputList,
     "ExecutionTimerConfig": ExecutionTimerConfig,
@@ -8007,6 +8105,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TagRemoverMika": "Tag Remover-Mika",
     "TagEnchantMika": "Tag Enchant-Mika",
     "TagSwapListMika": "Tag Swap List-Mika",
+    "TagSwapOrganizerMika": "Tag Editor-Mika",
     "TagEnchantListMika": "Tag Enchant List-Mika",
     "FloatOutputList": "Float OutputList",
     "ExecutionTimerConfig": "⏱ Tiempos de Ejecución (config)",

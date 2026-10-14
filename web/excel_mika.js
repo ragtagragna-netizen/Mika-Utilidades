@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { hookGhostSlots, parkGhostSlots, pruneWidgetlessInputs } from "./mika_ghost_slots.js";
 
 // -----------------------------------------------------------------------
 // Mika · Excel-Mika
@@ -478,7 +479,10 @@ app.registerExtension({
 			// porque el frontend solo auto-crece el nodo, nunca lo encoge.
 			const refit = () => {
 				try {
-					const h = fitHeight(data.rows);
+					// Filas en vivo (no las del closure): dos builds rápidos
+					// (+Fila, pegar) dejaban un refit tardío "exact" con
+					// filas viejas que encogía el nodo ya crecido.
+					const h = fitHeight(readData(node).rows);
 					const curH = node.size?.[1] ?? h;
 					const curW = node.size?.[0] ?? DEFAULT_W;
 					const newW = width != null ? width : curW;
@@ -498,6 +502,10 @@ app.registerExtension({
 		nodeType.prototype.onNodeCreated = function () {
 			const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
 			hideDatos(this);
+			// Sin slots fantasma: el widget `datos` oculto dejaba su slot
+			// enganchando cables junto al borde superior.
+			try { pruneWidgetlessInputs(this); } catch (e) { /* no-op */ }
+			try { hookGhostSlots(this); } catch (e) { /* no-op */ }
 			// Tamaño exacto desde el primer frame (evita saltos); el
 			// refit "exact" lo confirma con las columnas/filas reales.
 			// Va ANTES de clampHeight: sin widget aún, computeSize daría
@@ -515,6 +523,8 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (info) {
 			const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
 			clampHeight(this);
+			try { pruneWidgetlessInputs(this); } catch (e) { /* no-op */ }
+			try { parkGhostSlots(this); } catch (e) { /* no-op */ }
 			setTimeout(() => buildTable(this, "shrink"), 100);
 			return r;
 		};

@@ -183,6 +183,11 @@ app.registerExtension({
                             `width:${cellW}px;height:${cellH}px;box-sizing:border-box`;
                         item.onmouseenter = () => (item.style.background = "#3a3a3a");
                         item.onmouseleave = () => (item.style.background = "#2a2a2a");
+                        // Repintado virtual: reaplica la marca multiselección
+                        // (el Set sobrevive al scroll, la vista se recrea).
+                        if (selected.has(f)) {
+                            item.style.outline = "2px solid #4d9fff";
+                        }
 
                         if (isImage(f)) {
                             const img = document.createElement("img");
@@ -292,13 +297,14 @@ app.registerExtension({
                     if (btn) { btn.name = t; node.setDirtyCanvas(true, true); }
                 };
                 const folder = (folderWidget?.value ?? "").trim();
+                let poll = 0;
                 try {
                     // Lanza el precacheo en el servidor y muestra progreso.
                     const job = fetch(
                         "/mika/file_picker/cache?folder=" +
                         encodeURIComponent(folder)
                     );
-                    const poll = setInterval(async () => {
+                    poll = setInterval(async () => {
                         try {
                             const s = await (
                                 await fetch(
@@ -312,12 +318,12 @@ app.registerExtension({
                         } catch (_) { /* reintenta */ }
                     }, 500);
                     await job;
-                    clearInterval(poll);
                     setLabel("⚡ Precachear carpeta");
                 } catch (err) {
                     console.error("FilePickerMika:", err);
                     setLabel("⚡ Precachear carpeta (error)");
                 } finally {
+                    if (poll) clearInterval(poll);
                     caching = false;
                 }
             });

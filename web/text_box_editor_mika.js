@@ -393,6 +393,9 @@ function ensureGlobalListeners(flagName) {
   globalListenersReady = true;
 
   window.addEventListener("pointerdown", (e) => {
+    // Solo clics sobre el canvas: no tragar eventos de overlays DOM
+    // (file picker, editores, inputs) ni accionar iconos bajo ellos.
+    if (!(e.target instanceof Element) || !e.target.closest("canvas")) return;
     const hit = findIconAt(e, flagName);
     if (!hit) return;
     e.stopPropagation();

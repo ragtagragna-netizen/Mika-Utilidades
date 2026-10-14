@@ -331,6 +331,9 @@ function ensureGlobalListeners(flagName) {
   globalListenersReady = true;
 
   window.addEventListener("pointerdown", (e) => {
+    // Solo clics sobre el canvas: no tragar eventos de overlays DOM
+    // (file picker, editores, inputs) ni accionar iconos bajo ellos.
+    if (!(e.target instanceof Element) || !e.target.closest("canvas")) return;
     const hit = findIconAt(e, flagName);
     if (!hit) return;
     e.stopPropagation();
@@ -406,6 +409,21 @@ app.registerExtension({
       }
       this.size = [200, 60];
       if (typeof this.onResize === "function") this.onResize(this.size);
+      return r;
+    };
+
+    // Misma normalización al cargar workflows: si no, los visores
+    // cargados divergen de los nuevos (slot `text` presente/ausente).
+    const onConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function (info) {
+      const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+      try {
+        this.mikaTextWidget =
+          (this.widgets ?? []).find((w) => w.name === "text" || w.type === "customtext" || w.type === "STRING") ?? null;
+        if (this.mikaTextWidget) this.mikaTextWidget.options.socketless = true;
+        const textSlot = (this.inputs ?? []).findIndex((i) => i.name === "text");
+        if (textSlot >= 0) this.removeInput(textSlot);
+      } catch (e) { /* no-op */ }
       return r;
     };
 

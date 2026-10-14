@@ -190,6 +190,8 @@ function ensureListeners() {
   listenersReady = true;
 
   window.addEventListener("pointerdown", (e) => {
+    // Solo clics sobre el canvas: no tragar eventos de overlays DOM.
+    if (!(e.target instanceof Element) || !e.target.closest("canvas")) return;
     const node = findNodeAtIcon(e);
     if (!node) return;
     e.stopPropagation();

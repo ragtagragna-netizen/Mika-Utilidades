@@ -143,7 +143,15 @@ function setupHighlight(node, widget) {
     ta.addEventListener("scroll", () => { bd.scrollTop = ta.scrollTop; });
 
     if (typeof ResizeObserver !== "undefined") {
-      new ResizeObserver(() => alinear()).observe(ta);
+      var ro = new ResizeObserver(() => alinear());
+      try { ro.observe(ta); } catch (e) { /* no-op */ }
+      // Limpieza al borrar el nodo (evita observador huérfano que
+      // retiene ta/bd). La llama el onRemoved instalado en onNodeCreated.
+      ta._mikaHlCleanup = () => {
+        try { ro.disconnect(); } catch (e) { /* no-op */ }
+        try { bd.remove(); } catch (e) { /* no-op */ }
+      };
+      node._mikaHlCleanup = ta._mikaHlCleanup;
     }
 
     node._mikaHlRefresh = (nuevoTexto) => {
@@ -175,6 +183,14 @@ app.registerExtension({
       try {
         if (this.mikaEditWidget) setupHighlight(this, this.mikaEditWidget);
       } catch (e) { /* nunca impedir la creación del nodo */ }
+      if (!this._mikaHlRemoveHooked) {
+        this._mikaHlRemoveHooked = true;
+        const prevRemove = this.onRemoved;
+        this.onRemoved = function () {
+          try { this._mikaHlCleanup?.(); } catch (e) { /* no-op */ }
+          return prevRemove ? prevRemove.apply(this, arguments) : undefined;
+        };
+      }
       return r;
     };
 

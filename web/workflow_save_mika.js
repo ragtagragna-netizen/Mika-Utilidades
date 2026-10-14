@@ -323,9 +323,11 @@ function ensurePanel() {
     return input;
   };
 
-  let savedFolder = "workflows";
+  // Por defecto VACÍA (descarga local): "workflows" no existe en todos
+  // lados (ej. Collab) y rompía el flujo al abrir.
+  let savedFolder = "";
   try {
-    savedFolder = localStorage.getItem(STORAGE_KEY_FOLDER) || "workflows";
+    savedFolder = localStorage.getItem(STORAGE_KEY_FOLDER) || "";
   } catch (e) { /* no-op */ }
 
   folderInput = makeInput("Carpeta del servidor (vacío = carpeta local)", savedFolder);
