@@ -67,14 +67,15 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
-// Palabra actual bajo el caret: letras/números/_/-/'. Mínimo MIN_LEN.
+// Palabra actual bajo el caret: letras/números y los especiales de
+// tags/prompts (_ - ' . / : + #). Mínimo MIN_LEN.
 function currentQuery(ta) {
   const pos = ta.selectionStart ?? ta.value.length;
   const v = ta.value ?? "";
   if (!v) return null;
   let s = pos;
   let e = pos;
-  const isWord = (c) => /[\p{L}\p{N}_\-']/u.test(c);
+  const isWord = (c) => /[\p{L}\p{N}_\-'./:+#]/u.test(c);
   while (s > 0 && isWord(v[s - 1])) s--;
   while (e < v.length && isWord(v[e])) e++;
   const word = v.slice(s, e);
@@ -91,14 +92,17 @@ function buildHtml(text, query) {
   let count = 0;
   let pos = lower.indexOf(q, 0);
   while (pos !== -1 && count < MAX_MARKS) {
-    const isCurrent =
-      pos < query.end && pos + q.length > query.start;
+    // La coincidencia bajo el caret (la que se está escribiendo) NO se
+    // marca: solo se resaltan las coincidencias en el resto del texto.
+    const isCurrent = pos < query.end && pos + q.length > query.start;
     html += escapeHtml(text.slice(idx, pos));
-    html += isCurrent
-      ? `<mark class="mika-hl-cur">${escapeHtml(text.slice(pos, pos + q.length))}</mark>`
-      : `<mark class="mika-hl">${escapeHtml(text.slice(pos, pos + q.length))}</mark>`;
+    if (isCurrent) {
+      html += escapeHtml(text.slice(pos, pos + q.length));
+    } else {
+      html += `<mark class="mika-hl">${escapeHtml(text.slice(pos, pos + q.length))}</mark>`;
+      count++;
+    }
     idx = pos + q.length;
-    count++;
     pos = lower.indexOf(q, idx);
   }
   html += escapeHtml(text.slice(idx));
@@ -134,18 +138,26 @@ function copyStyle(ta, bd) {
   const cs = getComputedStyle(ta);
   const props = [
     "fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing",
-    "lineHeight", "textTransform", "textIndent",
+    "wordSpacing", "lineHeight", "textTransform", "textIndent", "direction",
+    "wordBreak", "lineBreak", "tabSize",
     "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
     "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
     "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle",
     "boxSizing", "borderRadius",
   ];
-  for (const p of props) bd.style[p] = cs[p];
+  for (const p of props) {
+    try { bd.style[p] = cs[p]; } catch (e) { /* no-op */ }
+  }
   bd.style.whiteSpace = "pre-wrap";
   bd.style.wordWrap = "break-word";
   bd.style.overflowWrap = "break-word";
   bd.style.background = ta._mikaHlBg;
   bd.style.color = ta._mikaHlColor;
+  // Caret visible con el color real: `caret-color: auto` heredaría el
+  // color transparente y el cursor desaparecería al escribir.
+  try {
+    ta.style.caretColor = ta._mikaHlColor || "";
+  } catch (e) { /* no-op */ }
 }
 
 function ensureCss() {
@@ -165,14 +177,9 @@ function ensureCss() {
   background: rgba(255, 235, 59, 0.45); color: inherit;
   border-radius: 2px; padding: 0;
 }
-.mika-hl-backdrop mark.mika-hl-cur {
-  background: rgba(255, 152, 0, 0.75); color: #000;
-  border-radius: 2px; padding: 0;
-}
 .mika-hl-ta {
   background: transparent !important;
   color: transparent !important;
-  caret-color: auto !important;
   -webkit-text-fill-color: transparent !important;
   position: relative !important;
   z-index: 1 !important;
@@ -188,56 +195,209 @@ function attach(ta) {
   // mayoría de los resaltados fantasma en nodos ajenos al foco).
   if (ta.tagName !== "TEXTAREA") return;
   ensureCss();
-  ta._mikaHl = true;
 
   const parent = ta.parentElement;
-  if (parent && getComputedStyle(parent).position === "static") {
+  if (!parent) return; // Aún sin DOM: reintenta en el próximo scan.
+  if (getComputedStyle(parent).position === "static") {
     parent.classList.add("mika-hl-wrap");
   }
 
-  const bd = document.createElement("div");
-  bd.className = "mika-hl-backdrop";
-  bd.setAttribute("aria-hidden", "true");
-  const inner = document.createElement("div");
-  inner.className = "mika-hl-backdrop-inner";
-  bd.appendChild(inner);
-  ta.before(bd);
-  bd.style.display = "none";
-  // Sin clase transparente hasta que haya algo que resaltar.
+  const bdHolder = { bd: null, inner: null };
 
-  const syncStyle = () => copyStyle(ta, bd);
+  // (Re)crea el espejo si falta o quedó fuera del DOM (p. ej. Vue
+  // re-renderizó el contenedor y barrió al anterior). Sin esto el
+  // resaltado moría en silencio hasta recargar la página.
+  const ensureBackdrop = () => {
+    const { bd, inner } = bdHolder;
+    if (bd && bd.isConnected && inner && inner.isConnected) return true;
+    try { bd?.remove(); } catch (e) { /* no-op */ }
+    const nbd = document.createElement("div");
+    nbd.className = "mika-hl-backdrop";
+    nbd.setAttribute("aria-hidden", "true");
+    const ninner = document.createElement("div");
+    ninner.className = "mika-hl-backdrop-inner";
+    nbd.appendChild(ninner);
+    ta.before(nbd);
+    nbd.style.display = "none";
+    if (!nbd.isConnected) return false;
+    bdHolder.bd = nbd;
+    bdHolder.inner = ninner;
+    return true;
+  };
+
+  if (!ensureBackdrop()) return; // Inserción fallida: reintenta luego.
+  // Sin clase transparente hasta que haya algo que resaltar.
+  ta._mikaHl = true;
+
+  let rafId = 0;
+  let lastSig = "";
+  let lastContent = "";
+  let blocked = false;
+
+  const stopLoop = () => {
+    if (rafId) {
+      try { cancelAnimationFrame(rafId); } catch (e) { /* no-op */ }
+      rafId = 0;
+    }
+  };
+
+  // Estado seguro: espejo oculto + texto nativo visible. Ante CUALQUIER
+  // duda se vuelve aquí: jamás se deja el textarea transparente sin su
+  // espejo visible (eso era la "caja sólida" con texto invisible).
+  const hide = () => {
+    stopLoop();
+    blocked = false;
+    try { bdHolder.bd.style.display = "none"; } catch (e) { /* no-op */ }
+    try { ta.classList.remove("mika-hl-ta"); } catch (e) { /* no-op */ }
+    try { ta.style.caretColor = ""; } catch (e) { /* no-op */ }
+  };
+
+  const syncStyle = () => copyStyle(ta, bdHolder.bd);
+
+  // Firma barata del contenido (sin forzar layout): decide si hay que
+  // repintar el espejo.
+  const contentSig = () => {
+    try {
+      return (
+        ta.value.length + "|" + ta.selectionStart + "|" + ta.selectionEnd +
+        "|" + ta.scrollTop + "|" + ta.scrollLeft +
+        "|" + ta.clientWidth + "|" + ta.clientHeight
+      );
+    } catch (e) {
+      return "";
+    }
+  };
+
+  // Firma completa (incluye estado del espejo): detecta desyncs externos.
+  const sig = () => {
+    try {
+      const bd = bdHolder.bd;
+      return (
+        contentSig() + "|" + ta.isConnected + "|" + !!bd?.isConnected +
+        "|" + (bd ? bd.style.display : "?") + "|" +
+        (ta.className.includes("mika-hl-ta") ? 1 : 0)
+      );
+    } catch (e) {
+      return "";
+    }
+  };
+
+  const armTick = () => {
+    if (!rafId) {
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        tick();
+      });
+    }
+  };
+
+  // Fallo de autocuración: volver al texto nativo y NO reintentar hasta
+  // que el contenido cambie (evita parpadeo show/hide por frame).
+  const blockHeal = () => {
+    hide();
+    blocked = true;
+    lastContent = contentSig();
+    lastSig = sig();
+  };
 
   const update = () => {
     try {
+      // Textarea fuera del DOM: soltar. Espejo ausente: reconstruirlo.
+      if (!ta.isConnected) { hide(); return; }
+      if (!ensureBackdrop()) { hide(); return; }
+      const bd = bdHolder.bd;
+      const inner = bdHolder.inner;
       // Solo la caja CON foco resalta; el resto muestra su texto nativo.
       const query = enabled && document.activeElement === ta ? currentQuery(ta) : null;
-      if (!query) {
-        bd.style.display = "none";
-        ta.classList.remove("mika-hl-ta");
-        return;
-      }
+      const text = ta.value ?? "";
+      if (!query || !text) { hide(); return; }
       bd.style.display = "";
       ta.classList.add("mika-hl-ta");
       syncStyle();
-      const text = ta.value ?? "";
+      // El espejo calca la caja de contenido del textarea (no el origen
+      // del padre): así no se desplaza con paddings/bordes/scrollbar.
+      try {
+        bd.style.left = `${ta.offsetLeft + ta.clientLeft}px`;
+        bd.style.top = `${ta.offsetTop + ta.clientTop}px`;
+        bd.style.width = `${ta.clientWidth}px`;
+        bd.style.height = `${ta.clientHeight}px`;
+      } catch (e) { /* no-op */ }
       inner.innerHTML = buildHtml(text, query);
-      bd.scrollTop = ta.scrollTop;
-      bd.scrollLeft = ta.scrollLeft;
-      bd.style.width = `${ta.clientWidth}px`;
-      bd.style.height = `${ta.clientHeight}px`;
-    } catch (e) { /* no-op */ }
+      try {
+        bd.scrollTop = ta.scrollTop;
+        bd.scrollLeft = ta.scrollLeft;
+      } catch (e) { /* no-op */ }
+      // Autocuración: si el espejo no quedó visible o su texto no es
+      // legible, volver al texto nativo antes de cegar la caja.
+      try {
+        const bcs = getComputedStyle(bd);
+        const ics = getComputedStyle(inner);
+        if (
+          bcs.display === "none" || bcs.visibility === "hidden" ||
+          !inner.textContent || isTransparent(ics.color)
+        ) {
+          blockHeal();
+          return;
+        }
+      } catch (e) { blockHeal(); return; }
+      lastContent = contentSig();
+      lastSig = sig();
+      // Re-sync mientras tenga foco: cubre IME, drag&drop, scroll y
+      // cambios programáticos que no disparan eventos de teclado.
+      armTick();
+    } catch (e) { hide(); }
+  };
+
+  const tick = () => {
+    try {
+      if (document.activeElement !== ta || !ta.isConnected) {
+        hide();
+        return;
+      }
+      if (!ensureBackdrop()) { hide(); return; }
+      if (blocked) {
+        // Reintentar solo cuando el contenido cambie de verdad.
+        if (contentSig() !== lastContent) {
+          blocked = false;
+          update();
+        } else {
+          armTick();
+        }
+        return;
+      }
+      if (sig() !== lastSig) {
+        update();
+        return;
+      }
+    } catch (e) { hide(); return; }
+    armTick();
+  };
+
+  ta._mikaHlDetach = () => {
+    hide();
+    try { ro.disconnect(); } catch (e) { /* no-op */ }
+    try { bdHolder.bd?.remove(); } catch (e) { /* no-op */ }
+    ta._mikaHl = false;
   };
 
   ta.addEventListener("input", update);
   ta.addEventListener("keyup", update);
   ta.addEventListener("click", update);
   ta.addEventListener("select", update);
+  ta.addEventListener("cut", update);
+  ta.addEventListener("paste", update);
+  ta.addEventListener("compositionend", update);
+  ta.addEventListener("change", update);
+  ta.addEventListener("focus", update);
   ta.addEventListener("blur", update);
   ta.addEventListener("scroll", () => {
-    bd.scrollTop = ta.scrollTop;
-    bd.scrollLeft = ta.scrollLeft;
+    try {
+      bdHolder.bd.scrollTop = ta.scrollTop;
+      bdHolder.bd.scrollLeft = ta.scrollLeft;
+    } catch (e) { /* no-op */ }
   });
-  new ResizeObserver(update).observe(ta);
+  const ro = new ResizeObserver(update);
+  try { ro.observe(ta); } catch (e) { /* no-op */ }
   // Primer pintado tras el layout.
   requestAnimationFrame(update);
   setTimeout(update, 100);

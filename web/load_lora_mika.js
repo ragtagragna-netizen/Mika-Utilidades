@@ -378,9 +378,12 @@ app.registerExtension({
         const s = c.ds?.scale ?? 1;
         const ox = c.ds?.offset?.[0] ?? 0;
         const oy = c.ds?.offset?.[1] ?? 0;
+        // Inversa de convertEventToCanvasOffset: pantalla =
+        // (canvas + offset) * escala. El offset VA escalado; sin eso el
+        // editor se abría lejos del campo en cuanto había zoom/pan.
         return {
-          left: r.left + (node.pos[0] + x) * s + ox,
-          top: r.top + (node.pos[1] + y) * s + oy,
+          left: r.left + (node.pos[0] + x + ox) * s,
+          top: r.top + (node.pos[1] + y + oy) * s,
           width: Math.max(30, w * s),
           height: Math.max(16, h * s),
         };
@@ -817,6 +820,9 @@ app.registerExtension({
         w.hidden = s.kind === "lora" ? s.index > target : true;
       }
 
+      // Reubica los slots fantasma sobre model (ver parkGhostSlots).
+      parkGhostSlots(node);
+
       try {
         node.setSize(node.computeSize());
       } catch (e) {
@@ -856,7 +862,191 @@ app.registerExtension({
       return fields;
     }
 
+    // Los inputs con widget (lora_count, lora_N, enable_N, strengths)
+    // existen también como slots linkeados al widget
+    // (`slot.widget = { name }`). Al ocultar el widget
+    // (`w.hidden = true`: strengths/enables siempre, loras fuera de
+    // lora_count) el slot conserva una posición obsoleta arriba del
+    // nodo, justo encima de model: es el punto fantasma de la captura.
+    // El frontend actual conecta y resalta por `getInputOnPos` y
+    // `getSlotFromWidget` (no por las vías legacy), así que se filtran
+    // TODAS las vías de búsqueda del nodo; la decisión se lee en vivo
+    // (w.hidden), así que vale para singles y stacks ante cualquier
+    // cambio de visibilidad. No se toca `getWidgetFromSlot` ni las
+    // funciones de posición: el layout debe seguir viendo el vínculo
+    // widget-slot o desplazaría las filas reales (model/clip).
+    // Resuelve el widget linkeado a un slot en todas sus formas
+    // (`slot._widget`, objeto `{ name }` o nombre en string).
+    function resolveWidget(node, slot) {
+      try {
+        if (!node || !slot || !slot.widget) return null;
+        if (slot._widget && typeof slot._widget === "object") {
+          return slot._widget;
+        }
+        const ref = slot.widget;
+        const name = typeof ref === "string"
+          ? ref
+          : ref && typeof ref.name === "string" ? ref.name : null;
+        if (!name) {
+          return (typeof ref === "object" && ref) || null;
+        }
+        return node.widgets?.find((w) => w && w.name === name) ?? null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // Aparca los slots fantasma SOBRE el slot model/clip: los widgets
+    // ocultos conservan y=0 y el frontend (arrange) les calcula pos
+    // [10,10], justo encima de model ([10,14]) — el punto amarillo de
+    // la captura. Fijando su y al ancla, arrange los reubica solo cada
+    // frame sobre model: un solo punto, sin fantasma visible. No se
+    // tocan links ni slots: solo la y del widget oculto (el layout la
+    // respeta y la deja fija; al mostrarse, arrange la reasigna sola).
+    function parkGhostSlots(node) {
+      try {
+        if (!Array.isArray(node?.inputs) || !Array.isArray(node?.widgets)) return;
+        // Ancla = posición real del primer slot sin widget (model).
+        let anchorY = null;
+        for (let i = 0; i < node.inputs.length; i++) {
+          const s = node.inputs[i];
+          if (!s || s.widget) continue;
+          try {
+            const p = node.getInputPos(i);
+            if (p && Number.isFinite(p[0]) && Number.isFinite(p[1])) {
+              anchorY = (p[1] - node.pos[1]) - (p[0] - node.pos[0]);
+            }
+          } catch (e) { /* no-op */ }
+          break;
+        }
+        if (!Number.isFinite(anchorY)) return;
+        for (const s of node.inputs) {
+          if (!s || !s.widget) continue;
+          const w = resolveWidget(node, s);
+          if (!w || !w.hidden) continue;
+          try { w.y = anchorY; } catch (e) { /* no-op */ }
+        }
+        try { node.setDirtyCanvas(true, true); } catch (e) { /* no-op */ }
+      } catch (e) { /* no-op */ }
+    }
+
+    function hookHiddenSlotFilter(node) {
+      if (!node || node._mikaHiddenSlotFilter) return;
+      node._mikaHiddenSlotFilter = true;
+
+      const widgetOf = (slot) => resolveWidget(node, slot);
+      // Fantasma = slot con widget linkeado cuyo widget está oculto,
+      // o cuyo widget ya no existe (huérfano: sin layout válido).
+      // Los slots reales (model/clip) no tienen `widget` y nunca filtran.
+      const isGhostSlot = (slot) => {
+        if (!slot || !slot.widget) return false;
+        const w = widgetOf(slot);
+        if (!w) return true;
+        return !!w.hidden;
+      };
+      const isGhostWidget = (widget) => {
+        if (!widget) return false;
+        if (widget.hidden) return true;
+        // Widget oculto por visibilidad del stack aunque no marque hidden.
+        const s = stackSlotKind(widget.name);
+        if (!s || !node.widgets) return false;
+        const countWidget = node.widgets.find((w) => w && w.name === "lora_count");
+        let target = parseInt(countWidget?.value, 10);
+        if (!Number.isFinite(target)) return false;
+        return s.index > target;
+      };
+
+      // Vía principal de conexión y resaltado del frontend actual.
+      try {
+        const prev = node.getInputOnPos;
+        if (typeof prev === "function") {
+          node.getInputOnPos = function (...args) {
+            const hit = prev.apply(this, args);
+            if (hit && isGhostSlot(hit)) return undefined;
+            return hit;
+          };
+        }
+      } catch (e) {
+        /* no-op */
+      }
+
+      // Vía interna que `getSlotOnPos` usa primero (si existe en esta
+      // versión del frontend).
+      for (const key of ["getNodeInputOnPos", "getNodeOutputOnPos"]) {
+        try {
+          const prev = node[key];
+          if (typeof prev === "function") {
+            node[key] = function (...args) {
+              const hit = prev.apply(this, args);
+              if (hit && isGhostSlot(hit)) return undefined;
+              return hit;
+            };
+          }
+        } catch (e) {
+          /* no-op */
+        }
+      }
+
+      // Vía hover (el punto fantasma visible): devuelve el slot/input.
+      try {
+        const prev = node.getSlotOnPos;
+        if (typeof prev === "function") {
+          node.getSlotOnPos = function (...args) {
+            const hit = prev.apply(this, args);
+            if (
+              hit && this.inputs && this.inputs.includes(hit) &&
+              isGhostSlot(hit)
+            ) {
+              let out = null;
+              try {
+                out = typeof this.getOutputOnPos === "function"
+                  ? this.getOutputOnPos.apply(this, args)
+                  : null;
+              } catch (e) {
+                /* no-op */
+              }
+              return out ?? null;
+            }
+            return hit;
+          };
+        }
+      } catch (e) {
+        /* no-op */
+      }
+
+      // Vía conexión legacy (arrastrar cable): devuelve {input, slot, link_pos}.
+      try {
+        const prev = node.getSlotInPosition;
+        if (typeof prev === "function") {
+          node.getSlotInPosition = function (...args) {
+            const hit = prev.apply(this, args);
+            if (hit && hit.input && isGhostSlot(hit.input)) return null;
+            return hit;
+          };
+        }
+      } catch (e) {
+        /* no-op */
+      }
+
+      // Fallback de soltado sobre widget: si el widget bajo el cursor
+      // está oculto, no devolver su slot (evita conectar al fantasma).
+      try {
+        const prev = node.getSlotFromWidget;
+        if (typeof prev === "function") {
+          node.getSlotFromWidget = function (widget, ...rest) {
+            if (isGhostWidget(widget)) return undefined;
+            const hit = prev.apply(this, [widget, ...rest]);
+            if (hit && isGhostSlot(hit)) return undefined;
+            return hit;
+          };
+        }
+      } catch (e) {
+        /* no-op */
+      }
+    }
+
     function hook(node) {
+      hookHiddenSlotFilter(node);
       if (!isStack) {
         const single = node.widgets?.find((w) => w.name === "lora");
         hookCascadeWidget(node, single);
@@ -873,6 +1063,8 @@ app.registerExtension({
           fields.push({ w: sc, tag: "C" });
         }
         hookCompactLora(node, single, { enable: null, fields });
+        // Reubica los slots fantasma sobre model (ver parkGhostSlots).
+        parkGhostSlots(node);
         try {
           node.setSize(node.computeSize());
         } catch (e) {

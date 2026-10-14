@@ -8,11 +8,18 @@ import { app } from "/scripts/app.js";
 // que serializa ComfyUI de forma estándar.
 //
 // Tamaño: igual que ScoreList-Mika. Altura por fórmula (filas de alto
-// fijo), sin medir el DOM ni dividir por zoom. Solo se re-encaja tras
-// reconstruir: "exact" (crear, +/–, pegar) calza al contenido,
-// "shrink" (cargar workflow / copiar) solo encoge el área gris sin
-// pisar un tamaño manual. Nada de syncWrap, settle ni onResize que
-// peleen con el resize manual o recorten el contenido.
+// fijo), sin medir el DOM ni dividir por zoom. Ancho compacto por
+// defecto al crear (lo mínimo usable, medido en vivo); después lo
+// manda el usuario. El elemento DOM lleva
+// altura explícita igual a la fórmula, así la caja siempre calza con
+// el contenido mida quien lo mida. Solo se re-encaja tras reconstruir:
+// "exact" (crear, +/–, pegar) fija la altura exacta, "shrink" (cargar
+// workflow / copiar) solo encoge el área gris sin pisar un tamaño
+// manual. Sin equalize por medida directa: el wrapper DOM lo posiciona
+// Vue de forma asíncrona y medirlo antes de tiempo daba deltas basura
+// que agrandaban el nodo (carrera intermitente). Nada de syncWrap,
+// settle ni onResize que peleen con el resize manual o recorten el
+// contenido.
 // -----------------------------------------------------------------------
 
 const CELL_H = 22;
@@ -22,12 +29,13 @@ const FOOTER_H = 22;
 const MAX_ROWS = 50;
 const MAX_COLS = 10;
 const DEFAULT_W = 270;
-// Recorte inferior: el frontend monta el wrapper DOM con
-// alto = computedHeight - 2*10 (margen) y el nodo suma +38
-// (título + resto). Medido en vivo: con recorte 10 el gris
-// inferior queda en ~2.5px frente a 10px del lateral; con 2
-// ambos quedan en ~10px. Verificado con Playwright.
-const BOTTOM_TRIM = 2;
+// Geometría vertical medida en vivo (frontend 1.55.x): del cuerpo del
+// nodo a la grilla hay 12px fijos, y el frontend añade 26px de más
+// abajo (la franja gris del nodo A). Se recorta dejando 8px de aire
+// bajo los botones, como el mockup B.
+const WIDGET_TOP = 12;
+const BOTTOM_MARGIN = 8;
+const GRID_SLACK = 26 - BOTTOM_MARGIN;
 
 app.registerExtension({
 	name: "Mika.ExcelLayout",
@@ -152,14 +160,54 @@ app.registerExtension({
 			return s;
 		}
 
-		// Alto del contenido por fórmula: cabecera + N filas + footer +
-		// un GAP entre cada bloque (N+1 gaps), menos el recorte que
-		// iguala el margen inferior al lateral. Sin medir el DOM.
-		function contentHeight(rows) {
-			return HEADER_H + rows * CELL_H + FOOTER_H + (rows + 1) * GAP - BOTTOM_TRIM;
+		// Ancho por defecto al crear: como el nodo B de referencia (celdas
+		// holgadas de ~70px: dígitos + stepper sin apreturas). Medido en
+		// vivo: a 150px nada se recorta pero las celdas quedan mínimas;
+		// el B equivale a ~190px para 2 columnas. Escala con columnas
+		// para no romper pegados anchos.
+		function compactWidth(cols) {
+			const c = Math.max(1, Math.min(MAX_COLS, cols | 0 || 2));
+			return Math.max(190, 48 + c * 70 + (c - 1) * 4);
 		}
 
-		function buildTable(node, fitMode) {
+		// Altura siempre exacta (diseño B, sin área gris abajo): el
+		// contenido tiene alto fijo por fórmula y el sobrante no sirve
+		// para nada. Se intercepta setSize y se recorta cualquier exceso
+		// de alto; el ancho queda libre y el colapsado intacto (más bajo
+		// que la fórmula = se deja pasar). Así ni el resize manual ni un
+		// auto-crece tardío del frontend dejan área extra. Sin bucles:
+		// computeSize no llama a setSize.
+		function clampHeight(node) {
+			if (!node || node._mikaClampH) return;
+			node._mikaClampH = true;
+			const prev = node.setSize;
+			if (typeof prev !== "function") return;
+			node.setSize = function (size) {
+				try {
+					if (Array.isArray(size) && typeof size[1] === "number" && !this.flags?.collapsed) {
+						let h = 0;
+						try { h = Math.max(60, this.computeSize?.()?.[1] || 60); } catch (e) { h = 0; }
+						if (h > 0 && size[1] > h + 1) size = [size[0], h];
+					}
+				} catch (e) { /* no-op */ }
+				return prev.call(this, size);
+			};
+		}
+
+		// Alto del contenido por fórmula: cabecera + N filas + footer +
+		// un GAP entre cada bloque (N+1 gaps). Sin medir el DOM: el
+		// elemento raíz lleva esta misma altura explícita.
+		function contentHeight(rows) {
+			return HEADER_H + rows * CELL_H + FOOTER_H + (rows + 1) * GAP;
+		}
+
+		// Alto total del nodo: contenido + offset superior, sin la franja
+		// extra que añade el frontend (se deja solo BOTTOM_MARGIN).
+		function fitHeight(rows) {
+			return Math.max(60, contentHeight(rows) + WIDGET_TOP + BOTTOM_MARGIN);
+		}
+
+		function buildTable(node, fitMode, width) {
 			if (typeof node.addDOMWidget !== "function") return;
 			hideDatos(node);
 			const w = datosWidget(node);
@@ -182,6 +230,10 @@ app.registerExtension({
 			root.style.gap = GAP + "px";
 			root.style.width = "100%";
 			root.style.boxSizing = "border-box";
+			// Altura explícita = fórmula: la caja calza con el contenido
+			// sin depender de cómo el frontend dimensione el wrapper.
+			root.style.height = contentHeight(data.rows) + "px";
+			root.style.flexShrink = "0";
 
 			const head = document.createElement("div");
 			head.style.display = "flex";
@@ -407,55 +459,38 @@ app.registerExtension({
 
 			const domWidget = node.addDOMWidget("mika_excel_grid", "div", root);
 			domWidget.serialize = false;
+			// Altura declarada = contenido − franja: así el cálculo propio
+			// del frontend (que suma la franja de más) converge al mismo
+			// alto del refit en vez de re-agrandar el nodo.
 			domWidget.computeSize = () => [
 				node.size?.[0] ?? DEFAULT_W,
-				contentHeight(data.rows),
+				contentHeight(data.rows) - GRID_SLACK,
 			];
 			node._mikaDomWidget = domWidget;
 
-			// Un único re-encaje tras reconstruir. "exact" (crear, +/–,
-			// pegar): el nodo calza al contenido en ambas dimensiones
-			// (ancho mínimo = lo más pequeño posible, tipo nodo A).
-			// "shrink" (cargar workflow / copiar): solo encoge sin pisar
-			// un tamaño manual guardado por el usuario.
-			// Tras el encaje, iguala el hueco gris inferior al lateral
-			// midiéndolos en pantalla: ninguna constante (margen del
-			// wrapper, +38 del frontend, etc.) es fiable entre versiones
-			// del frontend, así que se corrige por medida directa.
-			const equalize = () => {
-				try {
-					const ds = app.canvas?.ds;
-					if (!ds || !node.size) return;
-					const s = ds.scale || 1;
-					const off = ds.offset || [0, 0];
-					const rect = root.getBoundingClientRect();
-					if (!rect.height || !rect.width) return;
-					const sideGap = rect.left - (node.pos[0] * s + off[0]);
-					const bottomGap = (node.pos[1] + node.size[1]) * s + off[1] - rect.bottom;
-					const delta = (bottomGap - sideGap) / s;
-					if (Math.abs(delta) > 0.5) {
-						node.setSize([node.size[0], Math.max(60, node.size[1] - delta)]);
-						relayout(node);
-					}
-				} catch (e) { /* no-op */ }
-			};
+			// Re-encaje tras reconstruir, solo con la fórmula (sin leer el
+			// DOM: idempotente, converge siempre al mismo alto). "exact"
+			// (crear, +/–, pegar): fija la altura exacta. "shrink" (cargar
+			// workflow / copiar): solo encoge sin pisar un tamaño manual
+			// guardado por el usuario. El ancho solo se impone al crear
+			// (width != null → compacto); en +/–/pegar/cargar lo manda el
+			// usuario (igual que ScoreList-Mika). Se repite un par de veces
+			// porque el frontend solo auto-crece el nodo, nunca lo encoge.
 			const refit = () => {
 				try {
-					const size = node.computeSize();
-					const h = Math.max(60, size?.[1] || 60);
-					const minW = Math.max(0, size?.[0] || 0);
-					const curW = node.size?.[0] ?? minW;
+					const h = fitHeight(data.rows);
 					const curH = node.size?.[1] ?? h;
-					if (fitMode === "exact") {
-						node.setSize([minW, h]);
-					} else if (curH - h > 1) {
-						node.setSize([curW, h]);
+					const curW = node.size?.[0] ?? DEFAULT_W;
+					const newW = width != null ? width : curW;
+					const newH = (fitMode === "exact" || curH - h > 1) ? h : curH;
+					if (Math.abs(newW - curW) > 0.5 || Math.abs(newH - curH) > 0.5) {
+						node.setSize([newW, newH]);
 					}
 				} catch (e) { /* no-op */ }
 				relayout(node);
-				requestAnimationFrame(equalize);
 			};
 			requestAnimationFrame(refit);
+			setTimeout(refit, 150);
 			setTimeout(refit, 400);
 		}
 
@@ -463,13 +498,23 @@ app.registerExtension({
 		nodeType.prototype.onNodeCreated = function () {
 			const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
 			hideDatos(this);
-			setTimeout(() => buildTable(this, "exact"), 100);
+			// Tamaño exacto desde el primer frame (evita saltos); el
+			// refit "exact" lo confirma con las columnas/filas reales.
+			// Va ANTES de clampHeight: sin widget aún, computeSize daría
+			// un alto mínimo y el clamp lo aplastaría.
+			try {
+				const d0 = readData(this);
+				this.setSize([compactWidth(d0.cols), fitHeight(d0.rows)]);
+			} catch (e) { /* no-op */ }
+			clampHeight(this);
+			setTimeout(() => buildTable(this, "exact", compactWidth(readData(this).cols)), 100);
 			return r;
 		};
 
 		const onConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (info) {
 			const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+			clampHeight(this);
 			setTimeout(() => buildTable(this, "shrink"), 100);
 			return r;
 		};
