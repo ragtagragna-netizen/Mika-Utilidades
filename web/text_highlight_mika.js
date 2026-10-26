@@ -13,7 +13,7 @@ const MIKA_NODES = new Set([
   "TextBoxVisor", "TagFilter", "TextReplaceDynamic",
   "TextConcatenateDynamic", "LoadImageMika", "SmartTagFilterMika",
   "TagIfMika", "TagRemoverMika", "FloatOutputList", "ExecutionTimerConfig",
-  "PromptEditLoopMika", "TextLineSelectorMika", "TextLineStepperMika",
+  "TextLineSelectorMika", "TextLineStepperMika",
   "ImagePreviewCleanMika", "FastGroupsBypasserMika", "FastGroupsMuterMika",
   "FastNodesBypasserMika", "FastNodesMuterMika", "ListUnpackMika",
   "AnimaResolutionsMika", "SamplerSelectorMika", "SchedulerSelectorMika",
@@ -27,6 +27,11 @@ const MIKA_NODES = new Set([
   "TextCleanerCompareMika", "LoadMarianMTCheckPoint", "SmartPromptTranslate",
   "PromptTranslateToText", "ClipboardToMultiRefMika",
 ]);
+
+// Nodos con resaltado propio: su addon dedicado ya monta un espejo sobre la
+// caja. Montar un segundo espejo encima lo tapa con su fondo y la caja queda
+// de color sólido, sin texto. El nodo queda fuera del resaltado genérico.
+const MIKA_NODES_EXCLUIDOS = new Set(["PromptEditLoopMika"]);
 
 const MIN_LEN = 2;
 const MAX_MARKS = 200;
@@ -55,6 +60,7 @@ function setEnabled(v) {
 function isMikaNode(node) {
   const cls = node?.comfyClass ?? node?.type;
   if (!cls) return false;
+  if (MIKA_NODES_EXCLUIDOS.has(cls)) return false;
   if (MIKA_NODES.has(cls)) return true;
   return /mika$/i.test(cls);
 }
@@ -448,8 +454,11 @@ function scanNode(node) {
   for (const w of node.widgets ?? []) {
     const t = w?.type;
     if (t !== "customtext" && t !== "STRING" && t !== "text") continue;
+    // Otro addon de Mika ya resalta esta caja: no montar otro espejo.
+    if (w._mikaHlOwned) continue;
     const el = widgetEl(w);
-    if (el) attach(el);
+    if (!el || el._mikaHlOwned) continue;
+    attach(el);
   }
 }
 

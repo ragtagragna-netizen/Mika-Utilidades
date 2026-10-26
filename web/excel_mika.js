@@ -498,6 +498,73 @@ app.registerExtension({
 			setTimeout(refit, 400);
 		}
 
+		// --- Menú contextual (click derecho sobre el nodo) ---------------
+		// La grilla no tiene selección de celdas: las dos acciones se
+		// despliegan en submenús, uno por columna y otro por fila, con el
+		// contenido a la vista para acertar sin adivinar el número.
+		// Cambia los datos, los persiste y reconstruye la grilla (borrar
+		// filas encoge el nodo, hay que refitear).
+		function mutate(node, fn) {
+			const data = readData(node);
+			fn(data);
+			writeData(node, data);
+			buildTable(node, "exact");
+		}
+
+		// Vista corta de una fila para las entradas del submenú.
+		function rowPreview(row) {
+			const vals = (Array.isArray(row) ? row : [])
+				.map((v) => String(v ?? "").trim())
+				.filter((v) => v !== "");
+			if (!vals.length) return "vacía";
+			const txt = vals.join(" · ");
+			return txt.length > 26 ? txt.slice(0, 26) + "…" : txt;
+		}
+
+		const onGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
+		nodeType.prototype.getExtraMenuOptions = function (_graph, options) {
+			const r = onGetExtraMenuOptions ? onGetExtraMenuOptions.apply(this, arguments) : undefined;
+			const node = this;
+			if (!Array.isArray(options) || !node) return r;
+			const data = readData(node);
+
+			const zeroCols = [];
+			for (let c = 0; c < data.cols; c++) {
+				zeroCols.push({
+					content: data.names[c] || colName(c),
+					callback: () => mutate(node, (d) => {
+						for (const row of d.cells) row[c] = "0";
+					}),
+				});
+			}
+
+			const delRows = [];
+			for (let r = 0; r < data.rows; r++) {
+				delRows.push({
+					content: `Fila ${r + 1} — ${rowPreview(data.cells[r])}`,
+					callback: () => mutate(node, (d) => {
+						if (d.rows <= 1) return;
+						d.cells.splice(r, 1);
+						d.rows = d.cells.length;
+					}),
+				});
+			}
+
+			options.push(null);
+			options.push({
+				content: "Rellenar columna con 0s",
+				has_submenu: true,
+				submenu: { options: zeroCols },
+			});
+			options.push({
+				content: "Eliminar fila",
+				has_submenu: true,
+				disabled: data.rows <= 1,
+				submenu: { options: delRows },
+			});
+			return r;
+		};
+
 		const onNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function () {
 			const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;

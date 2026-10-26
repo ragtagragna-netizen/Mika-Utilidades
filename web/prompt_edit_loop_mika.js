@@ -6,6 +6,9 @@ import { app } from "/scripts/app.js";
 // - Resaltado inline SIN pop-ups: mientras escribís un tag, se pinta con
 //   color todo texto del cuadro que coincida (insensible a mayúsculas).
 // v2: montaje diferido y blindado — un error de UI ya no impide crear el nodo.
+// v3: el cuadro queda marcado como "_mikaHlOwned" para que el resaltado
+//   genérico del paquete no monte un segundo espejo encima (dos espejos
+//   superpuestos dejaban la caja en color sólido, sin texto).
 // -----------------------------------------------------------------------
 
 const MIN_FRAGMENTO = 2;
@@ -61,7 +64,7 @@ function injectStyle() {
   styleInjected = true;
   const st = document.createElement("style");
   st.textContent =
-    `.mika-hl-backdrop mark { background: rgba(255,190,60,0.38); color: transparent; border-radius: 3px; }`;
+    `.mika-loop-backdrop mark { background: rgba(255,190,60,0.38); color: transparent; border-radius: 3px; }`;
   document.head.appendChild(st);
 }
 
@@ -86,6 +89,7 @@ function setupHighlight(node, widget) {
 
   try {
     injectStyle();
+    ta._mikaHlOwned = true;
     const parent = ta.parentNode;
     const cs = getComputedStyle(ta);
     const origBg = cs.backgroundColor;
@@ -96,7 +100,7 @@ function setupHighlight(node, widget) {
 
     // Capa espejo HERMANA del textarea (no lo re-ubica en el DOM).
     const bd = document.createElement("div");
-    bd.className = "mika-hl-backdrop";
+    bd.className = "mika-loop-backdrop";
     bd.setAttribute("aria-hidden", "true");
     Object.assign(bd.style, {
       position: "absolute",
@@ -180,6 +184,9 @@ app.registerExtension({
       const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
       this.mikaEditWidget =
         (this.widgets ?? []).find((w) => w.name === "editable_text_widget") ?? null;
+      // Esta caja tiene resaltado propio: el resaltado genérico del paquete
+      // no debe montar otro espejo sobre ella.
+      if (this.mikaEditWidget) this.mikaEditWidget._mikaHlOwned = true;
       try {
         if (this.mikaEditWidget) setupHighlight(this, this.mikaEditWidget);
       } catch (e) { /* nunca impedir la creación del nodo */ }
