@@ -1,0 +1,8218 @@
+try:
+    from server import PromptServer
+except Exception:
+    PromptServer = None
+
+from PIL import Image, ImageOps, ImageDraw, ImageFont
+from PIL.PngImagePlugin import PngInfo
+from io import BytesIO
+import numpy as np
+import torch
+import os
+from datetime import datetime
+import base64
+import hashlib
+import requests
+import re
+import json
+import folder_paths
+import time
+import random as random_module
+import comfy.samplers
+from comfy_api.latest import io as grid_io
+from nodes import LoraLoader, LoraLoaderModelOnly, UNETLoader, CheckpointLoaderSimple, NODE_CLASS_MAPPINGS as CORE_NODE_MAPPINGS
+
+
+# ======================================================================
+# HELPERS DE PARSEO DE TAGS (compartidos por SmartTagFilter, TagIf, etc.)
+# ======================================================================
+
+_EMOTICONES = [
+    "=)", "=(", ":D", ":P", ":3", ";)", ";d", ";D", ":)", ":(",
+    ":/", ":|", ":o", ":O", ":*", ":'(", ":')", "XD", "xd",
+    "D:", ">:(", ">:)", ":>", ":<", ":^)", ":-)", ":-(",
+]
+
+_COLORS = {
+    "red", "blue", "green", "yellow", "purple", "pink", "orange", "brown",
+    "black", "white", "gray", "grey", "cyan", "magenta", "gold", "silver",
+    "aqua", "teal", "navy", "maroon", "olive", "lime", "turquoise", "violet",
+    "indigo", "beige", "cream", "tan", "coral", "salmon", "crimson", "scarlet",
+    "azure", "cobalt", "emerald", "jade", "lavender", "lilac", "peach", "rose",
+    "ruby", "sapphire", "amber", "bronze", "copper", "platinum", "blonde",
+    "brunette", "auburn", "ivory", "khaki", "charcoal", "fuchsia",
+}
+
+_COLOR_MODIFIERS = {
+    "light", "dark", "pale", "deep", "bright", "vivid", "muted", "soft",
+    "neon", "pastel", "rich", "dull",
+}
+
+
+def _escape_emoticones(text):
+    for emote in _EMOTICONES:
+        escaped = emote.replace("(", r"\(").replace(")", r"\)").replace(":", r"\:")
+        text = re.sub(r'(?<!\\)' + re.escape(emote), lambda m: escaped, text)
+    return text
+
+
+def _unescape_emoticones(text):
+    for emote in _EMOTICONES:
+        escaped = emote.replace("(", r"\(").replace(")", r"\)").replace(":", r"\:")
+        text = text.replace(escaped, emote)
+    return text
+
+
+def strip_color_prefix(tag_base):
+    parts = tag_base.split("_")
+
+    if len(parts) >= 3 and parts[0] in _COLOR_MODIFIERS and parts[1] in _COLORS:
+        return "_".join(parts[2:])
+
+    if len(parts) >= 2 and parts[0] in _COLORS:
+        return "_".join(parts[1:])
+
+    return tag_base
+
+
+def _parse_smart_tag(tag_text, case_sensitive=False):
+    original = tag_text.strip()
+    if not original:
+        return None
+
+    opening_parens = 0
+    closing_parens = 0
+
+    for char in original:
+        if char == '(':
+            opening_parens += 1
+        elif char == ')':
+            closing_parens += 1
+        elif char not in ' \t':
+            break
+
+    for char in reversed(original):
+        if char == ')':
+            closing_parens += 1
+        elif char == '(':
+            opening_parens += 1
+        elif char not in ' \t':
+            break
+
+    stripped = original.strip()
+
+    while stripped.startswith('(') and stripped.endswith(')'):
+        inner = stripped[1:-1].strip()
+
+        if ':' in inner:
+            parts = inner.rsplit(':', 1)
+            if len(parts) == 2:
+                try:
+                    weight = float(parts[1])
+                    base_tag = parts[0].strip()
+                    normalized = base_tag.lower().replace(' ', '_').replace('-', '_') if not case_sensitive else base_tag.replace(' ', '_').replace('-', '_')
+
+                    return {
+                        'original': original,
+                        'base': normalized,
+                        'weight': weight,
+                        'has_weight': True,
+                        'weight_syntax': 'explicit'
+                    }
+                except ValueError:
+                    pass
+
+        stripped = inner.strip()
+
+    paren_pairs = min(opening_parens, closing_parens)
+    weight = 1.0 + (paren_pairs * 0.1) if paren_pairs > 0 else 1.0
+    base_tag = stripped
+    normalized = base_tag.lower().replace(' ', '_').replace('-', '_') if not case_sensitive else base_tag.replace(' ', '_').replace('-', '_')
+
+    return {
+        'original': original,
+        'base': normalized,
+        'weight': weight,
+        'has_weight': paren_pairs > 0,
+        'weight_syntax': 'parentheses' if paren_pairs > 0 else 'none'
+    }
+
+
+def _parse_prompt(prompt, case_sensitive=False):
+    if not prompt or not prompt.strip():
+        return []
+
+    prompt = _escape_emoticones(prompt)
+
+    tags = []
+    current = ''
+    paren_depth = 0
+    escaped = False
+
+    for char in prompt:
+        if escaped:
+            current += char
+            escaped = False
+        elif char == '\\':
+            current += char
+            escaped = True
+        elif char == '(':
+            paren_depth += 1
+            current += char
+        elif char == ')' and paren_depth > 0:
+            paren_depth -= 1
+            current += char
+        elif char == ',' and paren_depth == 0:
+            if current.strip():
+                parsed = _parse_smart_tag(current, case_sensitive)
+                if parsed:
+                    tags.append(parsed)
+            current = ''
+        else:
+            current += char
+
+    if current.strip():
+        parsed = _parse_smart_tag(current, case_sensitive)
+        if parsed:
+            tags.append(parsed)
+
+    for tag in tags:
+        tag['original'] = _unescape_emoticones(tag['original'])
+
+    return tags
+
+
+def _tags_match(tag1, tag2, ignore_weight=False, ignore_color_prefix=False):
+    base1 = tag1['base']
+    base2 = tag2['base']
+
+    if base1 == base2:
+        if ignore_weight:
+            return True
+        return abs(tag1['weight'] - tag2['weight']) < 0.01
+
+    if ignore_color_prefix:
+        s1 = strip_color_prefix(base1)
+        s2 = strip_color_prefix(base2)
+
+        if s1 == base2 or s2 == base1:
+            if ignore_weight or abs(tag1['weight'] - tag2['weight']) < 0.01:
+                return True
+
+    return False
+
+
+def _mika_coerce_bool(value, default=False):
+    """
+    Convierte valores entrantes a bool de forma segura.
+    Útil cuando los toggles vienen linkeados desde distintos tipos de nodos.
+    """
+    if isinstance(value, (list, tuple)):
+        value = value[0] if len(value) > 0 else default
+
+    if isinstance(value, bool):
+        return value
+
+    if value is None:
+        return default
+
+    if isinstance(value, (int, float)):
+        return value != 0
+
+    if isinstance(value, str):
+        return value.strip().lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+            "si",
+            "sí",
+            "enabled",
+        )
+
+    try:
+        return bool(value)
+    except Exception:
+        return default
+
+
+def _mika_decode_separator(separator):
+    """Decodifica escapes del separador (\\n, \\t, \\r, \\r\\n y /n)."""
+    if isinstance(separator, (list, tuple)):
+        separator = separator[0] if len(separator) > 0 else ""
+
+    if not isinstance(separator, str):
+        separator = str(separator)
+
+    return (
+        separator
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace("\\r", "\r")
+        .replace("/n", "\n")
+    )
+
+
+# Cache de hashes de archivos: evita re-leer imágenes grandes en cada
+# validación de prompt. La clave incluye mtime+size, así un cambio real
+# del archivo invalida la entrada.
+_FILE_HASH_CACHE = {}
+
+
+def _mika_hash_file(path):
+    """Hash sha256 de un archivo, cacheado por (path, mtime_ns, size)."""
+    if not os.path.exists(path):
+        return None
+
+    try:
+        st = os.stat(path)
+        key = (os.path.normcase(path), st.st_mtime_ns, st.st_size)
+        h = _FILE_HASH_CACHE.get(key)
+
+        if h is None:
+            sha = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    sha.update(chunk)
+            h = sha.hexdigest()
+
+            if len(_FILE_HASH_CACHE) > 128:
+                _FILE_HASH_CACHE.clear()
+            _FILE_HASH_CACHE[key] = h
+
+        return h
+    except Exception:
+        return None
+
+
+# Contador de guardado por (carpeta, prefijo, extensión). Evita escanear el
+# directorio en cada ejecución; el valor cae solo si pasan 60s sin guardar.
+_SAVE_COUNTERS = {}
+
+
+def _mika_next_counter(directory, prefix, ext):
+    key = (os.path.normcase(directory), prefix, ext)
+    now = time.time()
+    entry = _SAVE_COUNTERS.get(key)
+
+    if entry is not None and now - entry[0] < 60:
+        return entry[1]
+
+    max_n = 0
+    pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)")
+    try:
+        for f in os.listdir(directory):
+            if f.lower().endswith(f".{ext}"):
+                m = pattern.match(f)
+                if m:
+                    max_n = max(max_n, int(m.group(1)))
+    except Exception:
+        pass
+
+    _SAVE_COUNTERS[key] = (now, max_n + 1)
+    return max_n + 1
+
+
+def _mika_bump_counter(directory, prefix, ext, value):
+    key = (os.path.normcase(directory), prefix, ext)
+    _SAVE_COUNTERS[key] = (time.time(), value)
+
+
+def _mika_lineart_to_tensor(dibujo, width, height, bg=(255, 255, 255)):
+    """PNG base64 (lineart) -> tensor IMAGE [1,H,W,3] en 0..1. Lienzo del
+    color de fondo pedido; los datos se anclan arriba-izquierda."""
+    canvas = Image.new("RGB", (width, height), bg)
+
+    if isinstance(dibujo, str) and dibujo:
+        data = dibujo.split(",", 1)[1] if dibujo.startswith("data:") else dibujo
+        try:
+            img = Image.open(BytesIO(base64.b64decode(data))).convert("RGBA")
+            canvas.paste(img, (0, 0), img)
+        except Exception:
+            pass
+
+    arr = np.asarray(canvas).astype(np.float32) / 255.0
+    return torch.from_numpy(arr)[None, ...]
+
+
+# ======================================================================
+# SAMPLER NAMES — detección multi-fuente + fallback
+# ======================================================================
+
+_STANDARD_SAMPLERS = [
+    "euler", "euler_ancestral", "euler_ancestral_cfg_pp", "euler_cfg_pp",
+    "heun", "heunpp2",
+    "dpm_2", "dpm_2_ancestral", "dpm_fast", "dpm_adaptive",
+    "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp",
+    "dpmpp_sde", "dpmpp_sde_gpu",
+    "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu",
+    "dpmpp_3m_sde", "dpmpp_3m_sde_gpu",
+    "ddpm", "ddim", "uni_pc", "uni_pc_bh2",
+    "lcm", "ipndm", "ipndm_v", "deis",
+    "res_multistep", "res_multistep_cfg_pp",
+    "er_sde", "seeds_2", "seeds_3",
+]
+
+
+# Cache de nombres detectados: la detección consulta comfy.samplers, que no
+# cambia en caliente; hacerlo una sola vez evita trabajo repetido por nodo.
+_DETECTED_NAMES = {}
+
+
+def _mika_detect_names(label, fallback, sampler_attrs, scheduler_attrs):
+    """Detecta samplers o schedulers instalados y cachea el resultado."""
+    if label in _DETECTED_NAMES:
+        return _DETECTED_NAMES[label]
+
+    detected = []
+
+    try:
+        d = getattr(comfy.samplers.KSampler, sampler_attrs[0], None)
+        if isinstance(d, dict) and d:
+            detected = list(d.keys())
+        elif isinstance(d, (list, tuple)) and d:
+            detected = [str(x) for x in d]
+    except Exception:
+        detected = []
+
+    try:
+        if not detected:
+            fn = getattr(comfy.samplers, sampler_attrs[1], None)
+            if callable(fn):
+                detected = [
+                    str(x[0]) if isinstance(x, (list, tuple)) else str(x)
+                    for x in fn()
+                ]
+    except Exception:
+        pass
+
+    try:
+        if not detected:
+            for attr in sampler_attrs[2:]:
+                obj = getattr(comfy.samplers, attr, None)
+                if isinstance(obj, dict) and obj:
+                    detected = list(obj.keys())
+                    break
+                if isinstance(obj, (list, tuple)) and obj:
+                    detected = [str(x) for x in obj]
+                    break
+    except Exception:
+        pass
+
+    if len(detected) > 1:
+        names = detected
+    else:
+        names = list(fallback)
+        for n in detected:
+            if n not in names:
+                names.insert(0, n)
+
+    print(f"[Mika] {label}: {len(names)} disponibles.")
+    _DETECTED_NAMES[label] = names
+    return names
+
+
+def _mika_sampler_names():
+    return _mika_detect_names(
+        "Sampler Selector",
+        _STANDARD_SAMPLERS,
+        ("SAMPLERS", "samplers", "SAMPLER_NAMES", "KSAMPLER_NAMES"),
+        (),
+    )
+
+
+# Lista de respaldo con los schedulers estándar de ComfyUI.
+_STANDARD_SCHEDULERS = [
+    "normal", "karras", "exponential", "sgdr_uniform", "simple",
+    "ddim_uniform", "beta", "normal_beta", "lcm", "clamped",
+    "linear_quadratic",
+]
+
+
+def _mika_scheduler_names():
+    return _mika_detect_names(
+        "Scheduler Selector",
+        _STANDARD_SCHEDULERS,
+        ("SCHEDULERS", "schedulers", "SCHEDULER_NAMES"),
+        (),
+    )
+
+
+# ======================================================================
+# NODOS
+# ======================================================================
+
+class StringSelectorCut:
+    """
+    Igual que 'String Selector' de Impact-Pack: selecciona una línea por
+    índice con wraparound. La UI agrega botón para cortar la primera línea.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "strings": ("STRING", {"multiline": True, "default": ""}),
+                "select": ("INT", {
+                    "default": 0, "min": 0, "max": 999999,
+                    "control_after_generate": True,
+                }),
+                "count": ("INT", {"default": 1, "min": 1, "max": 999999}),
+                "modo": (["secuencial", "random"], {"default": "secuencial"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, strings, select, count=1, modo="secuencial"):
+        lines = [s for s in strings.split("\n") if s.strip() != ""]
+
+        if len(lines) == 0:
+            return ("",)
+
+        n = len(lines)
+        count = max(1, min(int(count), n))
+
+        if modo == "random":
+            # select actúa como seed: misma select -> misma elección.
+            idxs = sorted(random_module.Random(select).sample(range(n), count))
+        else:
+            start = select % n
+            idxs = [(start + i) % n for i in range(count)]
+
+        return ("\n".join(lines[i] for i in idxs),)
+
+
+class StringSelectorMika:
+    """
+    String Selector-Mika: selecciona una única línea por índice con
+    wraparound, con control fixed/increment/decrement/randomize en select.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "strings": ("STRING", {"multiline": True, "default": ""}),
+                "select": ("INT", {
+                    "default": 0, "min": 0, "max": 999999,
+                    "control_after_generate": True,
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, strings, select, skip_empty_lines=True):
+        lines = strings.split("\n")
+        if skip_empty_lines:
+            lines = [s for s in lines if s.strip() != ""]
+
+        if len(lines) == 0:
+            return ("",)
+
+        return (lines[select % len(lines)],)
+
+
+class StringSelectorCutMika:
+    """
+    String Selector Cut-Mika: selecciona una única línea por índice con
+    wraparound y control fixed/increment/decrement/randomize en select.
+    Igual que String Selector-Mika pero con el botón "cortar primera
+    línea" de String Selector Multi-Mika (cut_first_line.js) y con
+    skip_empty_lines para decidir si las líneas vacías se descartan
+    (True, por defecto) o entran en la selección (False).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "strings": ("STRING", {"multiline": True, "default": ""}),
+                "select": ("INT", {
+                    "default": 0, "min": 0, "max": 999999,
+                    "control_after_generate": True,
+                }),
+                "skip_empty_lines": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, strings, select, skip_empty_lines=True):
+        return StringSelectorMika().doit(strings, select, skip_empty_lines)
+
+
+class TextAffixMika:
+    """
+    Text Affix-Mika: añade símbolos/texto al inicio o al final, o reemplaza
+    texto. Modo "parrafo": aplica una vez sobre todo el texto; modo
+    "lista": aplica línea por línea (ideal para conectar a/from TextBox).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
+                "accion": (["inicio", "final", "reemplazar"], {"default": "inicio"}),
+                "modo": (["parrafo", "lista"], {"default": "lista"}),
+            },
+            "optional": {
+                # inicio/final: símbolo o texto a añadir.
+                # reemplazar: texto a buscar.
+                "texto": ("STRING", {"multiline": False, "default": ""}),
+                # reemplazar: texto por el que se sustituye.
+                "reemplazo": ("STRING", {"multiline": False, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, text, accion="inicio", modo="lista", texto="", reemplazo=""):
+        text = str(text)
+
+        if accion == "reemplazar":
+            if modo == "lista":
+                return ("\n".join(
+                    ln.replace(texto, reemplazo) for ln in text.split("\n")
+                ),)
+            return (text.replace(texto, reemplazo),)
+
+        if modo == "lista":
+            if accion == "inicio":
+                return ("\n".join(texto + ln for ln in text.split("\n")),)
+            return ("\n".join(ln + texto for ln in text.split("\n")),)
+
+        if accion == "inicio":
+            return (texto + text,)
+        return (text + texto,)
+
+
+class SwitchMika:
+    """
+    Switch-Mika: switch entre hasta 50 inputs dinámicos (input_1..N
+    según number_of_inputs). Modos: by index, by random (usa opt_seed si
+    está conectado y != 0) y automatic (primer input no nulo).
+    Adaptado de ComfyUI-EZ-AF-Nodes.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "number_of_inputs": ("INT", {"default": 2, "min": 2, "max": 50, "step": 1}),
+                "selected_index": ("INT", {"default": 1, "min": 1, "max": 50, "step": 1}),
+                "selection_mode": (["by index", "by random", "automatic"], {"default": "by index"}),
+            },
+            "optional": {
+                "opt_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "forceInput": True}),
+            },
+            "hidden": {
+                **{f"input_{i}": ("*", {"forceInput": True}) for i in range(1, 51)}
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("output",)
+    FUNCTION = "switch"
+    CATEGORY = "Mika Utilidades/utils"
+
+    @staticmethod
+    def _slot_index(key):
+        try:
+            return int(str(key).split("_", 1)[1])
+        except (IndexError, ValueError):
+            return 0
+
+    def switch(self, number_of_inputs, selection_mode, selected_index=None, opt_seed=0, **kwargs):
+        ordered = sorted(kwargs, key=self._slot_index)
+        if selection_mode == "by index":
+            if selected_index is None:
+                return (None,)
+            return (kwargs.get(f"input_{selected_index}"),)
+
+        if selection_mode == "by random":
+            inputs = [kwargs[k] for k in ordered if kwargs[k] is not None]
+            if not inputs:
+                return (None,)
+            # RNG local con seed: no contamina el global de otros nodos.
+            rng = random_module.Random(opt_seed) if opt_seed else random_module
+            return (inputs[rng.randint(0, len(inputs) - 1)],)
+
+        # automatic: primer input no nulo (en orden numérico de slot).
+        for k in ordered:
+            if kwargs[k] is not None:
+                return (kwargs[k],)
+        return (None,)
+
+    @classmethod
+    def IS_CHANGED(cls, selection_mode, opt_seed=0, **kwargs):
+        # En modo random sin seed fija, re-ejecuta en cada prompt.
+        if selection_mode == "by random" and not opt_seed:
+            return float("nan")
+        return False
+
+
+class SwitchBypassMika:
+    """
+    Switch Bypass-Mika: devuelve el primer input cuyo nodo origen NO
+    esté en bypass (marcado por el frontend en los widgets ocultos
+    bypass_1..N; el bypass es solo visual y nunca llega al backend).
+    Si todos los inputs con valor están en bypass, cae al primer input
+    no nulo.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "number_of_inputs": ("INT", {"default": 2, "min": 2, "max": 50, "step": 1}),
+            },
+            "optional": {
+                **{f"bypass_{i}": ("BOOLEAN", {"default": False}) for i in range(1, 51)}
+            },
+            "hidden": {
+                **{f"input_{i}": ("*", {"forceInput": True}) for i in range(1, 51)},
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("output",)
+    FUNCTION = "switch"
+    CATEGORY = "Mika Utilidades/utils"
+
+    def switch(self, number_of_inputs, unique_id=None, **kwargs):
+        for i in range(1, number_of_inputs + 1):
+            value = kwargs.get(f"input_{i}")
+            if value is not None and not _mika_coerce_bool(kwargs.get(f"bypass_{i}"), False):
+                return (value,)
+        # Todos con bypass (o el estado no llegó): primer no nulo.
+        for i in range(1, number_of_inputs + 1):
+            value = kwargs.get(f"input_{i}")
+            if value is not None:
+                return (value,)
+        return (None,)
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Re-ejecutar si cambia el estado de bypass de cualquier input.
+        return tuple(bool(kwargs.get(f"bypass_{i}")) for i in range(1, 51))
+
+
+class FilePickerMika:
+    """
+    File Picker-Mika: introduce la ruta de una carpeta local y usa el
+    botón "📁 Elegir archivo" para seleccionar un archivo con click.
+    Salidas: nombre del archivo y ruta completa.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "folder": ("STRING", {"default": "", "multiline": False}),
+                "filename": ("STRING", {"default": "", "multiline": False}),
+                "con_extension": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("filename", "full_path")
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, folder, filename, con_extension=True):
+        folder = str(folder).strip()
+        names = [
+            os.path.basename(n.strip())
+            for n in str(filename).splitlines() if n.strip()
+        ]
+        if not con_extension:
+            names = [os.path.splitext(n)[0] for n in names]
+        full_path = (
+            os.path.join(folder, names[0]) if folder and names else "")
+        return ("\n".join(names), full_path)
+
+
+if PromptServer is not None and PromptServer.instance is not None:
+    @PromptServer.instance.routes.get("/mika/preset_selector/list")
+    async def _mika_preset_selector_list(request):
+        from aiohttp import web as _web
+        folder = request.query.get("folder", "").strip().strip('"')
+        if not folder:
+            folder = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "presets")
+        if not os.path.isdir(folder):
+            return _web.json_response({"files": [], "error": "carpeta no encontrada"})
+        files = PromptPresetSelectorMika._scan_dir_files(folder)
+        return _web.json_response({"files": files})
+
+    @PromptServer.instance.routes.get("/mika/file_picker/list")
+    async def _mika_file_picker_list(request):
+        from aiohttp import web as _web
+        folder = request.query.get("folder", "").strip().strip('"')
+        if not folder or not os.path.isdir(folder):
+            return _web.json_response({"files": [], "error": "carpeta no encontrada"})
+        try:
+            files = sorted(
+                f for f in os.listdir(folder)
+                if os.path.isfile(os.path.join(folder, f))
+            )
+        except OSError:
+            return _web.json_response({"files": [], "error": "no se pudo leer"})
+        return _web.json_response({"files": files})
+
+    @PromptServer.instance.routes.get("/mika/file_picker/file")
+    async def _mika_file_picker_file(request):
+        from aiohttp import web as _web
+        folder = request.query.get("folder", "").strip().strip('"')
+        name = request.query.get("name", "")
+        if not folder or not os.path.isdir(folder):
+            return _web.Response(status=404)
+        # Contención: solo archivos directamente dentro de la carpeta.
+        base = os.path.realpath(folder)
+        path = os.path.realpath(os.path.join(base, os.path.basename(name)))
+        if not path.startswith(base + os.sep) or not os.path.isfile(path):
+            return _web.Response(status=404)
+        return _web.FileResponse(path)
+
+    # Caché en el directorio user/ de ComfyUI, fuera del paquete (así no se
+    # sube a GitHub al publicar el custom node).
+    _MIKA_THUMB_DIR = os.path.join(
+        folder_paths.base_path, "user", "mika_file_picker_thumbs")
+    # Progreso de precacheo por carpeta: {folder: {"done": n, "total": m}}
+    _MIKA_CACHE_JOBS = {}
+
+    def _mika_thumb_path(base, name):
+        """Ruta de caché: <carpeta>_<hash8>/<nombre_original>.png."""
+        folder_tag = hashlib.sha256(base.encode()).hexdigest()[:8]
+        safe_folder = re.sub(
+            r"[^A-Za-z0-9_.\-]+", "_", os.path.basename(base) or "root")
+        safe_name = re.sub(r"[^A-Za-z0-9_.\-]+", "_",
+                           os.path.splitext(os.path.basename(name))[0])
+        return os.path.join(
+            _MIKA_THUMB_DIR, f"{safe_folder}_{folder_tag}", safe_name + ".png")
+
+    @PromptServer.instance.routes.get("/mika/file_picker/cache")
+    async def _mika_file_picker_cache(request):
+        from aiohttp import web as _web
+        import asyncio
+
+        folder = request.query.get("folder", "").strip().strip('"')
+        try:
+            size = max(64, min(int(request.query.get("size", "192")), 512))
+        except ValueError:
+            size = 192
+        if not folder or not os.path.isdir(folder):
+            return _web.json_response({"total": 0, "error": "carpeta no encontrada"})
+        base = os.path.realpath(folder)
+        os.makedirs(_MIKA_THUMB_DIR, exist_ok=True)
+
+        imgs = [
+            f for f in os.listdir(base)
+            if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"))
+            and os.path.isfile(os.path.join(base, f))
+        ]
+        _MIKA_CACHE_JOBS[base] = {"done": 0, "total": len(imgs)}
+
+        def _make_all():
+            for i, f in enumerate(imgs, 1):
+                path = os.path.join(base, f)
+                cache_path = _mika_thumb_path(base, f)
+                try:
+                    fresh = os.path.isfile(cache_path) and \
+                        os.stat(cache_path).st_mtime_ns >= os.stat(path).st_mtime_ns
+                except OSError:
+                    continue
+                if not fresh:
+                    try:
+                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                        with Image.open(path) as img:
+                            img = ImageOps.exif_transpose(img)
+                            if img.mode not in ("RGB", "RGBA"):
+                                img = img.convert("RGBA")
+                            img.thumbnail((size, size))
+                            img.save(cache_path, "PNG")
+                    except Exception:
+                        pass
+                _MIKA_CACHE_JOBS[base]["done"] = i
+            return len(imgs)
+
+        await asyncio.get_event_loop().run_in_executor(None, _make_all)
+        return _web.json_response({"total": len(imgs)})
+
+    @PromptServer.instance.routes.get("/mika/file_picker/cache_status")
+    async def _mika_file_picker_cache_status(request):
+        from aiohttp import web as _web
+        folder = request.query.get("folder", "").strip().strip('"')
+        job = _MIKA_CACHE_JOBS.get(os.path.realpath(folder), {"done": 0, "total": 0})
+        return _web.json_response(job)
+
+    @PromptServer.instance.routes.get("/mika/file_picker/thumb")
+    async def _mika_file_picker_thumb(request):
+        from aiohttp import web as _web
+        import asyncio
+
+        folder = request.query.get("folder", "").strip().strip('"')
+        name = request.query.get("name", "")
+        try:
+            size = max(64, min(int(request.query.get("size", "192")), 512))
+        except ValueError:
+            size = 192
+        if not folder or not os.path.isdir(folder):
+            return _web.Response(status=404)
+        base = os.path.realpath(folder)
+        path = os.path.realpath(os.path.join(base, os.path.basename(name)))
+        if not path.startswith(base + os.sep) or not os.path.isfile(path):
+            return _web.Response(status=404)
+
+        try:
+            src_mtime_ns = os.stat(path).st_mtime_ns
+        except OSError:
+            return _web.Response(status=404)
+        cache_path = _mika_thumb_path(base, name)
+        fresh = os.path.isfile(cache_path) and \
+            os.stat(cache_path).st_mtime_ns >= src_mtime_ns
+
+        if not fresh:
+            # cached=1: no generar nada (la ventana usa solo la caché).
+            if request.query.get("cached"):
+                return _web.Response(status=404)
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+
+            def _make_thumb():
+                try:
+                    with Image.open(path) as img:
+                        img = ImageOps.exif_transpose(img)
+                        # PNG conserva la transparencia (RGBA) para la grid.
+                        if img.mode not in ("RGB", "RGBA"):
+                            img = img.convert("RGBA")
+                        img.thumbnail((size, size))
+                        img.save(cache_path, "PNG")
+                    return True
+                except Exception:
+                    return False
+
+            ok = await asyncio.get_event_loop().run_in_executor(None, _make_thumb)
+            if not ok or not os.path.isfile(cache_path):
+                return _web.Response(status=404)
+
+        # no-cache: revalida por Last-Modified, así si la imagen cambia y se
+        # regenera el thumb (misma URL), el navegador pide la versión nueva.
+        return _web.FileResponse(
+            cache_path, headers={"Cache-Control": "no-cache"})
+
+
+MAX_SCORES = 50
+
+
+class ScoreListExtendable:
+    """
+    Score List: contabilidad de pares nombre+valor (hasta MAX_SCORES filas).
+
+    Los datos se guardan como JSON en un único widget oculto ("datos"),
+    serializado por el mecanismo estándar de ComfyUI. La UI
+    (score_list_mika.js) solo dibuja las filas con botones + / -; el
+    nodo es puramente visual, sin salidas.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "datos": ("STRING", {"default": "[]", "multiline": True}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/score"
+
+    def doit(self, datos="[]", **_kwargs):
+        return ()
+
+
+class ExcelMika:
+    """
+    Excel-Mika: tabla editable estilo Excel para anotar scores/pruebas.
+
+    Los datos se guardan como JSON en un único widget oculto ("datos"),
+    serializado por el mecanismo estándar de ComfyUI. La UI
+    (excel_mika.js) dibuja la cuadrícula con filas/columnas expandibles
+    (+/–), steppers por celda numérica y pegado estilo Excel:
+    multilínea rellena hacia abajo desde la celda (tabs rellenan a la
+    derecha). El nodo es puramente visual, sin salidas.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "datos": ("STRING", {"default": '{"rows": 4, "cols": 2, "cells": []}', "multiline": True}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/score"
+
+    def doit(self, datos="", **_kwargs):
+        return ()
+
+
+class PrimitiveMika:
+    """
+    Primitive-Mika: nodo primitivo genérico. Al conectarlo a un slot de
+    otro nodo (ej. el combo "salida" de FILTROS Select-Mika) la extensión
+    web copia las opciones de ese destino en su widget "value", sin
+    agregar controles de seed (fixed/randomize).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("STRING", {"default": "", "multiline": False}),
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("value",)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/utils"
+
+    def run(self, value=""):
+        return (value,)
+
+
+class TextBoxClipboard:
+    """
+    Text Box-Mika: caja de texto con botones de copiar / seleccionar
+    todo / pegar en el header (expandido y colapsado).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, text):
+        return (text,)
+
+
+class TextBoxPasteMika:
+    """
+    Text Box Paste-Mika: caja de texto con un único botón de pegar en el
+    header; al pulsarlo REEMPLAZA todo el texto del nodo por el contenido
+    del portapapeles.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, text):
+        return (text,)
+
+
+class NoteMika:
+    """
+    Note-Mika: nota igual que el Note de ComfyUI (sin inputs ni outputs)
+    pero con los botones de copiar / seleccionar todo / pegar del Text
+    Box-Mika en el header.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/utils"
+    OUTPUT_NODE = True
+
+    def doit(self, text):
+        return ()
+
+
+# Workflow Save: el panel flotante (web/workflow_save_mika.js) guarda el
+# workflow actual en la carpeta indicada. Si el nombre ya existe permite
+# sobreescribir o guardar como copia con sufijo " (1)", " (2)", etc.
+if PromptServer is not None and PromptServer.instance is not None:
+    from aiohttp import web
+
+    _MIKA_BAD_NAME_CHARS = re.compile(r'[\\/:*?"<>|]')
+
+    def _mika_sanitize_name(name):
+        name = _MIKA_BAD_NAME_CHARS.sub("_", str(name)).strip(" .")
+        if name.lower().endswith(".json"):
+            name = name[:-5]
+        return name or "workflow"
+
+    @PromptServer.instance.routes.post("/mika/save_workflow")
+    async def mika_save_workflow(request):
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"status": "error", "message": "JSON inválido"}, status=400)
+
+        folder = str(data.get("folder") or "").strip()
+        workflow = data.get("workflow")
+        mode = str(data.get("mode") or "ask")
+
+        if not folder or workflow is None:
+            return web.json_response({"status": "error", "message": "Faltan carpeta o workflow"}, status=400)
+
+        if mode not in ("ask", "overwrite", "copy"):
+            return web.json_response({"status": "error", "message": "Modo inválido"}, status=400)
+
+        name = _mika_sanitize_name(data.get("name"))
+        folder = os.path.abspath(os.path.expanduser(os.path.expandvars(folder)))
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, name + ".json")
+
+        if os.path.exists(path):
+            if mode == "ask":
+                return web.json_response({"status": "exists", "path": path})
+            if mode == "copy":
+                i = 1
+                while os.path.exists(os.path.join(folder, f"{name} ({i}).json")):
+                    i += 1
+                name = f"{name} ({i})"
+                path = os.path.join(folder, name + ".json")
+
+        import json
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(workflow, f, ensure_ascii=False, indent=2)
+
+        return web.json_response({"status": "ok", "path": path, "name": name})
+
+
+class TextBoxVisor:
+    """
+    Visor-Mika: muestra CUALQUIER tipo de valor (str, int, float, bool,
+    list, tuple, set, dict, Tensor, ndarray, bytes) como una preview
+    legible. Botones en el header (copiar / seleccionar todo / pegar) vía
+    text_box_visor_mika.js. Preview en vivo por websocket. El input `text`
+    es socketless: solo el slot `valor` recibe links.
+
+    El límite de elementos mostrados por lista es MAX_ITEMS (fijo, no
+    aparece en la interfaz).
+    """
+
+    MAX_ITEMS = 50  # ← límite interno, sin widget visible
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "valor": ("*", {}),
+                "text": ("STRING", {"multiline": True, "default": "", "socketless": True}),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    OUTPUT_NODE = True
+    CATEGORY = "Mika Utilidades/string"
+
+    # Recibir las listas COMPLETAS sin que ComfyUI las expanda.
+    INPUT_IS_LIST = True
+
+    def doit(self, valor=None, text="", unique_id=None):
+        valor = self._unwrap_list_input(valor)
+        text = self._unwrap_scalar(text, "")
+        unique_id = self._unwrap_scalar(unique_id, None)
+
+        if valor is not None:
+            preview = self._format(valor, 0, self.MAX_ITEMS)
+        else:
+            preview = text if isinstance(text, str) else str(text)
+
+        if PromptServer is not None and PromptServer.instance is not None and unique_id is not None:
+            PromptServer.instance.send_sync(
+                "mika-visor-preview",
+                {"id": str(unique_id), "text": preview},
+            )
+
+        return (preview,)
+
+    @staticmethod
+    def _unwrap_scalar(v, default):
+        if isinstance(v, (list, tuple)):
+            return v[0] if len(v) > 0 else default
+        return v if v is not None else default
+
+    @staticmethod
+    def _unwrap_list_input(v):
+        if v is None:
+            return None
+
+        if isinstance(v, (list, tuple)):
+            if len(v) == 0:
+                return None
+
+            if len(v) == 1:
+                inner = v[0]
+                if not isinstance(inner, (list, tuple)):
+                    return inner
+                return list(inner)
+
+            return list(v)
+
+        return v
+
+    def _format(self, v, depth=0, max_items=50):
+        pad = "    " * depth
+
+        if v is None:
+            return "None"
+
+        if isinstance(v, bool):
+            return "True" if v else "False"
+
+        if isinstance(v, (int, float)):
+            return repr(v)
+
+        if isinstance(v, str):
+            return v if depth == 0 else v.replace("\n", "\\n")
+
+        if isinstance(v, (list, tuple, set)):
+            items = list(v)
+
+            if not items:
+                return "[]" if isinstance(v, list) else ("()" if isinstance(v, tuple) else "set()")
+
+            shown = items[:max_items]
+            lines = [
+                f"{pad}{self._format(item, depth + 1, max_items)}"
+                for item in shown
+            ]
+
+            if len(items) > len(shown):
+                lines.append(f"{pad}... (+{len(items) - len(shown)} elementos más)")
+
+            if depth == 0 and isinstance(v, set):
+                return "set(\n" + "\n".join(lines) + "\n)"
+
+            return "\n".join(lines)
+
+        if isinstance(v, dict):
+            if not v:
+                return "{}"
+
+            items = list(v.items())
+            shown = items[:max_items]
+            lines = [
+                f"{pad}{k}: {self._format(val, depth + 1, max_items)}"
+                for k, val in shown
+            ]
+
+            if len(items) > len(shown):
+                lines.append(f"{pad}... (+{len(items) - len(shown)} más)")
+
+            return "\n".join(lines)
+
+        if isinstance(v, (bytes, bytearray)):
+            return f"bytes(len={len(v)})"
+
+        if isinstance(v, np.ndarray):
+            base = f"ndarray(shape={tuple(v.shape)}, dtype={v.dtype})"
+            try:
+                if v.size <= 12:
+                    base += f"\n{pad}{v.tolist()}"
+            except Exception:
+                pass
+            return base
+
+        if hasattr(v, "shape") and hasattr(v, "dtype"):
+            base = f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype})"
+            try:
+                if hasattr(v, "numel") and callable(v.numel) and v.numel() <= 12:
+                    base += f"\n{pad}{v.tolist()}"
+            except Exception:
+                pass
+            return base
+
+        return str(v)
+
+
+class TagFilter:
+    r"""
+    Tag Filter-Mika: conserva solo los primeros N segmentos de un texto
+    separado por comas.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+                "max_tags": ("INT", {"default": 1, "min": 0, "max": 999999}),
+            },
+            "optional": {
+                "separator": ("STRING", {"default": ","}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "INT", "STRING")
+    RETURN_NAMES = ("text", "tags_count", "rest")
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, text, max_tags, separator=","):
+        sep = separator if separator else ","
+        parts = [p.strip() for p in (text or "").split(sep) if p.strip() != ""]
+        kept = parts[:max_tags] if max_tags > 0 else []
+        rest = parts[max_tags:] if max_tags > 0 else parts
+        joiner = sep.strip() + " " if sep.strip() else sep
+
+        return (joiner.join(kept), len(kept), joiner.join(rest))
+
+
+MAX_REPLACES = 30
+DEFAULT_REPLACES_VISIBLE = 3
+
+
+class TextReplaceDynamic:
+    """
+    Text Replace Dynamic-Mika: reemplaza texto con pares dinámicos
+    find/replace, controlados por pair_count.
+
+    - text entra por SLOT (forceInput), no como caja de texto.
+    - pair_count controla cuántos pares find/replace se usan.
+    - find_i y replace_i mantienen el mismo comportamiento.
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+
+        for i in range(1, MAX_REPLACES + 1):
+            optional[f"find_{i}"] = ("STRING", {"default": "", "multiline": False})
+            optional[f"replace_{i}"] = ("STRING", {"default": "", "multiline": False})
+
+        optional["use_regex"] = ("BOOLEAN", {"default": False})
+
+        optional["pair_count"] = (
+            "INT",
+            {
+                "default": DEFAULT_REPLACES_VISIBLE,
+                "min": 1,
+                "max": MAX_REPLACES,
+                "step": 1,
+                "display": "number",
+            },
+        )
+
+        return {
+            "required": {
+                "text": ("*", {"forceInput": True}),
+            },
+            "optional": optional,
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(
+        self,
+        text="",
+        use_regex=False,
+        pair_count=DEFAULT_REPLACES_VISIBLE,
+        unique_id=None,
+        **kwargs,
+    ):
+        text = self._scalar(text, "")
+
+        if not isinstance(text, str):
+            text = str(text)
+
+        use_regex = self._scalar(use_regex, False)
+        use_regex = _mika_coerce_bool(use_regex)
+
+        pair_count = self._scalar(pair_count, DEFAULT_REPLACES_VISIBLE)
+
+        try:
+            count = int(pair_count)
+        except Exception:
+            count = DEFAULT_REPLACES_VISIBLE
+
+        count = max(1, min(MAX_REPLACES, count))
+
+        unique_id = self._scalar(unique_id, None)
+
+        if (
+            PromptServer is not None
+            and PromptServer.instance is not None
+            and unique_id is not None
+        ):
+            PromptServer.instance.send_sync(
+                "mika-text-replace-count",
+                {
+                    "id": str(unique_id),
+                    "count": count,
+                },
+            )
+
+        result = text
+
+        keys = sorted(
+            (k for k in kwargs if re.fullmatch(r"find_\d+", k)),
+            key=lambda k: int(k.split("_")[1]),
+        )
+
+        for find_key in keys:
+            idx = int(find_key.split("_")[1])
+
+            if idx > count:
+                break
+
+            find_str = self._scalar(kwargs.get(find_key, ""), "")
+            replace_str = self._scalar(kwargs.get(f"replace_{idx}", ""), "")
+
+            if not isinstance(find_str, str):
+                find_str = str(find_str)
+
+            if not isinstance(replace_str, str):
+                replace_str = str(replace_str)
+
+            if not find_str:
+                continue
+
+            try:
+                if use_regex:
+                    result = re.sub(find_str, replace_str, result)
+                else:
+                    result = result.replace(find_str, replace_str)
+            except re.error:
+                pass
+
+        return (result,)
+
+
+MAX_CONCAT_SLOTS = 30
+DEFAULT_CONCAT_SLOTS = 3
+
+
+class TextConcatenateDynamic:
+    """
+    Text Concatenate-Mika.
+
+    Slots dinámicos controlados por text_count.
+
+    Cada slot es una caja de texto editable:
+    - text_1
+    - text_2
+    - text_3
+    ...
+
+    separator acepta escapes:
+    - \n
+    - \t
+    - \r
+    - \r\n
+    - /n alias opcional
+
+    clean_output=True limpia textos vacíos, espacios y duplicados.
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+
+        for i in range(1, MAX_CONCAT_SLOTS + 1):
+            optional[f"text_{i}"] = ("STRING", {"default": ""})
+
+        optional["separator"] = ("STRING", {"default": ""})
+        optional["clean_output"] = ("BOOLEAN", {"default": False})
+
+        optional["text_count"] = (
+            "INT",
+            {
+                "default": DEFAULT_CONCAT_SLOTS,
+                "min": 1,
+                "max": MAX_CONCAT_SLOTS,
+                "step": 1,
+                "display": "number",
+            },
+        )
+
+        return {
+            "required": {},
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(
+        self,
+        separator="",
+        clean_output=False,
+        text_count=DEFAULT_CONCAT_SLOTS,
+        **kwargs,
+    ):
+        separator = self._scalar(separator, "")
+        text_count = self._scalar(text_count, DEFAULT_CONCAT_SLOTS)
+        clean_output = _mika_coerce_bool(clean_output, False)
+
+        try:
+            count = int(text_count)
+        except Exception:
+            count = DEFAULT_CONCAT_SLOTS
+
+        count = max(1, min(MAX_CONCAT_SLOTS, count))
+
+        sep = _mika_decode_separator(separator)
+
+        texts = []
+
+        for i in range(1, count + 1):
+            value = None
+
+            # Compatibilidad con versiones previas que hayan usado text_i_text.
+            for key in (f"text_{i}", f"text_{i}_text"):
+                if key in kwargs:
+                    candidate = self._scalar(kwargs.get(key), None)
+                    if candidate is not None:
+                        value = candidate
+                        break
+
+            if value is None:
+                value = ""
+
+            if not isinstance(value, str):
+                value = str(value)
+
+            if clean_output:
+                value = value.strip()
+
+            if value == "":
+                continue
+
+            texts.append(value)
+
+        if not texts:
+            result = ""
+        elif len(texts) == 1:
+            result = texts[0]
+        else:
+            result = sep.join(texts)
+
+            if clean_output and result:
+                if sep:
+                    parts = [p.strip() for p in result.split(sep)]
+                    parts = [p for p in parts if p != ""]
+                    result = sep.join(parts)
+
+                result = re.sub(r" {2,}", " ", result)
+
+        # El separador también se agrega al final del último tag.
+        if texts and sep:
+            result = result + sep
+
+        return (result,)
+
+
+class LoadImageMika:
+    """
+    Load Image Path-Mika: carga una imagen solo desde ruta local o URL,
+    con opción RGBA, máscara de alfa, dimensiones opcionales y nombre de
+    archivo. Sin preview ni MaskEditor.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_path": ("STRING", {"default": "./ComfyUI/input/example.png", "multiline": False}),
+                "RGBA": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "output_dimensions": ("BOOLEAN", {"default": True}),
+                "filename_text_extension": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "INT")
+    RETURN_NAMES = ("image", "mask", "filename_text", "width", "height")
+    FUNCTION = "load_image"
+    CATEGORY = "Mika Utilidades/image"
+
+    def load_image(self, image_path, RGBA=False, output_dimensions=True, filename_text_extension=True):
+        if not isinstance(image_path, str):
+            image_path = str(image_path) if image_path is not None else ""
+        raw_path = image_path.strip()
+        source_path = raw_path
+
+        i = None
+
+        if raw_path.startswith('http'):
+            i = self.download_image(raw_path)
+            if i is not None:
+                i = ImageOps.exif_transpose(i)
+        else:
+            resolved_path = _mika_resolve_local_path(raw_path)
+            if resolved_path is not None:
+                source_path = resolved_path
+                try:
+                    i = Image.open(resolved_path)
+                    i = ImageOps.exif_transpose(i)
+                except OSError:
+                    print(f"Load Image Path-Mika: La imagen '{raw_path.strip()}' no existe!")
+            else:
+                print(f"Load Image Path-Mika: La imagen '{raw_path.strip()}' no existe!")
+
+        if i is None:
+            i = Image.new(mode='RGB', size=(512, 512), color=(0, 0, 0))
+
+        if output_dimensions:
+            width, height = i.size
+        else:
+            width, height = 0, 0
+
+        image = i
+
+        if RGBA:
+            # RGBA exige 4 canales: L/P daban tensores 2D sin canal y
+            # LA daba 2 canales, rompiendo el contrato IMAGE [B,H,W,C].
+            image = i.convert("RGBA")
+        else:
+            image = i.convert("RGB")
+
+        image = np.array(image).astype(np.float32) / 255.0
+        image = torch.from_numpy(image)[None,]
+
+        if 'A' in i.getbands():
+            mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
+            mask = 1. - torch.from_numpy(mask)
+            # La máscara queda batcheada: (1, H, W), igual que NameMika.
+            mask = mask.unsqueeze(0)
+        else:
+            w, h = i.size
+            mask = torch.zeros((1, h, w), dtype=torch.float32)
+
+        if filename_text_extension:
+            filename = os.path.basename(source_path)
+        else:
+            filename = os.path.splitext(os.path.basename(source_path))[0]
+
+        return (image, mask, filename, width, height)
+
+    def download_image(self, url):
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+
+            if len(response.content) > 200 * 1024 * 1024:
+                print(f"Load Image Path-Mika: descarga demasiado grande ({url}): {len(response.content)} bytes")
+                return None
+
+            img = Image.open(BytesIO(response.content))
+            img.load()
+            return img
+        except requests.exceptions.HTTPError as errh:
+            print(f"Load Image Path-Mika HTTP Error ({url}): {errh}")
+        except requests.exceptions.ConnectionError as errc:
+            print(f"Load Image Path-Mika Connection Error ({url}): {errc}")
+        except requests.exceptions.Timeout as errt:
+            print(f"Load Image Path-Mika Timeout ({url}): {errt}")
+        except Exception as e:
+            print(f"Load Image Path-Mika Error: {e}")
+
+        return None
+
+    @classmethod
+    def IS_CHANGED(cls, image_path='', **kwargs):
+        if isinstance(image_path, (list, tuple)):
+            image_path = image_path[0] if len(image_path) > 0 else ''
+        if not isinstance(image_path, str):
+            image_path = str(image_path) if image_path is not None else ''
+
+        if image_path.strip().startswith('http'):
+            return float("NaN")
+
+        resolved = _mika_resolve_local_path(image_path)
+        if not resolved:
+            return None
+
+        h = _mika_hash_file(resolved)
+        return h if h is not None else float("NaN")
+
+
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".jfif")
+
+
+def _mika_list_images(directory):
+    """Lista de rutas de imágenes válidas en un directorio, ordenada."""
+    if not directory or not os.path.isdir(directory):
+        return []
+
+    try:
+        files = [
+            os.path.join(directory, f)
+            for f in os.listdir(directory)
+            if os.path.isfile(os.path.join(directory, f))
+            and f.lower().endswith(_IMAGE_EXTENSIONS)
+        ]
+    except OSError:
+        return []
+
+    return sorted(files)
+
+
+def _mika_resolve_local_path(path):
+    """Normaliza una ruta local y devuelve la primera candidata existente.
+
+    Acepta comillas envolventes (copiar/pegar), ~, variables de entorno y
+    rutas relativas a CWD, a la base de ComfyUI o a input/output/temp.
+    Devuelve None si ninguna candidata existe.
+    """
+    if path is None:
+        return None
+    if not isinstance(path, str):
+        path = str(path)
+    p = path.strip().strip('"').strip("'").strip()
+    if not p:
+        return None
+
+    p = os.path.expanduser(os.path.expandvars(p))
+
+    candidates = [p]
+    if not os.path.isabs(p):
+        candidates.append(os.path.abspath(p))
+        try:
+            candidates.append(os.path.join(folder_paths.base_path, p))
+        except Exception:
+            pass
+        for fn in ("get_input_directory", "get_output_directory", "get_temp_directory"):
+            try:
+                d = getattr(folder_paths, fn)()
+            except Exception:
+                continue
+            if d:
+                candidates.append(os.path.join(d, p))
+                candidates.append(os.path.join(d, os.path.basename(p)))
+
+    for c in candidates:
+        try:
+            if c and os.path.isfile(c):
+                return os.path.abspath(c)
+        except Exception:
+            continue
+    return None
+
+
+class LoadImageDirMika:
+    """
+    Load Image from Dir-Mika: carga una imagen desde un directorio,
+    seleccionándola por nombre de archivo o por índice dentro de la lista
+    ordenada de imágenes del directorio.
+
+    Modos de carga (load_mode):
+    - by_name: usa "image_name" (nombre de archivo, con o sin extensión).
+    - by_index: usa "image_index" (índice 0-based sobre la lista ordenada).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "directory": ("STRING", {"default": "./ComfyUI/input", "multiline": False}),
+                "load_mode": (["by_name", "by_index"], {"default": "by_name"}),
+            },
+            "optional": {
+                "image_name": ("STRING", {"default": "", "multiline": False}),
+                "image_index": ("INT", {"default": 0, "min": 0, "max": 1000000}),
+                "RGBA": ("BOOLEAN", {"default": False}),
+                "output_dimensions": ("BOOLEAN", {"default": True}),
+                "filename_text_extension": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "INT")
+    RETURN_NAMES = ("image", "mask", "filename_text", "width", "height")
+    FUNCTION = "load_image"
+    CATEGORY = "Mika Utilidades/image"
+
+    @staticmethod
+    def _unwrap_scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    def _resolve_path(self, directory, load_mode, image_name, image_index):
+        directory = os.path.abspath(os.path.expanduser((directory or "").strip()))
+
+        files = _mika_list_images(directory)
+
+        if load_mode == "by_index":
+            idx = self._unwrap_scalar(image_index, 0)
+            try:
+                idx = int(idx)
+            except (TypeError, ValueError):
+                idx = 0
+
+            if idx < 0 or idx >= len(files):
+                print(f"Load Image from Dir-Mika: índice {idx} fuera de rango (0..{max(len(files)-1, 0)}).")
+                idx = 0
+
+            if not files:
+                return None, ""
+
+            return files[idx], os.path.basename(files[idx])
+
+        name = self._unwrap_scalar(image_name, "")
+        name = str(name).strip()
+
+        if not name:
+            if not files:
+                return None, ""
+            return files[0], os.path.basename(files[0])
+
+        # Si la ruta ya existe tal cual, se usa directamente.
+        if os.path.isfile(name):
+            return name, os.path.basename(name)
+
+        # Buscar por nombre con o sin extensión, case-insensitive.
+        base = os.path.splitext(os.path.basename(name))[0].lower()
+
+        for f in files:
+            fname = os.path.basename(f)
+            fbase = os.path.splitext(fname)[0].lower()
+
+            if fname.lower() == name.lower() or fbase == base:
+                return f, fname
+
+        print(f"Load Image from Dir-Mika: no se encontró '{name}' en '{directory}'.")
+        return None, name
+
+    def load_image(self, directory, load_mode="by_name", image_name="",
+                   image_index=0, RGBA=False, output_dimensions=True,
+                   filename_text_extension=True):
+        image_path, filename = self._resolve_path(
+            directory, load_mode, image_name, image_index
+        )
+
+        i = None
+
+        if image_path:
+            try:
+                i = Image.open(image_path)
+                i = ImageOps.exif_transpose(i)
+            except OSError:
+                i = None
+
+        if i is None:
+            i = Image.new(mode='RGB', size=(512, 512), color=(0, 0, 0))
+
+        if output_dimensions:
+            width, height = i.size
+        else:
+            width, height = 0, 0
+
+        image = i
+
+        if RGBA:
+            # RGBA exige 4 canales: L/P daban tensores 2D sin canal y
+            # LA daba 2 canales, rompiendo el contrato IMAGE [B,H,W,C].
+            image = i.convert("RGBA")
+        else:
+            image = i.convert("RGB")
+
+        image = np.array(image).astype(np.float32) / 255.0
+        image = torch.from_numpy(image)[None,]
+
+        if 'A' in i.getbands():
+            mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
+            mask = 1. - torch.from_numpy(mask)
+            # La máscara queda batcheada: (1, H, W), igual que NameMika.
+            mask = mask.unsqueeze(0)
+        else:
+            w, h = i.size
+            mask = torch.zeros((1, h, w), dtype=torch.float32)
+
+        if filename_text_extension:
+            filename = os.path.basename(filename) if filename else ""
+        else:
+            filename = os.path.splitext(os.path.basename(filename))[0] if filename else ""
+
+        return (image, mask, filename, width, height)
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        directory = kwargs.get('directory', '')
+        load_mode = kwargs.get('load_mode', 'by_name')
+        image_name = kwargs.get('image_name', '')
+        image_index = kwargs.get('image_index', 0)
+
+        inst = cls()
+        image_path, _ = inst._resolve_path(
+            directory, load_mode, image_name, image_index
+        )
+
+        if not image_path or not os.path.exists(image_path):
+            return None
+
+        return _mika_hash_file(image_path) or None
+
+
+class SmartTagFilterMika:
+    r"""
+    Smart Tag Filter-Mika: filtra tags con soporte de pesos, caracteres
+    especiales y prefijos de color. Modo include/exclude.
+
+    Opción nueva:
+    - add_comma_space_end: si está activa, agrega ", " al final del
+      texto filtrado.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("*",),
+                "filter_tags": ("*",),
+                "mode": (["include", "exclude"],),
+            },
+            "optional": {
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+                "ignore_weight": ("BOOLEAN", {"default": False}),
+                "ignore_color_prefix": ("BOOLEAN", {"default": False}),
+                "add_comma_space_end": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("filtered", "matched", "unmatched")
+    FUNCTION = "filter_tags"
+    CATEGORY = "Mika Utilidades/tags"
+
+    @staticmethod
+    def _to_text(value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _ensure_trailing_comma_space(text):
+        """
+        Agrega ', ' al final del texto, normalizando si ya termina
+        con coma, espacios o coma+espacio.
+        """
+        if not isinstance(text, str):
+            text = str(text)
+
+        if not text.strip():
+            return text
+
+        # Elimina comas y espacios sobrantes al final.
+        clean = re.sub(r"[,\s]*$", "", text.rstrip())
+
+        if not clean:
+            return ""
+
+        return clean + ", "
+
+    def filter_tags(
+        self,
+        prompt,
+        filter_tags,
+        mode="include",
+        case_sensitive=False,
+        ignore_weight=False,
+        ignore_color_prefix=False,
+        add_comma_space_end=False,
+    ):
+        prompt = self._to_text(prompt)
+        filter_tags = self._to_text(filter_tags)
+
+        mode = self._scalar(mode, "include")
+        if mode not in ("include", "exclude"):
+            mode = "include"
+
+        case_sensitive = _mika_coerce_bool(self._scalar(case_sensitive, False))
+        ignore_weight = _mika_coerce_bool(self._scalar(ignore_weight, False))
+        ignore_color_prefix = _mika_coerce_bool(
+            self._scalar(ignore_color_prefix, False)
+        )
+        add_comma_space_end = _mika_coerce_bool(
+            self._scalar(add_comma_space_end, False)
+        )
+
+        prompt_tags = _parse_prompt(prompt, case_sensitive)
+        filter_list = _parse_prompt(filter_tags, case_sensitive)
+
+        if not filter_list:
+            matched = []
+            unmatched = prompt_tags
+        else:
+            matched = []
+            unmatched = []
+
+            for ptag in prompt_tags:
+                found = any(
+                    _tags_match(ptag, ftag, ignore_weight, ignore_color_prefix)
+                    for ftag in filter_list
+                )
+
+                if found:
+                    matched.append(ptag)
+                else:
+                    unmatched.append(ptag)
+
+        result_tags = matched if mode == "include" else unmatched
+
+        filtered = ", ".join([t["original"] for t in result_tags])
+        matched_str = ", ".join([t["original"] for t in matched])
+        unmatched_str = ", ".join([t["original"] for t in unmatched])
+
+        if add_comma_space_end:
+            filtered = self._ensure_trailing_comma_space(filtered)
+
+        return (filtered, matched_str, unmatched_str)
+
+
+MAX_TAGIF_SLOTS = 6
+
+
+class TagIfMika:
+    """
+    Tag If-Mika: condicional por presencia de tags. Hasta 6 pares
+    find/output dinámicos con botones +/-.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+
+        for i in range(1, MAX_TAGIF_SLOTS + 1):
+            optional[f"find_{i}"] = ("STRING", {"default": "", "multiline": False})
+            optional[f"output_{i}"] = ("STRING", {"default": "", "multiline": False})
+
+        return {
+            "required": {
+                "tags": ("STRING",),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = tuple(["STRING"] * (MAX_TAGIF_SLOTS + 1))
+    RETURN_NAMES = tuple([f"output_{i}" for i in range(1, MAX_TAGIF_SLOTS + 1)] + ["combined"])
+    FUNCTION = "tag"
+    CATEGORY = "Mika Utilidades/tags"
+    OUTPUT_NODE = True
+
+    def parse_smart_tag(self, tag_text):
+        original = tag_text.strip()
+        if not original:
+            return None
+
+        original = _escape_emoticones(original)
+        stripped = original.strip()
+
+        while stripped.startswith('(') and stripped.endswith(')'):
+            inner = stripped[1:-1].strip()
+
+            if ':' in inner:
+                parts = inner.rsplit(':', 1)
+                if len(parts) == 2:
+                    try:
+                        float(parts[1])
+                        stripped = parts[0].strip()
+                        break
+                    except ValueError:
+                        pass
+
+            stripped = inner.strip()
+
+        normalized = stripped.lower().replace(' ', '_').replace('-', '_')
+        return _unescape_emoticones(normalized)
+
+    def parse_tags_list(self, tag_string):
+        if not tag_string or not tag_string.strip():
+            return []
+
+        tag_string = _escape_emoticones(tag_string)
+
+        tags = []
+        current = ''
+        paren_depth = 0
+        escaped = False
+
+        for char in tag_string:
+            if escaped:
+                current += char
+                escaped = False
+            elif char == '\\':
+                current += char
+                escaped = True
+            elif char == '(':
+                paren_depth += 1
+                current += char
+            elif char == ')' and paren_depth > 0:
+                paren_depth -= 1
+                current += char
+            elif char == ',' and paren_depth == 0:
+                if current.strip():
+                    parsed = self.parse_smart_tag(current)
+                    if parsed:
+                        tags.append(parsed)
+                current = ''
+            else:
+                current += char
+
+        if current.strip():
+            parsed = self.parse_smart_tag(current)
+            if parsed:
+                tags.append(parsed)
+
+        return tags
+
+    def tag(self, tags, **kwargs):
+        tag_list = self.parse_tags_list(tags)
+        outputs = []
+
+        for i in range(1, MAX_TAGIF_SLOTS + 1):
+            find_val = kwargs.get(f"find_{i}", "")
+            out_val = kwargs.get(f"output_{i}", "")
+            # Los slots linkeados pueden entregar None (o no-strings):
+            # normaliza antes de comparar/unir.
+            find_val = str(find_val) if find_val is not None else ""
+            out_val = str(out_val) if out_val is not None else ""
+
+            matched = bool(find_val.strip()) and (self.parse_smart_tag(find_val) in tag_list)
+            outputs.append(out_val if matched else "")
+
+        combined = ", ".join([o for o in outputs if o])
+
+        return tuple(outputs + [combined])
+
+
+class TagRemoverMika:
+    """
+    Tag Remover-Mika: remueve tags de un prompt usando el algoritmo simple
+    de LevelPixel extendido con manejo de pesos, paréntesis anidados y
+    tags escapados.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "tags": ("*",),
+                "exclude_tags": ("*",),
+            },
+            "optional": {
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+                "ignore_weight": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "INT")
+    RETURN_NAMES = ("result", "removed_tags", "removed_count")
+    FUNCTION = "tag"
+    CATEGORY = "Mika Utilidades/tags"
+    OUTPUT_NODE = True
+
+    @staticmethod
+    def _to_text(value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)
+
+    @staticmethod
+    def _split_tags(text):
+        tags = []
+        current = ''
+        depth = 0
+        escaped = False
+
+        for char in text:
+            if escaped:
+                current += char
+                escaped = False
+            elif char == '\\':
+                current += char
+                escaped = True
+            elif char == '(':
+                depth += 1
+                current += char
+            elif char == ')' and depth > 0:
+                depth -= 1
+                current += char
+            elif char == ',' and depth == 0:
+                if current.strip():
+                    tags.append(current.strip())
+                current = ''
+            else:
+                current += char
+
+        if current.strip():
+            tags.append(current.strip())
+
+        return tags
+
+    @staticmethod
+    def _normalize_for_compare(tag, case_sensitive=False, ignore_weight=True):
+        tag = tag.strip()
+
+        if not tag:
+            return ""
+
+        if ignore_weight:
+            while tag.startswith('(') and tag.endswith(')'):
+                inner = tag[1:-1].strip()
+
+                if ':' in inner:
+                    parts = inner.rsplit(':', 1)
+                    try:
+                        float(parts[1])
+                        tag = parts[0].strip()
+                        break
+                    except ValueError:
+                        tag = inner
+                else:
+                    tag = inner
+
+        tag = tag.replace('\\(', '(').replace('\\)', ')').replace('\\,', ',').replace('\\:', ':')
+
+        if not case_sensitive:
+            tag = tag.lower()
+
+        tag = tag.replace('-', '_').replace(' ', '_')
+
+        return tag
+
+    def tag(self, tags, exclude_tags, case_sensitive=False, ignore_weight=True):
+        tags_text = self._to_text(tags)
+        exclude_text = self._to_text(exclude_tags)
+
+        tag_list = self._split_tags(tags_text)
+        exclude_list = self._split_tags(exclude_text)
+
+        if not exclude_list:
+            return (tags_text, "", 0)
+
+        exclude_set = set()
+
+        for t in exclude_list:
+            norm = self._normalize_for_compare(t, case_sensitive, ignore_weight)
+            if norm:
+                exclude_set.add(norm)
+
+        kept = []
+        removed = []
+
+        for tag in tag_list:
+            norm = self._normalize_for_compare(tag, case_sensitive, ignore_weight)
+
+            if norm and norm in exclude_set:
+                removed.append(tag)
+            else:
+                kept.append(tag)
+
+        result = ", ".join(kept)
+        removed_str = ", ".join(removed)
+
+        return (result, removed_str, len(removed))
+
+
+class TagEnchantMika:
+    """
+    Tag Enchant-Mika: encanta un tag o palabra del prompt con sintaxis
+    (tag:peso) y saca el prompt completo.
+
+    - tag: tag o palabra a encantar (ej. "fat").
+    - start/step/count: rango automático de pesos (start, start+step,
+      ...) tan largo como count.
+    - prompt: salida simple con el primer peso; prompt_list: un
+      prompt completo por peso (OUTPUT_IS_LIST, ideal para XY plot
+      o loops). weights: los pesos usados.
+    Si el tag no está en el prompt, el prompt se devuelve intacto.
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _split_top_level(text):
+        tags = []
+        current = ''
+        depth = 0
+        escaped = False
+
+        for char in text:
+            if escaped:
+                current += char
+                escaped = False
+            elif char == '\\':
+                current += char
+                escaped = True
+            elif char == '(':
+                depth += 1
+                current += char
+            elif char == ')' and depth > 0:
+                depth -= 1
+                current += char
+            elif char == ',' and depth == 0:
+                if current.strip():
+                    tags.append(current.strip())
+                current = ''
+            else:
+                current += char
+
+        if current.strip():
+            tags.append(current.strip())
+
+        return tags
+
+    @staticmethod
+    def _normalize(text, case_sensitive=False):
+        t = text.strip()
+        if not case_sensitive:
+            t = t.lower()
+        return t.replace(' ', '_').replace('-', '_')
+
+    @staticmethod
+    def _strip_weight(segment):
+        seg = segment.strip()
+        while seg.startswith('(') and seg.endswith(')'):
+            inner = seg[1:-1].strip()
+            if ':' in inner:
+                head, _, tail = inner.rpartition(':')
+                try:
+                    float(tail.strip())
+                    seg = head.strip()
+                    break
+                except ValueError:
+                    seg = inner
+            else:
+                seg = inner
+        return seg
+
+    @staticmethod
+    def _fmt_weight(w):
+        return f"{w:.3f}".rstrip('0').rstrip('.')
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
+                "tag": ("STRING", {"default": "", "multiline": False}),
+                "start": ("FLOAT", {"default": 1.1, "min": -10.0, "max": 10.0, "step": 0.05}),
+                "step": ("FLOAT", {"default": 0.1, "min": -5.0, "max": 5.0, "step": 0.05}),
+                "count": ("INT", {"default": 5, "min": 1, "max": 50, "step": 1}),
+            },
+            "optional": {
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("prompt", "prompt_list", "weights")
+    OUTPUT_IS_LIST = (False, True, True)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/tags"
+
+    def doit(self, prompt="", tag="", start=1.1, step=0.1,
+             count=5, case_sensitive=False):
+        prompt = str(self._scalar(prompt, ""))
+        tag = str(self._scalar(tag, ""))
+        case_sensitive = _mika_coerce_bool(
+            self._scalar(case_sensitive, False), False)
+
+        try:
+            start = float(self._scalar(start, 1.1))
+        except (TypeError, ValueError):
+            start = 1.1
+        try:
+            step = float(self._scalar(step, 0.1))
+        except (TypeError, ValueError):
+            step = 0.1
+        try:
+            count = int(self._scalar(count, 5))
+        except (TypeError, ValueError):
+            count = 5
+        count = max(1, min(50, count))
+
+        weights = [round(start + i * step, 3) for i in range(count)]
+        wstrs = [self._fmt_weight(w) for w in weights]
+
+        target = self._normalize(tag, case_sensitive)
+        if not target or not prompt.strip():
+            return (prompt, [prompt] * count, wstrs)
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        word_pat = re.compile(
+            r"(?<![A-Za-z0-9])"
+            + re.escape(target).replace("_", r"[ _\-]+")
+            + r"(?![A-Za-z0-9])",
+            flags,
+        )
+
+        plan = []
+        for seg in self._split_top_level(prompt):
+            parsed = _parse_smart_tag(seg, case_sensitive)
+            if parsed is not None and parsed["base"] == target:
+                core = self._strip_weight(seg) or tag.strip()
+                plan.append((seg, "full", core))
+            elif word_pat.search(self._strip_weight(seg)):
+                plan.append((seg, "word", self._strip_weight(seg)))
+            else:
+                plan.append((seg, "keep", seg))
+
+        def build(wstr):
+            out = []
+            for seg, kind, core in plan:
+                if kind == "full":
+                    out.append(f"({core}:{wstr})")
+                elif kind == "word":
+                    out.append(word_pat.sub(
+                        lambda m: f"({m.group(0)}:{wstr})", core, count=1))
+                else:
+                    out.append(seg)
+            return ", ".join(out)
+
+        prompts = [build(w) for w in wstrs]
+        return (prompts[0], prompts, wstrs)
+
+
+MAX_SWAPS = 30
+DEFAULT_SWAPS_VISIBLE = 3
+
+
+class TagSwapListMika:
+    """
+    Tag Swap List-Mika: cambia el tag seleccionado por una serie de
+    tags y saca el prompt completo con cada reemplazo.
+
+    - tag: tag o palabra a reemplazar (ej. "fat").
+    - repl_1..N: tags de reemplazo, expandibles manualmente con
+      replacement_count (solo cuentan los primeros N no vacíos).
+    - prompt: salida simple con el primer reemplazo; prompt_list:
+      un prompt completo por reemplazo (OUTPUT_IS_LIST, ideal para
+      XY plot o loops). replaced: la lista de tags de reemplazo
+      usados (un item por prompt de la lista).
+    Si el tag no está en el prompt, el prompt se devuelve intacto.
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+
+        for i in range(1, MAX_SWAPS + 1):
+            optional[f"repl_{i}"] = ("STRING", {"default": "", "multiline": False})
+
+        optional["replacement_count"] = (
+            "INT",
+            {
+                "default": DEFAULT_SWAPS_VISIBLE,
+                "min": 1,
+                "max": MAX_SWAPS,
+                "step": 1,
+                "display": "number",
+            },
+        )
+        optional["case_sensitive"] = ("BOOLEAN", {"default": False})
+
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
+                "tag": ("STRING", {"default": "", "multiline": False}),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("prompt", "prompt_list", "replaced")
+    OUTPUT_IS_LIST = (False, True, True)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/tags"
+
+    def doit(self, prompt="", tag="",
+             replacement_count=DEFAULT_SWAPS_VISIBLE,
+             case_sensitive=False, **kwargs):
+        prompt = str(self._scalar(prompt, ""))
+        tag = str(self._scalar(tag, ""))
+        case_sensitive = _mika_coerce_bool(
+            self._scalar(case_sensitive, False), False)
+
+        try:
+            visible = int(self._scalar(replacement_count, DEFAULT_SWAPS_VISIBLE))
+        except (TypeError, ValueError):
+            visible = DEFAULT_SWAPS_VISIBLE
+        visible = max(1, min(MAX_SWAPS, visible))
+
+        replacements = []
+        for i in range(1, visible + 1):
+            value = self._scalar(kwargs.get(f"repl_{i}", ""), "")
+            value = str(value).strip() if value is not None else ""
+            if value:
+                replacements.append(value)
+
+        if not replacements or not prompt.strip():
+            return (prompt, [prompt], [])
+
+        target = TagEnchantMika._normalize(tag, case_sensitive)
+        if not target:
+            return (prompt, [prompt] * len(replacements), [])
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        word_pat = re.compile(
+            r"(?<![A-Za-z0-9])"
+            + re.escape(target).replace("_", r"[ _\-]+")
+            + r"(?![A-Za-z0-9])",
+            flags,
+        )
+
+        plan = []
+        for seg in TagEnchantMika._split_top_level(prompt):
+            parsed = _parse_smart_tag(seg, case_sensitive)
+            if parsed is not None and parsed["base"] == target:
+                plan.append((seg, "full"))
+            elif word_pat.search(TagEnchantMika._strip_weight(seg)):
+                plan.append((seg, "word"))
+            else:
+                plan.append((seg, "keep"))
+
+        if not any(kind != "keep" for _, kind in plan):
+            return (prompt, [prompt] * len(replacements), [])
+
+        def build(repl):
+            out = []
+            for seg, kind in plan:
+                if kind == "full":
+                    out.append(repl)
+                elif kind == "word":
+                    core = TagEnchantMika._strip_weight(seg)
+                    out.append(word_pat.sub(repl, core, count=1))
+                else:
+                    out.append(seg)
+            return ", ".join(out)
+
+        prompts = [build(r) for r in replacements]
+        return (prompts[0], prompts, replacements)
+
+
+class TagSwapOrganizerMika:
+    """
+    Tag Editor-Mika: solo edición, sin entradas ni salidas.
+
+    Organiza reemplazos sobre un nodo de texto (ej. Prompt Edit
+    (Loop)-Mika), detectado por su título. Toda la configuración vive
+    en el nodo y se edita en la ventana flotante del botón "Configurar":
+    - destino (título del nodo) + sensible a mayúsculas,
+    - replaces: pares find/replace (find admite varios tags por coma),
+    - removes: tags a eliminar,
+    - adds: tags a añadir al final si aún no están.
+    Cada entrada tiene su propio botón de acción con el cambio en el
+    nombre ("red shirt → red shorts", "− blue jeans", "+ hat"): aplica
+    SOLO esa entrada, sin cables ni cola de ejecución.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # Orden estable: target_title/datos/case_sensitive ocultos via
+        # JS. Sin slots: el nodo no se ejecuta por cables, solo edita.
+        return {
+            "required": {},
+            "optional": {
+                "target_title": ("STRING", {"default": "", "multiline": False}),
+                "datos": ("STRING", {
+                    "default": '{"replaces": [], "removes": [], "adds": []}',
+                    "multiline": True,
+                }),
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "doit"
+    OUTPUT_NODE = True
+    CATEGORY = "Mika Utilidades/tags"
+
+    def doit(self, target_title="", datos="", case_sensitive=False):
+        return ()
+
+
+class TagEnchantListMika:
+    """
+    Tag Enchant List-Mika: variante de Tag Enchant que actúa sobre una
+    lista (un item por línea). Sin expandir: salen las mismas líneas,
+    cada una encantada con su peso según start/step.
+
+    - Línea no vacía i -> peso start + i*step (el índice avanza por
+      línea no vacía, haya o no match en esa línea).
+    - modo fijo: todas las líneas con el peso start.
+    - text: salida simple multilínea; weights: pesos usados (lista).
+    Las líneas vacías o sin el tag salen intactas.
+    Con INPUT_IS_LIST recibe la lista cableada completa en una sola
+    ejecución (si no, ComfyUI ejecutaría una vez por línea y todas
+    saldrían con el peso inicial).
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _unwrap_text(value):
+        if value is None:
+            return ""
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return ""
+            if len(value) == 1:
+                inner = value[0]
+                if isinstance(inner, (list, tuple)):
+                    return "\n".join(str(x) for x in inner)
+                return inner if isinstance(inner, str) else str(inner)
+            return "\n".join(str(x) for x in value)
+        return value if isinstance(value, str) else str(value)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
+                "tag": ("STRING", {"default": "", "multiline": False}),
+                "start": ("FLOAT", {"default": 1.1, "min": -10.0, "max": 10.0, "step": 0.05}),
+                "step": ("FLOAT", {"default": 0.1, "min": -5.0, "max": 5.0, "step": 0.05}),
+                "modo": (["incremental", "fijo"], {"default": "incremental"}),
+            },
+            "optional": {
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "weights")
+    OUTPUT_IS_LIST = (False, True)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/tags"
+
+    # Recibir la lista cableada COMPLETA sin que ComfyUI la expanda
+    # (una ejecución por línea daría peso fijo = start en todas).
+    INPUT_IS_LIST = True
+
+    def doit(self, text="", tag="", start=1.1, step=0.1, modo="incremental",
+             case_sensitive=False):
+        text = self._unwrap_text(text)
+        tag = str(self._scalar(tag, ""))
+        case_sensitive = _mika_coerce_bool(
+            self._scalar(case_sensitive, False), False)
+
+        try:
+            start = float(self._scalar(start, 1.1))
+        except (TypeError, ValueError):
+            start = 1.1
+        try:
+            step = float(self._scalar(step, 0.1))
+        except (TypeError, ValueError):
+            step = 0.1
+        fixed = str(self._scalar(modo, "incremental")).strip().lower() in (
+            "fijo", "fija", "fixed", "fix")
+
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+        target = TagEnchantMika._normalize(tag, case_sensitive)
+        if not target:
+            return (text, [])
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        word_pat = re.compile(
+            r"(?<![A-Za-z0-9])"
+            + re.escape(target).replace("_", r"[ _\-]+")
+            + r"(?![A-Za-z0-9])",
+            flags,
+        )
+
+        out_lines = []
+        wstrs = []
+        idx = 0
+        for line in lines:
+            if not line.strip():
+                out_lines.append(line)
+                continue
+            wstr = TagEnchantMika._fmt_weight(
+                round(start, 3) if fixed else round(start + idx * step, 3))
+            idx += 1
+            wstrs.append(wstr)
+
+            parts = []
+            for seg in TagEnchantMika._split_top_level(line):
+                parsed = _parse_smart_tag(seg, case_sensitive)
+                if parsed is not None and parsed["base"] == target:
+                    core = TagEnchantMika._strip_weight(seg) or tag.strip()
+                    parts.append(f"({core}:{wstr})")
+                elif word_pat.search(TagEnchantMika._strip_weight(seg)):
+                    core = TagEnchantMika._strip_weight(seg)
+                    parts.append(word_pat.sub(
+                        lambda m: f"({m.group(0)}:{wstr})", core, count=1))
+                else:
+                    parts.append(seg)
+            out_lines.append(", ".join(parts))
+
+        return ("\n".join(out_lines), wstrs)
+
+
+class FloatOutputList:
+    """
+    Float OutputList: convierte una lista de números en texto a una
+    OutputList de FLOAT (OUTPUT_IS_LIST).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "separator": ("STRING", {"default": "\n"}),
+                "values": ("STRING", {"multiline": True, "default": "1.0\n2.0\n3.0"}),
+            }
+        }
+
+    RETURN_TYPES = ("FLOAT", "INT", "INT")
+    RETURN_NAMES = ("value", "index", "count")
+    OUTPUT_IS_LIST = (True, True, False)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/lista"
+
+    def doit(self, separator, values):
+        sep = _mika_decode_separator(separator) if separator else "\n"
+        raw_items = values.strip("\r\n").split(sep)
+
+        floats = []
+
+        for raw in raw_items:
+            item = raw.strip()
+
+            if item == "":
+                continue
+
+            try:
+                floats.append(float(item))
+            except ValueError:
+                raise ValueError(
+                    f"Float OutputList: no se pudo convertir '{item}' a un número decimal."
+                )
+
+        if not floats:
+            floats = [0.0]
+
+        indices = list(range(len(floats)))
+
+        return (floats, indices, len(floats))
+
+
+class ExecutionTimerConfig:
+    """
+    Nodo de configuración para "Mika · Tiempos de Ejecución".
+    Envía la configuración por websocket.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mostrar_panel_flotante": ("BOOLEAN", {"default": True}),
+                "mostrar_etiquetas_en_nodos": ("BOOLEAN", {"default": True}),
+                "decimales": ("INT", {"default": 2, "min": 0, "max": 4}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/tiempos"
+    OUTPUT_NODE = True
+
+    def doit(self, mostrar_panel_flotante, mostrar_etiquetas_en_nodos, decimales):
+        if PromptServer is not None and PromptServer.instance is not None:
+            PromptServer.instance.send_sync(
+                "mika-timer-config",
+                {
+                    "showPanel": bool(mostrar_panel_flotante),
+                    "showBadges": bool(mostrar_etiquetas_en_nodos),
+                    "decimals": int(decimales),
+                },
+            )
+
+        return {}
+
+
+class PromptEditLoopMika:
+    """
+    Prompt Edit (Loop)-Mika: edición de prompt con memoria entre ejecuciones
+    (bucle), sin guardado en disco. Retiene el prompt anterior y el actual.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "input_text": ("STRING", {"forceInput": True, "default": ""}),
+                "editable_text_widget": ("STRING", {"default": "", "multiline": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("prompt_anterior", "prompt_generacion_actual")
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/prompt"
+    OUTPUT_NODE = True
+
+    def run(self, input_text, editable_text_widget):
+        prompt_anterior = editable_text_widget
+        prompt_actual = input_text
+
+        return {
+            "ui": {"text": [prompt_actual]},
+            "result": (prompt_anterior, prompt_actual),
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
+class TextLineSelectorMika:
+    """
+    Text Line Selector-Mika: selecciona un rango de líneas de la caja de
+    texto y las devuelve como LISTA. Con 'delete_selected_lines' controlás
+    si se eliminan del cuadro tras cada ejecución.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 999999}),
+                "end_index": ("INT", {"default": 0, "min": 0, "max": 999999}),
+                "delete_selected_lines": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "skip_empty_lines": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("selected_lines", "remaining_text")
+    OUTPUT_IS_LIST = (True, False)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/prompt"
+    OUTPUT_NODE = True
+
+    def run(self, text, start_index, end_index, delete_selected_lines=True, skip_empty_lines=True):
+        all_lines = text.split("\n")
+
+        if skip_empty_lines:
+            lines = [line for line in all_lines if line.strip() != ""]
+        else:
+            lines = all_lines
+
+        total_lines = len(lines)
+
+        if total_lines == 0:
+            return {
+                "ui": {"text": [text]},
+                "result": ([], text),
+            }
+
+        start = max(0, min(start_index, total_lines - 1))
+        end = max(0, min(end_index, total_lines - 1))
+
+        if start > end:
+            start, end = end, start
+
+        selected = lines[start:end + 1]
+
+        if delete_selected_lines:
+            remaining_lines = lines[:start] + lines[end + 1:]
+        else:
+            remaining_lines = lines
+
+        remaining_text = "\n".join(remaining_lines)
+
+        return {
+            "ui": {"text": [remaining_text]},
+            "result": (selected, remaining_text),
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
+class TextLineStepperMika:
+    """
+    Text Line Stepper-Mika: selecciona líneas de forma ESCALONADA (auto-avanza).
+    En cada ejecución selecciona `steps` líneas empezando en `start_index`
+    (índice base) y avanza ese mismo bloque hacia el siguiente.
+    `start_index` se actualiza solo tras cada ejecución; `steps` (cantidad de
+    líneas por generación) queda FIJO.
+
+    Con auto_advance=False `start_index` queda FIJO (se detiene el avance) y
+    cada ejecución devuelve el mismo bloque.
+
+    Salidas:
+    - selected_lines: LISTA de strings con las líneas del bloque actual.
+    - current_end: STRING con el índice final usado en esta ejecución.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 999999}),
+                "steps": ("INT", {"default": 1, "min": 1, "max": 999999}),
+            },
+            "optional": {
+                "auto_advance": ("BOOLEAN", {"default": True}),
+                "skip_empty_lines": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("selected_lines", "current_end")
+    OUTPUT_IS_LIST = (True, False)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/prompt"
+    OUTPUT_NODE = True
+
+    def run(self, text, start_index, steps,
+            auto_advance=True, skip_empty_lines=True):
+        all_lines = text.split("\n")
+
+        if skip_empty_lines:
+            lines = [line for line in all_lines if line.strip() != ""]
+        else:
+            lines = all_lines
+
+        total_lines = len(lines)
+
+        if total_lines == 0:
+            return {
+                "ui": {
+                    "text": [text],
+                    "start_index": [start_index],
+                },
+                "result": ([], str(start_index)),
+            }
+
+        start = start_index % total_lines
+        count = min(steps, total_lines)
+        selected = [lines[(start + i) % total_lines] for i in range(count)]
+        current_end = (start + count - 1) % total_lines
+
+        if auto_advance:
+            next_start = (start + count) % total_lines
+        else:
+            next_start = start_index
+
+        return {
+            "ui": {
+                "text": [text],
+                "start_index": [next_start],
+            },
+            "result": (selected, str(current_end)),
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
+class ImagePreviewCleanMika:
+    """
+    Image Preview Clean-Mika: muestra una preview de imagen con botón para
+    copiar al portapapeles SIN metadata, SIN workflow. Solo la imagen pura.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "optional": {
+                "images": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "preview"
+    CATEGORY = "Mika Utilidades/image"
+    OUTPUT_NODE = True
+
+    def preview(self, images=None):
+        results = []
+
+        if images is None:
+            return {"ui": {"images": results}}
+
+        array = 255. * images.cpu().numpy()
+        array = np.clip(array, 0, 255).astype(np.uint8)
+
+        image_hash = hashlib.sha256(array.tobytes()).hexdigest()[:16]
+
+        for idx in range(array.shape[0]):
+            img = Image.fromarray(array[idx])
+
+            filename = f"mika_preview_{image_hash}_{idx}_{int(time.time())}.png"
+
+            temp_dir = folder_paths.get_temp_directory()
+            filepath = os.path.join(temp_dir, filename)
+
+            img.save(filepath, 'PNG')
+
+            results.append({
+                "filename": filename,
+                "subfolder": "",
+                "type": "temp"
+            })
+
+        return {"ui": {"images": results}}
+
+
+MAX_GROUP_SLOTS = 20
+
+
+class FastGroupsBypasserMika:
+    """
+    Fast Groups Bypasser-Mika: genera un toggle BOOLEAN linkeable por cada
+    grupo detectado. Soporta control desde FUERA del subgrafo vía WebSocket.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {
+            "groups_filter": ("STRING", {"default": "", "multiline": False}),
+        }
+
+        for i in range(1, MAX_GROUP_SLOTS + 1):
+            optional[f"group_{i}"] = ("BOOLEAN", {"default": False})
+
+        return {
+            "required": {},
+            "optional": optional,
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "pass_through"
+    CATEGORY = "Mika Utilidades/utils"
+    OUTPUT_NODE = True
+
+    def pass_through(self, groups_filter="", unique_id=None, **kwargs):
+        bypass_state = {}
+
+        for key, value in kwargs.items():
+            if key.startswith("group_") and isinstance(value, bool):
+                bypass_state[key] = value
+
+        if PromptServer is not None and PromptServer.instance is not None:
+            PromptServer.instance.send_sync(
+                "mika-bypasser-state",
+                {
+                    "node_id": str(unique_id) if unique_id else None,
+                    "bypass_state": bypass_state,
+                },
+            )
+
+        return {"ui": {"bypass_state": [bypass_state]}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        state = str(sorted(
+            [(k, v) for k, v in kwargs.items() if k.startswith("group_")]
+        ))
+        return hashlib.md5(state.encode()).hexdigest()
+
+
+class FastGroupsMuterMika:
+    """
+    Fast Groups Muter-Mika: genera un toggle BOOLEAN linkeable por cada
+    grupo detectado. Al activarlo hace MUTE (mode=2 / Never) a todos los
+    nodos del grupo, en lugar de bypass. Soporta control desde FUERA del
+    subgrafo.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {
+            "groups_filter": ("STRING", {"default": "", "multiline": False}),
+        }
+
+        for i in range(1, MAX_GROUP_SLOTS + 1):
+            optional[f"group_{i}"] = ("BOOLEAN", {"default": False})
+
+        return {
+            "required": {},
+            "optional": optional,
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "pass_through"
+    CATEGORY = "Mika Utilidades/utils"
+    OUTPUT_NODE = True
+
+    def pass_through(self, groups_filter="", unique_id=None, **kwargs):
+        mute_state = {}
+
+        for key, value in kwargs.items():
+            if key.startswith("group_") and isinstance(value, bool):
+                mute_state[key] = value
+
+        if PromptServer is not None and PromptServer.instance is not None:
+            PromptServer.instance.send_sync(
+                "mika-muter-state",
+                {
+                    "node_id": str(unique_id) if unique_id else None,
+                    "mute_state": mute_state,
+                },
+            )
+
+        return {"ui": {"mute_state": [mute_state]}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        parts = []
+        for key, value in kwargs.items():
+            if key.startswith("group_") or key == "groups_filter":
+                parts.append(f"{key}={value}")
+        return hashlib.md5("|".join(sorted(parts)).encode("utf-8")).hexdigest()
+
+
+MAX_NODE_SLOTS = 20
+
+
+class FastNodesBypasserMika:
+    """
+    Fast Nodes Bypasser-Mika.
+    Los inputs input_i se declaran hasta MAX_NODE_SLOTS para que el backend
+    acepte conexiones dinámicas. El frontend muestra/oculta los slots.
+    Los toggle_i son widgets BOOLEAN que el frontend muestra con el nombre
+    del nodo conectado en cada input_i.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+
+        for i in range(MAX_NODE_SLOTS):
+            optional[f"input_{i}"] = ("*", {"forceInput": True})
+
+        for i in range(MAX_NODE_SLOTS):
+            optional[f"toggle_{i}"] = (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "label_on": "bypass",
+                    "label_off": "off",
+                }
+            )
+
+        return {
+            "required": {},
+            "optional": optional,
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "pass_through"
+    CATEGORY = "Mika Utilidades/utils"
+    OUTPUT_NODE = True
+
+    def pass_through(self, unique_id=None, **kwargs):
+        toggle_state = {}
+
+        for i in range(MAX_NODE_SLOTS):
+            toggle_state[f"toggle_{i}"] = False
+
+        for key, value in kwargs.items():
+            if key.startswith("toggle_"):
+                toggle_state[key] = _mika_coerce_bool(value)
+
+        if PromptServer is not None and PromptServer.instance is not None:
+            PromptServer.instance.send_sync(
+                "mika-fast-nodes-bypasser",
+                {
+                    "node_id": str(unique_id) if unique_id is not None else None,
+                    "toggle_state": toggle_state,
+                },
+            )
+
+        return {"ui": {"toggle_state": [toggle_state]}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
+class FastNodesMuterMika:
+    """
+    Fast Nodes Muter-Mika.
+    Los inputs input_i se declaran hasta MAX_NODE_SLOTS para que el backend
+    acepte conexiones dinámicas. El frontend muestra/oculta los slots.
+    Los toggle_i son widgets BOOLEAN que el frontend muestra con el nombre
+    del nodo conectado en cada input_i.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+
+        for i in range(MAX_NODE_SLOTS):
+            optional[f"input_{i}"] = ("*", {"forceInput": True})
+
+        for i in range(MAX_NODE_SLOTS):
+            optional[f"toggle_{i}"] = (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "label_on": "mute",
+                    "label_off": "off",
+                }
+            )
+
+        return {
+            "required": {},
+            "optional": optional,
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "pass_through"
+    CATEGORY = "Mika Utilidades/utils"
+    OUTPUT_NODE = True
+
+    def pass_through(self, unique_id=None, **kwargs):
+        toggle_state = {}
+
+        for i in range(MAX_NODE_SLOTS):
+            toggle_state[f"toggle_{i}"] = False
+
+        for key, value in kwargs.items():
+            if key.startswith("toggle_"):
+                toggle_state[key] = _mika_coerce_bool(value)
+
+        if PromptServer is not None and PromptServer.instance is not None:
+            PromptServer.instance.send_sync(
+                "mika-fast-nodes-muter",
+                {
+                    "node_id": str(unique_id) if unique_id is not None else None,
+                    "toggle_state": toggle_state,
+                },
+            )
+
+        return {"ui": {"toggle_state": [toggle_state]}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
+MAX_UNPACK_SLOTS = 50
+
+
+class ListUnpackMika:
+    """
+    List Unpack-Mika: recibe una lista, tupla, batch o colección y la
+    separa en múltiples salidas.
+
+    IMPORTANTE: INPUT_IS_LIST = True evita que ComfyUI expanda la lista
+    y ejecute el nodo una vez por elemento (que era el bug).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "list_input": ("*", {"forceInput": True}),
+                "output_count": (
+                    "INT",
+                    {
+                        "default": 2,
+                        "min": 1,
+                        "max": MAX_UNPACK_SLOTS,
+                        "step": 1,
+                        "display": "number",
+                    },
+                ),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = tuple(["*"] * MAX_UNPACK_SLOTS)
+    RETURN_NAMES = tuple([f"output_{i}" for i in range(MAX_UNPACK_SLOTS)])
+
+    FUNCTION = "unpack"
+    CATEGORY = "Mika Utilidades/lista"
+    OUTPUT_NODE = False
+
+    # CLAVE: recibir la lista completa, sin expansión por elemento.
+    INPUT_IS_LIST = True
+
+    def unpack(self, list_input, output_count, unique_id=None):
+        # Con INPUT_IS_LIST, algunos valores pueden llegar envueltos en lista.
+        if isinstance(unique_id, (list, tuple)):
+            unique_id = unique_id[0] if unique_id else None
+
+        count = self._clamp_count(output_count)
+        items = self._normalize_to_list(list_input)
+
+        outputs = []
+
+        for i in range(MAX_UNPACK_SLOTS):
+            if i < count and i < len(items):
+                outputs.append(items[i])
+            else:
+                outputs.append(None)
+
+        if PromptServer is not None and PromptServer.instance is not None and unique_id is not None:
+            PromptServer.instance.send_sync(
+                "mika-list-unpack",
+                {
+                    "node_id": str(unique_id),
+                    "output_count": count,
+                },
+            )
+
+        return tuple(outputs)
+
+    def _clamp_count(self, value):
+        if isinstance(value, (list, tuple)):
+            value = value[0] if len(value) > 0 else 2
+
+        try:
+            count = int(value)
+        except Exception:
+            count = 2
+
+        return max(1, min(MAX_UNPACK_SLOTS, count))
+
+    def _normalize_to_list(self, value):
+        """
+        Con INPUT_IS_LIST, list_input siempre llega como lista.
+        Hay dos casos:
+        - Lista expandida (fuente OUTPUT_IS_LIST): [elem0, elem1, ...]
+        - Valor único envuelto: [valor]
+        """
+        if isinstance(value, (list, tuple)):
+            if len(value) == 1:
+                inner = value[0]
+                # Un solo objeto que a su vez es lista/tupla.
+                if isinstance(inner, (list, tuple)):
+                    return list(inner)
+                # Un solo objeto: puede ser batch, dict, tensor, string, etc.
+                return self._split_single(inner)
+
+            # Lista real con varios elementos.
+            return list(value)
+
+        return self._split_single(value)
+
+    def _split_single(self, value):
+        """
+        Convierte un objeto individual en lista de elementos.
+        Soporta LATENT batch, tensors 4D, numpy 4D, dict, list, etc.
+        """
+        if value is None:
+            return []
+
+        if isinstance(value, (list, tuple)):
+            return list(value)
+
+        if isinstance(value, set):
+            return list(value)
+
+        # Soporte para LATENT batch: {"samples": tensor, ...}
+        if isinstance(value, dict):
+            samples = value.get("samples", None)
+
+            if torch.is_tensor(samples) and samples.ndim == 4 and samples.shape[0] > 1:
+                unpacked = []
+
+                for i in range(samples.shape[0]):
+                    item = dict(value)
+                    item["samples"] = samples[i : i + 1]
+                    unpacked.append(item)
+
+                return unpacked
+
+            return [value]
+
+        # Tensors batch 4D, por ejemplo IMAGE: [B, H, W, C]
+        if isinstance(value, torch.Tensor):
+            if value.ndim == 4 and value.shape[0] > 1:
+                return [value[i : i + 1] for i in range(value.shape[0])]
+
+            return [value]
+
+        # Numpy arrays batch 4D.
+        if isinstance(value, np.ndarray):
+            if value.ndim == 4 and value.shape[0] > 1:
+                return [value[i : i + 1] for i in range(value.shape[0])]
+
+            return [value]
+
+        # Cualquier otra cosa es un único elemento.
+        return [value]
+
+
+class AnimaLineartCanvasMika:
+    """
+    Anima Lineart Canvas-Mika: resoluciones de Anima Resolutions-Mika +
+    lienzo de dibujo a mano (web/anima_lineart_canvas_mika.js) para
+    producir lineart del ControlNet-LLLite. El dibujo viaja como PNG
+    base64 en el widget oculto "dibujo".
+
+    modo="lineart": fondo negro, trazo blanco (convención de lineart).
+    modo="dibujo normal": fondo blanco, color de trazo libre.
+    """
+
+    MODOS = ["lineart", "dibujo normal"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        resoluciones = AnimaResolutionsMika.RESOLUTIONS["1024"]
+        return {
+            "required": {
+                "resolucion": (resoluciones, {"default": resoluciones[0]}),
+                "modo": (cls.MODOS, {"default": cls.MODOS[0]}),
+                "dibujo": ("STRING", {"default": "", "multiline": True}),
+            },
+            "optional": {
+                # Nombre del último archivo cargado en el lienzo (lo escribe el
+                # frontend). Se expone como salida de texto.
+                "archivo": ("STRING", {"default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING")
+    RETURN_NAMES = ("image", "width", "height", "nombre_archivo")
+    FUNCTION = "render"
+    CATEGORY = "Mika Utilidades/image"
+
+    def render(self, resolucion, modo="lineart", dibujo="", archivo=""):
+        dims = resolucion.split(" ")[0]
+        width, height = (int(v) for v in dims.split("x"))
+        bg = (0, 0, 0) if modo == "lineart" else (255, 255, 255)
+        image = _mika_lineart_to_tensor(dibujo, width, height, bg)
+        return (image, width, height, archivo)
+
+
+class AnimaResolutionsMika:
+    """
+    Anima Resolutions-Mika: selecciona resoluciones compatibles con Anima
+    en diferentes proporciones de aspecto.
+    Basado en https://github.com/cyberdelailAI/ComfyUI-anima-Resolutions
+
+    Con random=True, selecciona una resolución aleatoria de la lista.
+    Con random=False, usa el ratio seleccionado manualmente.
+    """
+
+    RESOLUTIONS = {
+        "1024": [
+            "1024x1024 (1:1)",
+            "1152x896 (9:7)",
+            "896x1152 (7:9)",
+            "1152x864 (4:3)",
+            "864x1152 (3:4)",
+            "1344x896 (3:2)",
+            "1248x832 (3:2)",
+            "896x1344 (2:3)",
+            "832x1248 (2:3)",
+            "1280x720 (16:9)",
+            "720x1280 (9:16)",
+            "1344x576 (21:9)",
+            "576x1344 (9:21)",
+        ],
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        ratios = list(cls.RESOLUTIONS["1024"])
+
+        return {
+            "required": {
+                "ratio": (ratios, {"default": "1024x1024 (1:1)"}),
+                "random": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("INT", "INT")
+    RETURN_NAMES = ("width", "height")
+    FUNCTION = "get_dimensions"
+    CATEGORY = "Mika Utilidades/resolucion"
+
+    def get_dimensions(self, ratio, random=False):
+        ratios = self.RESOLUTIONS["1024"]
+
+        # Lectura defensiva del boolean (por si viene linkeado como string)
+        if isinstance(random, str):
+            random = random.strip().lower() in ("true", "1", "yes", "on")
+        else:
+            random = bool(random)
+
+        if random:
+            selected_ratio = random_module.choice(ratios)
+        else:
+            selected_ratio = ratio
+
+        dimensions = selected_ratio.split(" ")[0]
+        width, height = dimensions.split("x")
+
+        return (int(width), int(height))
+
+    @classmethod
+    def IS_CHANGED(cls, ratio, random=False):
+        """
+        Cuando random=True, devuelve NaN para que ComfyUI NO cachee el
+        resultado y re-ejecute el nodo en cada generación, obteniendo
+        una resolución aleatoria nueva cada vez.
+
+        Cuando random=False, el resultado es determinista y cacheable.
+        """
+        if isinstance(random, str):
+            random = random.strip().lower() in ("true", "1", "yes", "on")
+        else:
+            random = bool(random)
+
+        if random:
+            return float("nan")
+
+        return ratio
+
+
+class SamplerSelectorMika:
+    """
+    Sampler Selector-Mika: lista todos los samplers instalados en ComfyUI
+    y permite seleccionar uno.
+
+    Salidas:
+    - sampler_name: nombre del sampler elegido. Es tipo "*" (wildcard) para
+      que conecte SIEMPRE al sampler_name del KSampler, aunque otras
+      extensiones agreguen samplers y las listas combo no coincidan.
+    - sampler: objeto SAMPLER, conectable a SamplerCustomAdvanced /
+      custom sampling.
+    - sampler_name_text: el nombre del sampler elegido como STRING.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        names = _mika_sampler_names()
+        return {
+            "required": {
+                "sampler_name": (names, {"default": names[0]}),
+            },
+        }
+
+    # CLAVE: la primera salida es "*" (comodín). Si acá congeláramos la
+    # lista combo exacta, ComfyUI tira "Invalid connection" cuando alguna
+    # extensión registra samplers nuevos después de nuestro import.
+    RETURN_TYPES = ("*", "SAMPLER", "STRING")
+    RETURN_NAMES = ("sampler_name", "sampler", "sampler_name_text")
+    FUNCTION = "get_sampler"
+    CATEGORY = "Mika Utilidades/sampling"
+
+    def get_sampler(self, sampler_name):
+        sampler_obj = self._get_sampler_object(sampler_name)
+        return (sampler_name, sampler_obj, str(sampler_name))
+
+    def _get_sampler_object(self, sampler_name):
+        """
+        Obtiene el objeto SAMPLER de forma compatible con diferentes
+        versiones de ComfyUI. En versiones modernas KSampler() requiere
+        más argumentos (steps, device...), por eso NO instanciamos directo.
+        """
+        samplers_dict = getattr(comfy.samplers.KSampler, "SAMPLERS", {})
+
+        # En ComfyUI recientes SAMPLERS es una lista de nombres y el
+        # objeto se construye con comfy.samplers.sampler_object().
+        if isinstance(samplers_dict, dict):
+            sampler_fn = samplers_dict.get(sampler_name)
+            if sampler_fn is not None:
+                try:
+                    return sampler_fn()
+                except TypeError:
+                    return sampler_fn
+
+        sampler_object = getattr(comfy.samplers, "sampler_object", None)
+        if callable(sampler_object):
+            return sampler_object(sampler_name)
+
+        print(f"[Mika] Sampler Selector: no se pudo obtener objeto SAMPLER para '{sampler_name}', devolviendo nombre")
+        return sampler_name
+
+
+class SchedulerSelectorMika:
+    """
+    Scheduler Selector-Mika: lista todos los schedulers instalados en
+    ComfyUI y permite seleccionar uno.
+
+    Salidas:
+    - scheduler: nombre del scheduler elegido. Es tipo "*" (wildcard) para
+      que conecte SIEMPRE al input scheduler del KSampler, aunque otras
+      extensiones agreguen schedulers y las listas combo no coincidan.
+    - scheduler_name_text: el nombre del scheduler elegido como STRING.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        names = _mika_scheduler_names()
+        return {
+            "required": {
+                "scheduler_name": (names, {"default": names[0]}),
+            },
+        }
+
+    # CLAVE: la primera salida es "*" (comodín) por la misma razón que en
+    # el Sampler Selector: evita "Invalid connection" por listas combo
+    # desactualizadas entre nuestro nodo y el KSampler.
+    RETURN_TYPES = ("*", "STRING")
+    RETURN_NAMES = ("scheduler", "scheduler_name_text")
+    FUNCTION = "get_scheduler"
+    CATEGORY = "Mika Utilidades/sampling"
+
+    def get_scheduler(self, scheduler_name):
+        # En ComfyUI el scheduler es un string: no hay objeto que crear,
+        # así que no puede fallar como KSampler().
+        return (scheduler_name, str(scheduler_name))
+
+
+class ImageSaveAutoMika:
+    """
+    Image Save Auto-Mika: igual que Image Preview Clean-Mika (preview
+    limpio SIN metadata), pero además guarda AUTOMÁTICAMENTE las imágenes
+    en la ruta local que indiques en save_path. Si la carpeta no existe,
+    la crea. Devuelve la lista de rutas guardadas.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "save_path": ("STRING", {"default": "./ComfyUI/output/mika_autosave", "multiline": False}),
+            },
+            "optional": {
+                "filename_prefix": ("STRING", {"default": "mika_img"}),
+                "format": (["png", "jpg", "webp"], {"default": "png"}),
+                "add_counter": ("BOOLEAN", {"default": True}),
+                "add_timestamp": ("BOOLEAN", {"default": False}),
+                "show_preview": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "INT")
+    RETURN_NAMES = ("saved_paths", "saved_count")
+    OUTPUT_IS_LIST = (True, False)
+    FUNCTION = "save_auto"
+    CATEGORY = "Mika Utilidades/image"
+    OUTPUT_NODE = True
+
+    def save_auto(self, images, save_path, filename_prefix="mika_img",
+                  format="png", add_counter=True, add_timestamp=False,
+                  show_preview=True):
+
+        # Resolver ruta: ~ → home; relativa → relativa al directorio de ComfyUI.
+        save_path = os.path.abspath(os.path.expanduser((save_path or "").strip()))
+        if not save_path:
+            save_path = folder_paths.get_output_directory()
+
+        try:
+            os.makedirs(save_path, exist_ok=True)
+        except Exception as e:
+            print(f"Image Save Auto-Mika: no se pudo crear la carpeta '{save_path}': {e}")
+            save_path = folder_paths.get_output_directory()
+            os.makedirs(save_path, exist_ok=True)
+
+        prefix = (filename_prefix or "mika_img").strip() or "mika_img"
+        ext = (format or "png").strip().lower()
+        if ext not in ("png", "jpg", "webp"):
+            ext = "png"
+
+        save_fmt = {"png": "PNG", "jpg": "JPEG", "webp": "WEBP"}[ext]
+
+        counter = _mika_next_counter(save_path, prefix, ext) if add_counter else None
+
+        saved_paths = []
+        preview_results = []
+
+        array = 255. * images.cpu().numpy()
+        array = np.clip(array, 0, 255).astype(np.uint8)
+
+        preview_hash = hashlib.sha256(array.tobytes()).hexdigest()[:16]
+
+        for idx in range(array.shape[0]):
+            img = Image.fromarray(array[idx])
+
+            if ext == "jpg":
+                img = img.convert("RGB")
+
+            name = prefix
+            if add_counter:
+                name += f"_{counter:05d}"
+                counter += 1
+            if add_timestamp:
+                name += f"_{int(time.time())}"
+            if len(images) > 1:
+                name += f"_{idx:02d}"
+            name += f".{ext}"
+
+            filepath = os.path.join(save_path, name)
+            img.save(filepath, save_fmt)
+            saved_paths.append(filepath)
+
+            # Copia limpia para el preview de la UI de ComfyUI (sin metadata).
+            if show_preview:
+                prev_name = f"mika_preview_{preview_hash}_{idx}_{int(time.time())}.png"
+                prev_path = os.path.join(folder_paths.get_temp_directory(), prev_name)
+                img.save(prev_path, "PNG")
+                preview_results.append({
+                    "filename": prev_name,
+                    "subfolder": "",
+                    "type": "temp",
+                })
+
+        if add_counter:
+            _mika_bump_counter(save_path, prefix, ext, counter)
+
+        print(f"Image Save Auto-Mika: {len(saved_paths)} imagen(es) guardadas en '{save_path}'.")
+
+        if show_preview and preview_results:
+            return {
+                "ui": {"images": preview_results},
+                "result": (saved_paths, len(saved_paths)),
+            }
+
+        return (saved_paths, len(saved_paths))
+
+
+class IndexIntMika:
+    """
+    Index Int-Mika: índice INT con 3 modos de operación.
+
+    - fixed:     devuelve siempre el valor de 'index' (cacheable).
+    - increment: devuelve 'index' y luego lo auto-incrementa en 'step',
+                 reflejando el avance en el widget 'index' para la próxima
+                 ejecución (con wrap opcional entre min_value y max_value).
+    - random:    sortea un valor entre min_value y max_value en cada
+                 ejecución, ignorando 'index'.
+
+    'index' es conectable: si se enlaza un nodo externo, su valor manda
+    sobre el widget.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mode": (["fixed", "increment", "random"], {"default": "fixed"}),
+                "index": ("INT", {"default": 0, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "step": 1}),
+                "step": ("INT", {"default": 1, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "step": 1}),
+                "min_value": ("INT", {"default": 0, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "step": 1}),
+                "max_value": ("INT", {"default": 999999, "min": -0xffffffffffffffff, "max": 0xffffffffffffffff, "step": 1}),
+            },
+            "optional": {
+                "wrap": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("INT", "STRING")
+    RETURN_NAMES = ("index", "index_text")
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/index"
+    OUTPUT_NODE = True
+
+    def run(self, mode, index, step, min_value, max_value, wrap=False):
+        index = int(index)
+        step = int(step)
+        lo = min(int(min_value), int(max_value))
+        hi = max(int(min_value), int(max_value))
+
+        # Lectura defensiva del boolean
+        if isinstance(wrap, str):
+            wrap = wrap.strip().lower() in ("true", "1", "yes", "on")
+        else:
+            wrap = bool(wrap)
+
+        if mode == "increment":
+            out = index
+            nxt = index + step
+            if wrap:
+                if nxt > hi:
+                    nxt = lo
+                elif nxt < lo:
+                    nxt = hi
+            return {
+                "ui": {"value": [nxt]},
+                "result": (out, str(out)),
+            }
+
+        if mode == "random":
+            out = random_module.randint(lo, hi)
+        else:  # fixed
+            out = index
+
+        return {
+            "result": (out, str(out)),
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, mode="fixed", index=0, **kwargs):
+        # fixed → cacheable; increment/random → re-ejecuta siempre.
+        if mode in ("increment", "random"):
+            return float("nan")
+        return index
+
+
+class IndexStepperMika:
+    """
+    Index Stepper-Mika: escalona índices de forma ESCALONADA (auto-avanza),
+    igual que el Text Line Stepper. En cada ejecución selecciona `steps`
+    índices empezando en `start_index` (índice base) y avanza ese mismo
+    bloque hacia el siguiente, dentro del dominio 0..max_index (cíclico).
+    `start_index` se actualiza solo tras cada ejecución; `steps` queda FIJO.
+
+    Con auto_advance=False `start_index` queda FIJO (se detiene el avance) y
+    cada ejecución devuelve el mismo bloque.
+
+    Salidas:
+    - index_list: LISTA de INT con los índices del bloque actual.
+    - current_start / current_end: INT con los límites del bloque actual.
+    - range_text: STRING "4-6".
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 1, "min": 1, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "auto_advance": ("BOOLEAN", {"default": True}),
+                "max_index": ("INT", {"default": 999999, "min": 0, "max": 0xffffffffffffffff, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("INT", "INT", "INT", "STRING")
+    RETURN_NAMES = ("index_list", "current_start", "current_end", "range_text")
+    OUTPUT_IS_LIST = (True, False, False, False)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/index"
+    OUTPUT_NODE = True
+
+    def run(self, start_index, steps, auto_advance=True, max_index=999999):
+        auto_advance = _mika_coerce_bool(auto_advance)
+
+        total = max(1, int(max_index) + 1)
+        steps = max(1, int(steps))
+
+        start = int(start_index) % total
+        count = min(steps, total)
+        index_list = [((start + i) % total) for i in range(count)]
+
+        current_start = index_list[0] if index_list else start
+        current_end = index_list[-1] if index_list else start
+
+        if auto_advance:
+            next_start = (start + count) % total
+        else:
+            next_start = int(start_index)
+
+        return {
+            "ui": {
+                "start_index": [next_start],
+            },
+            "result": (index_list, current_start, current_end, f"{current_start}-{current_end}"),
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
+# ======================================================================
+# PROMPT PRESET SELECTOR MIKA
+# Clon de "Prompt Preset Selector" que lee los archivos de presets desde
+# la carpeta propia Mika-Utilidades/presets/ (se crea automáticamente).
+# Admite .txt, .yaml y .yml, filtrado por keywords y modos de selección.
+# ======================================================================
+
+try:
+    import yaml as _mika_yaml
+except ImportError:
+    _mika_yaml = None
+
+
+class PromptPresetSelectorMika:
+    """
+    Prompt Preset Selector-Mika: clon del Prompt Preset Selector, pero
+    lee los presets desde la carpeta dedicada Mika-Utilidades/presets/
+    (recursivo, incluye subcarpetas). También admite absolute_path para
+    cargar un archivo suelto fuera de esa carpeta.
+    """
+
+    _continue_state = {}
+
+    def __init__(self):
+        self.preset_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets")
+        os.makedirs(self.preset_dir, exist_ok=True)
+
+    # ---------- listado de archivos ----------
+
+    @staticmethod
+    def _scan_dir_files(base):
+        """Lista .txt/.yaml/.yml recursivamente bajo base, con rutas relativas '/'."""
+        files = []
+        try:
+            if base and os.path.isdir(base):
+                base_real = os.path.realpath(base)
+                for root, _dirs, names in os.walk(base_real):
+                    for name in names:
+                        if name.lower().endswith((".txt", ".yaml", ".yml")):
+                            rel = os.path.relpath(os.path.join(root, name), base_real)
+                            files.append(rel.replace(os.sep, "/"))
+        except Exception:
+            files = []
+
+        def sort_key(rel):
+            parts = rel.split("/")
+            return ("/".join(parts[:-1]).lower(), parts[-1].lower())
+
+        return sorted(files, key=sort_key)
+
+    @classmethod
+    def _get_preset_files(cls):
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets")
+        files = cls._scan_dir_files(base)
+        return files if files else ["(No preset files found)"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "preset_file": (cls._get_preset_files(),),
+                "absolute_path": ("STRING", {"default": "", "multiline": False, "placeholder": "Opcional: carpeta externa o /ruta/archivo.txt o .yaml"}),
+                "keyword": ("STRING", {"default": "", "multiline": False}),
+                "keyword_mode": (["OFF", "AND", "OR"], {"default": "OFF"}),
+                "selection_mode": (["Manual", "Sequential", "Sequential (continue)", "Random"], {"default": "Manual"}),
+                "preset_index": ("INT", {"default": 0, "min": 0, "max": 9999, "step": 1}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("text", "preset_list", "selected_info")
+    FUNCTION = "select_preset"
+    CATEGORY = "Mika Utilidades/text"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, preset_file, absolute_path="", **kwargs):
+        absolute_path = str(absolute_path).strip().strip('"')
+
+        # absolute_path como archivo suelto.
+        if absolute_path and os.path.isfile(absolute_path):
+            return True
+
+        # absolute_path como carpeta externa: preset_file se resuelve dentro.
+        if absolute_path and os.path.isdir(absolute_path):
+            if preset_file == "(No preset files found)":
+                return True
+            return cls._resolve_in_dir(absolute_path, preset_file) is not None
+
+        if absolute_path:
+            return True  # ruta aún no creada: se informará en la ejecución
+
+        if preset_file == "(No preset files found)":
+            return True
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets")
+        return cls._resolve_in_dir(base, preset_file) is not None
+
+    @classmethod
+    def IS_CHANGED(cls, preset_file, absolute_path, keyword, keyword_mode, selection_mode, preset_index, seed):
+        return f"{preset_file}_{absolute_path}_{keyword}_{keyword_mode}_{selection_mode}_{preset_index}_{seed}"
+
+    # ---------- carga y parseo ----------
+
+    @staticmethod
+    def _resolve_in_dir(base_dir, preset_file):
+        """Resuelve preset_file dentro de base_dir con contención (nada de ../)."""
+        if preset_file in ("(No preset files found)", ""):
+            return None
+        base_real = os.path.realpath(base_dir)
+        path = os.path.realpath(os.path.join(base_real, os.path.normpath(preset_file)))
+        if path.startswith(base_real + os.sep) and os.path.isfile(path):
+            return path
+        return None
+
+    def _resolve_file(self, preset_file, absolute_path=""):
+        """Devuelve la ruta final del archivo de preset.
+
+        Prioridad:
+        1. absolute_path como archivo suelto (.txt/.yaml/.yml existente).
+        2. absolute_path como carpeta externa: preset_file resuelto dentro.
+        3. preset_file resuelto dentro de la carpeta dedicada presets/.
+        """
+        absolute_path = str(absolute_path).strip().strip('"')
+
+        if absolute_path:
+            if os.path.isfile(absolute_path):
+                return absolute_path
+            if os.path.isdir(absolute_path):
+                return self._resolve_in_dir(absolute_path, preset_file)
+            return None
+
+        return self._resolve_in_dir(self.preset_dir, preset_file)
+
+    def load_preset_lines(self, preset_file, absolute_path=""):
+        """Carga líneas de presets, filtrando comentarios (#) y líneas vacías."""
+        try:
+            file_path = self._resolve_file(preset_file, absolute_path)
+
+            if not file_path:
+                print(f"[Prompt Preset Selector-Mika] Aviso: archivo no encontrado: {preset_file}")
+                return []
+
+            suffix = os.path.splitext(file_path)[1].lower()
+
+            if suffix in (".yaml", ".yml"):
+                if _mika_yaml is None:
+                    print(f"[Prompt Preset Selector-Mika] Error: PyYAML no instalado, no se puede cargar {os.path.basename(file_path)}")
+                    return []
+                return self.load_yaml_presets(file_path)
+
+            if suffix == ".txt":
+                lines = []
+                with open(file_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        stripped = line.strip()
+                        if stripped and not stripped.startswith("#"):
+                            lines.append(stripped)
+                return lines
+
+            print(f"[Prompt Preset Selector-Mika] Aviso: formato no soportado: {suffix}")
+            return []
+
+        except Exception as e:
+            print(f"[Prompt Preset Selector-Mika] Error cargando preset {preset_file}: {e}")
+            return []
+
+    def load_yaml_presets(self, file_path):
+        """Admite: {'presets': [...]}, lista plana, o dict anidado (claves como prefijo)."""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = _mika_yaml.safe_load(f)
+
+            if data is None:
+                return []
+
+            if isinstance(data, dict) and "presets" in data:
+                presets = data["presets"]
+                if isinstance(presets, list):
+                    return [str(item) for item in presets if item]
+
+            if isinstance(data, list):
+                return [str(item) for item in data if item]
+
+            if isinstance(data, dict):
+                return self.flatten_yaml_dict(data)
+
+            return []
+
+        except Exception as e:
+            print(f"[Prompt Preset Selector-Mika] Error parseando YAML: {e}")
+            return []
+
+    def flatten_yaml_dict(self, data, parent_keys=None):
+        """Aplana dicts anidados: {'a': {'b': ['x']}} -> ['a:b: x']."""
+        lines = []
+        if parent_keys is None:
+            parent_keys = []
+
+        if isinstance(data, dict):
+            for key, value in data.items():
+                current_keys = parent_keys + [key]
+                key_prefix = ":".join(current_keys) + ": "
+
+                if isinstance(value, list):
+                    for item in value:
+                        if item:
+                            lines.append(key_prefix + str(item))
+                elif isinstance(value, dict):
+                    lines.extend(self.flatten_yaml_dict(value, current_keys))
+                elif isinstance(value, str):
+                    lines.append(key_prefix + value)
+
+        return lines
+
+    # ---------- keywords ----------
+
+    def parse_keywords(self, keyword_string):
+        """'front, "low-angle shot" -wide' -> (['front', 'low-angle shot'], ['wide'])."""
+        if not keyword_string.strip():
+            return ([], [])
+
+        include_keywords = []
+        exclude_keywords = []
+
+        pattern = r'(-?)"([^"]+)"|(-?)([^,\s]+)'
+        for minus1, phrase, minus2, word in re.findall(pattern, keyword_string):
+            keyword = phrase or word
+            if not keyword:
+                continue
+            if minus1 == "-" or minus2 == "-":
+                exclude_keywords.append(keyword)
+            else:
+                include_keywords.append(keyword)
+
+        return (include_keywords, exclude_keywords)
+
+    def filter_by_keywords(self, lines, include_keywords, exclude_keywords, mode):
+        """Devuelve [(indice_original, linea), ...] tras aplicar include (AND/OR) y exclude."""
+        if not include_keywords and not exclude_keywords:
+            return [(i, line) for i, line in enumerate(lines)]
+
+        if include_keywords and mode != "OFF":
+            filtered = []
+            for i, line in enumerate(lines):
+                line_lower = line.lower()
+                matches = [kw.lower() in line_lower for kw in include_keywords]
+                if mode == "AND" and all(matches):
+                    filtered.append((i, line))
+                elif mode == "OR" and any(matches):
+                    filtered.append((i, line))
+        else:
+            filtered = [(i, line) for i, line in enumerate(lines)]
+
+        if exclude_keywords:
+            filtered = [
+                (i, line)
+                for i, line in filtered
+                if not any(kw.lower() in line.lower() for kw in exclude_keywords)
+            ]
+
+        return filtered
+
+    # ---------- helpers ----------
+
+    def generate_preset_list(self, lines):
+        if not lines:
+            return "(No presets available)"
+        return "\n".join(f"{i}: {line}" for i, line in enumerate(lines))
+
+    def strip_key_hierarchy(self, text):
+        """'cam:close: front view' -> 'front view'."""
+        parts = text.split(": ", 1)
+        if len(parts) == 2:
+            key_part = parts[0]
+            if ":" in key_part or (key_part and " " not in key_part):
+                return parts[1]
+        return text
+
+    # ---------- ejecución ----------
+
+    def select_preset(self, preset_file, absolute_path, keyword, keyword_mode, selection_mode, preset_index, seed, unique_id=None):
+        # absolute_path puede ser un archivo suelto o una carpeta externa.
+        abs_path = (absolute_path or "").strip().strip('"')
+
+        if abs_path and not os.path.isdir(abs_path):
+            # Archivo suelto.
+            if not os.path.isfile(abs_path):
+                error_msg = f"Absolute path not found: {abs_path}"
+                print(f"[Prompt Preset Selector-Mika] Error: {error_msg}")
+                return ("", "", error_msg)
+
+            if not abs_path.lower().endswith((".txt", ".yaml", ".yml")):
+                error_msg = f"Unsupported file type. Use .txt, .yaml, or .yml: {abs_path}"
+                print(f"[Prompt Preset Selector-Mika] Error: {error_msg}")
+                return ("", "", error_msg)
+
+            file_to_load = abs_path
+            load_arg = abs_path
+        else:
+            if preset_file == "(No preset files found)":
+                msg = f"No preset files found in: {abs_path}" if abs_path else "No preset files found in presets/"
+                print(f"[Prompt Preset Selector-Mika] Aviso: {msg}")
+                return ("", "(No preset files found)", "")
+
+            file_to_load = preset_file
+            load_arg = preset_file
+
+        all_lines = self.load_preset_lines(load_arg, abs_path)
+        if not all_lines:
+            print(f"[Prompt Preset Selector-Mika] Aviso: '{file_to_load}' está vacío o no se pudo cargar")
+            return ("", "(File is empty or failed to load)", "")
+
+        preset_list = self.generate_preset_list(all_lines)
+
+        include_keywords, exclude_keywords = self.parse_keywords(keyword)
+        filtered_items = self.filter_by_keywords(all_lines, include_keywords, exclude_keywords, keyword_mode)
+
+        if not filtered_items:
+            warning = f"No presets match keywords: {keyword}"
+            print(f"[Prompt Preset Selector-Mika] Aviso: {warning}")
+            return ("", preset_list, warning)
+
+        # Clave por NODO (unique_id): sin esto dos Selectors con el mismo
+        # preset avanzaban el mismo contador (cross-talk).
+        state_key = f"{unique_id}|{abs_path}|{file_to_load}_{keyword}_{keyword_mode}"
+
+        if selection_mode in ("Manual", "Sequential"):
+            selected_index = preset_index % len(filtered_items)
+            original_index, selected_text = filtered_items[selected_index]
+            print(f"[Prompt Preset Selector-Mika] {selection_mode}: index={selected_index} -> {selected_text}")
+
+        elif selection_mode == "Sequential (continue)":
+            if state_key not in self._continue_state:
+                if len(self._continue_state) > 256:
+                    # Tope rudimentario: descarta la entrada más vieja.
+                    self._continue_state.pop(next(iter(self._continue_state)))
+                self._continue_state[state_key] = preset_index % len(filtered_items)
+
+            selected_index = self._continue_state[state_key]
+            original_index, selected_text = filtered_items[selected_index]
+            self._continue_state[state_key] = (selected_index + 1) % len(filtered_items)
+            print(f"[Prompt Preset Selector-Mika] Sequential (continue): index={selected_index} -> {selected_text}")
+
+        else:  # Random
+            rng = random_module.Random(seed)
+            selected_index = rng.randint(0, len(filtered_items) - 1)
+            original_index, selected_text = filtered_items[selected_index]
+            print(f"[Prompt Preset Selector-Mika] Random (seed={seed}): index={selected_index} -> {selected_text}")
+
+        info = f"Selected: {original_index}: {selected_text}\nMode: {selection_mode}\nFiltered: {len(filtered_items)}/{len(all_lines)} presets"
+
+        return (self.strip_key_hierarchy(selected_text), preset_list, info)
+
+
+class PromptPresetStepperMika(PromptPresetSelectorMika):
+    """
+    Prompt Preset Stepper-Mika: Prompt Preset Selector-Mika con el motor
+    escalonado del Index Stepper-Mika.
+
+    En cada ejecución selecciona un bloque de `steps` presets empezando en
+    `start_index` (sobre la lista ya filtrada por keywords, cíclico) y auto-
+    avanza `start_index` al final del bloque para la siguiente ejecución.
+
+    Con auto_advance=False `start_index` queda fijo y cada ejecución
+    devuelve el mismo bloque.
+
+    Salidas:
+    - text: LISTA de STRING con los presets del bloque (uno por elemento).
+    - preset_list: listado numerado completo (referencia).
+    - selected_info: detalle del bloque seleccionado.
+    - index_list / current_start / current_end / range_text: misma
+      semántica que Index Stepper-Mika.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "preset_file": (cls._get_preset_files(),),
+                "absolute_path": ("STRING", {"default": "", "multiline": False, "placeholder": "Opcional: carpeta externa o /ruta/archivo.txt o .yaml"}),
+                "keyword": ("STRING", {"default": "", "multiline": False}),
+                "keyword_mode": (["OFF", "AND", "OR"], {"default": "OFF"}),
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 1, "min": 1, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "auto_advance": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "INT", "INT", "INT", "STRING")
+    RETURN_NAMES = ("text", "preset_list", "selected_info", "index_list", "current_start", "current_end", "range_text")
+    OUTPUT_IS_LIST = (True, False, False, True, False, False, False)
+    FUNCTION = "step_preset"
+    CATEGORY = "Mika Utilidades/text"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    def step_preset(self, preset_file, absolute_path, keyword, keyword_mode, start_index, steps, auto_advance=True):
+        auto_advance = _mika_coerce_bool(auto_advance)
+
+        # absolute_path puede ser un archivo suelto o una carpeta externa.
+        abs_path = (absolute_path or "").strip().strip('"')
+
+        if abs_path and os.path.isfile(abs_path):
+            file_to_load = abs_path
+        else:
+            file_to_load = preset_file
+
+        if file_to_load == "(No preset files found)":
+            msg = f"No preset files found in: {abs_path}" if abs_path else "No preset files found in presets/"
+            print(f"[Prompt Preset Stepper-Mika] Aviso: {msg}")
+            return {
+                "ui": {"start_index": [int(start_index)]},
+                "result": ([], "(No preset files found)", msg, [], 0, 0, "0-0"),
+            }
+
+        all_lines = self.load_preset_lines(file_to_load, abs_path)
+        preset_list = self.generate_preset_list(all_lines)
+
+        if not all_lines:
+            return {
+                "ui": {"start_index": [int(start_index)]},
+                "result": ([], preset_list, "File is empty or failed to load", [], 0, 0, "0-0"),
+            }
+
+        include_keywords, exclude_keywords = self.parse_keywords(keyword)
+        filtered_items = self.filter_by_keywords(all_lines, include_keywords, exclude_keywords, keyword_mode)
+
+        if not filtered_items:
+            warning = f"No presets match keywords: {keyword}"
+            print(f"[Prompt Preset Stepper-Mika] Aviso: {warning}")
+            return {
+                "ui": {"start_index": [int(start_index)]},
+                "result": ([], preset_list, warning, [], 0, 0, "0-0"),
+            }
+
+        total = len(filtered_items)
+        steps = max(1, int(steps))
+
+        start = int(start_index) % total
+        count = min(steps, total)
+        index_list = [((start + i) % total) for i in range(count)]
+
+        current_start = index_list[0]
+        current_end = index_list[-1]
+
+        if auto_advance:
+            next_start = (start + count) % total
+        else:
+            next_start = int(start_index)
+
+        # Selección del bloque sobre la lista filtrada (salida tipo lista).
+        texts = []
+        originals = []
+        for idx in index_list:
+            original_index, line = filtered_items[idx]
+            originals.append(str(original_index))
+            texts.append(self.strip_key_hierarchy(line))
+
+        info = (
+            f"Selected block: {current_start}-{current_end} "
+            f"(original indices: {', '.join(originals)})\n"
+            f"Steps: {count}\n"
+            f"Filtered: {total}/{len(all_lines)} presets"
+        )
+
+        print(f"[Prompt Preset Stepper-Mika] block {current_start}-{current_end} (next start: {next_start})")
+
+        return {
+            "ui": {"start_index": [next_start]},
+            "result": (texts, preset_list, info, index_list, current_start, current_end, f"{current_start}-{current_end}"),
+        }
+
+
+class LoadImageNameMika:
+    """
+    Load Image-Mika: similar al Load Image nativo de ComfyUI,
+    pero además devuelve el nombre de la imagen seleccionada.
+
+    Compatible con imágenes editadas en inpaint / mask editor,
+    que suelen usar rutas temporales o anotadas.
+    """
+
+    @staticmethod
+    def _get_image_list():
+        files = []
+
+        # ComfyUI moderno.
+        try:
+            files = folder_paths.get_filename_list("input")
+        except TypeError:
+            try:
+                files = folder_paths.get_filename_list()
+            except Exception:
+                files = []
+        except Exception:
+            files = []
+
+        # Fallback manual por si get_filename_list falla.
+        if not files:
+            try:
+                input_dir = folder_paths.get_input_directory()
+                files = [
+                    f
+                    for f in os.listdir(input_dir)
+                    if os.path.isfile(os.path.join(input_dir, f))
+                ]
+            except Exception:
+                files = []
+
+        if not files:
+            return [""]
+
+        return sorted(files)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": (cls._get_image_list(), {"image_upload": True}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("image", "mask", "image_name")
+    FUNCTION = "load_image"
+    CATEGORY = "Mika Utilidades/image"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        """
+        Evita que ComfyUI rechaze valores temporales/anotados que
+        pueden aparecer al usar inpaint o mask editor.
+        """
+        return True
+
+    @staticmethod
+    def _unwrap_scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @classmethod
+    def _resolve_path(cls, image):
+        image = cls._unwrap_scalar(image, "")
+
+        if not isinstance(image, str):
+            image = str(image)
+
+        image = image.strip()
+
+        if not image:
+            return None, ""
+
+        path = None
+
+        # 1) Intentar resolución anotada. Ej:
+        #    "foto.png [input]"
+        #    "clipspace/clipspace-mask.png [temp]"
+        try:
+            path = folder_paths.get_annotated_filepath(image)
+            if path and os.path.exists(path):
+                return path, os.path.basename(path)
+        except TypeError:
+            try:
+                path = folder_paths.get_annotated_filepath(
+                    image,
+                    folder_paths.get_input_directory()
+                )
+                if path and os.path.exists(path):
+                    return path, os.path.basename(path)
+            except Exception:
+                path = None
+        except Exception:
+            path = None
+
+        # 2) Intentar resolución anotada usando input como carpeta default.
+        try:
+            path = folder_paths.get_annotated_filepath(
+                image,
+                folder_paths.get_input_directory()
+            )
+            if path and os.path.exists(path):
+                return path, os.path.basename(path)
+        except Exception:
+            pass
+
+        # 3) Buscar como input normal.
+        try:
+            path = folder_paths.get_full_path("input", image)
+            if path and os.path.exists(path):
+                return path, os.path.basename(path)
+        except Exception:
+            pass
+
+        # 4) Por si ya viene como ruta directa.
+        if os.path.exists(image):
+            return image, os.path.basename(image)
+
+        # 5) Buscar por nombre base en input/temp/output.
+        base_clean = image.split(" [")[0].strip()
+        base = os.path.basename(base_clean)
+
+        search_dirs = []
+
+        for fn in ("get_input_directory", "get_temp_directory", "get_output_directory"):
+            try:
+                d = getattr(folder_paths, fn)()
+                if d:
+                    search_dirs.append(d)
+            except Exception:
+                pass
+
+        for d in search_dirs:
+            candidate = os.path.join(d, base)
+            if os.path.exists(candidate):
+                return candidate, base
+
+            candidate2 = os.path.join(d, base_clean)
+            if os.path.exists(candidate2):
+                return candidate2, os.path.basename(candidate2)
+
+        return None, base
+
+    def load_image(self, image):
+        image_path, filename = self._resolve_path(image)
+
+        # Nombre sin extensión.
+        image_name = os.path.splitext(filename)[0]
+
+        if not image_path or not os.path.exists(image_path):
+            print(f"Load Image-Mika: no se encontró la imagen '{image}'.")
+
+            black = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            mask = torch.zeros((1, 64, 64), dtype=torch.float32)
+
+            return (black, mask, image_name)
+
+        try:
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+
+            # Modo 1-bit / máscara simple.
+            try:
+                if img.getbands()[0] == "M":
+                    img = img.convert("RGB")
+            except Exception:
+                img = img.convert("RGB")
+
+            # Convierto a RGBA para extraer alpha.
+            # Si la imagen no tiene alpha, el canal A queda todo en 255,
+            # por lo tanto la máscara queda en 0.
+            try:
+                rgba = img.convert("RGBA")
+            except Exception:
+                rgba = img.convert("RGB").convert("RGBA")
+
+            alpha_np = np.array(rgba.getchannel("A")).astype(np.float32) / 255.0
+            mask = 1.0 - torch.from_numpy(alpha_np)
+
+            # La máscara queda batcheada: (1, H, W)
+            mask = mask.unsqueeze(0)
+
+            rgb = rgba.convert("RGB")
+            image_np = np.array(rgb).astype(np.float32) / 255.0
+            image_tensor = torch.from_numpy(image_np)[None, ]
+
+            return (image_tensor, mask, image_name)
+
+        except Exception as e:
+            print(f"Load Image-Mika: error cargando '{image_path}': {e}")
+
+            black = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            mask = torch.zeros((1, 64, 64), dtype=torch.float32)
+
+            return (black, mask, image_name)
+
+    @classmethod
+    def IS_CHANGED(cls, image):
+        """
+        Hash del archivo para detectar cambios, útil cuando el inpaint
+        sobreescribe o reemplaza una imagen temporal.
+        """
+        image_path, _ = cls._resolve_path(image)
+
+        if not image_path:
+            return None
+
+        return _mika_hash_file(image_path) or None
+
+
+class LoadImageNameMaskMika(LoadImageNameMika):
+    """
+    Load Image Mask-Mika: copia exacta de Load Image-Mika
+    con un botón "Abrir MaskEditor" (web/load_image_mask_mika.js) que
+    copia la imagen al clipspace y abre el editor de máscaras nativo.
+    Al guardar, el MaskEditor escribe el resultado en el widget "image".
+    """
+
+
+class IfAnyMika:
+    """
+    If Any-Mika: evalúa una entrada ANY y devuelve un valor/texto si
+    cumple la condición, u otro valor/texto si no cumple.
+
+    Modos:
+    - auto:
+        * Si "find" está vacío → detecta que exista un valor no vacío.
+        * Si "find" tiene texto → busca ese texto dentro del input.
+    - exists:
+        * True si el input no es None.
+    - not_empty:
+        * True si el input no está vacío.
+    - boolean_true:
+        * True si el input se puede interpretar como verdadero.
+    - contains:
+        * True si el input contiene el texto de "find".
+    - equals:
+        * True si el input es igual al texto de "find".
+    - starts_with:
+        * True si el input empieza con el texto de "find".
+    - ends_with:
+        * True si el input termina con el texto de "find".
+    - regex:
+        * True si el input matchea la expresión regular de "find".
+    """
+
+    INPUT_IS_LIST = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "input": ("*", {"forceInput": True}),
+                "mode": (
+                    [
+                        "auto",
+                        "exists",
+                        "not_empty",
+                        "boolean_true",
+                        "contains",
+                        "equals",
+                        "starts_with",
+                        "ends_with",
+                        "regex",
+                    ],
+                    {"default": "auto"},
+                ),
+            },
+            "optional": {
+                "find": ("STRING", {"default": "", "multiline": False}),
+                "case_sensitive": ("BOOLEAN", {"default": False}),
+                "value_if_found": ("*", {"forceInput": True}),
+                "value_if_not_found": ("*", {"forceInput": True}),
+                "text_if_found": ("STRING", {"default": "true", "multiline": True}),
+                "text_if_not_found": ("STRING", {"default": "false", "multiline": True}),
+            },
+        }
+
+    RETURN_TYPES = ("*", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("result", "matched", "result_text")
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/condicional"
+
+    def doit(
+        self,
+        input=None,
+        mode="auto",
+        find="",
+        case_sensitive=False,
+        value_if_found=None,
+        value_if_not_found=None,
+        text_if_found="true",
+        text_if_not_found="false",
+    ):
+        input_value = self._unwrap_any(input)
+        mode = self._unwrap_scalar(mode, "auto")
+        find = self._unwrap_scalar(find, "")
+        case_sensitive = _mika_coerce_bool(self._unwrap_scalar(case_sensitive, False))
+
+        value_if_found = self._unwrap_any(value_if_found)
+        value_if_not_found = self._unwrap_any(value_if_not_found)
+
+        text_if_found = self._unwrap_scalar(text_if_found, "")
+        text_if_not_found = self._unwrap_scalar(text_if_not_found, "")
+
+        matched = self._matches(
+            value=input_value,
+            mode=mode,
+            find=find,
+            case_sensitive=case_sensitive,
+        )
+
+        if matched:
+            if value_if_found is not None:
+                result = value_if_found
+            else:
+                result = text_if_found
+        else:
+            if value_if_not_found is not None:
+                result = value_if_not_found
+            else:
+                result = text_if_not_found
+
+        result_text = self._to_text(result)
+
+        return (result, matched, result_text)
+
+    @staticmethod
+    def _unwrap_scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _unwrap_any(value):
+        if value is None:
+            return None
+
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return None
+            if len(value) == 1:
+                return value[0]
+            return list(value)
+
+        return value
+
+    @staticmethod
+    def _is_empty(value):
+        if value is None:
+            return True
+
+        if isinstance(value, str):
+            return value.strip() == ""
+
+        if isinstance(value, bool):
+            return False
+
+        if isinstance(value, (int, float)):
+            return False
+
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value) == 0
+
+        if torch.is_tensor(value):
+            try:
+                return value.numel() == 0
+            except Exception:
+                return True
+
+        if isinstance(value, np.ndarray):
+            try:
+                return value.size == 0
+            except Exception:
+                return True
+
+        return False
+
+    def _collect_texts(self, value, depth=0):
+        """
+        Junta representaciones de texto del valor para poder buscar
+        texto dentro de strings, listas, dicts, tensors simples, etc.
+        """
+        if depth > 3:
+            return [str(value)]
+
+        if value is None:
+            return [""]
+
+        if isinstance(value, str):
+            return [value]
+
+        if isinstance(value, bool):
+            return ["true" if value else "false"]
+
+        if isinstance(value, (int, float)):
+            return [str(value)]
+
+        if isinstance(value, (list, tuple, set)):
+            out = []
+            try:
+                items = list(value)[:200]
+            except Exception:
+                items = []
+
+            for item in items:
+                out.extend(self._collect_texts(item, depth + 1))
+
+            return out if out else [""]
+
+        if isinstance(value, dict):
+            out = []
+            try:
+                items = list(value.items())[:200]
+            except Exception:
+                items = []
+
+            for k, v in items:
+                out.extend(self._collect_texts(k, depth + 1))
+                out.extend(self._collect_texts(v, depth + 1))
+
+            return out if out else [""]
+
+        if torch.is_tensor(value):
+            try:
+                if value.numel() == 1:
+                    return [str(value.item())]
+
+                if value.numel() <= 16:
+                    return [str(value.tolist())]
+
+                return [f"Tensor(shape={tuple(value.shape)}, dtype={value.dtype})"]
+            except Exception:
+                return [str(value)]
+
+        if isinstance(value, np.ndarray):
+            try:
+                if value.size == 1:
+                    return [str(value.item())]
+
+                if value.size <= 16:
+                    return [str(value.tolist())]
+
+                return [f"ndarray(shape={tuple(value.shape)}, dtype={value.dtype})"]
+            except Exception:
+                return [str(value)]
+
+        return [str(value)]
+
+    def _to_text(self, value, depth=0):
+        """
+        Convierte el resultado a texto legible para la salida STRING.
+        """
+        if depth > 3:
+            return str(value)
+
+        if value is None:
+            return ""
+
+        if isinstance(value, str):
+            return value
+
+        if isinstance(value, bool):
+            return "true" if value else "false"
+
+        if isinstance(value, (int, float)):
+            return str(value)
+
+        if torch.is_tensor(value):
+            try:
+                if value.numel() == 1:
+                    return str(value.item())
+
+                if value.numel() <= 16:
+                    return str(value.tolist())
+
+                return f"Tensor(shape={tuple(value.shape)}, dtype={value.dtype})"
+            except Exception:
+                return str(value)
+
+        if isinstance(value, np.ndarray):
+            try:
+                if value.size == 1:
+                    return str(value.item())
+
+                if value.size <= 16:
+                    return str(value.tolist())
+
+                return f"ndarray(shape={tuple(value.shape)}, dtype={value.dtype})"
+            except Exception:
+                return str(value)
+
+        if isinstance(value, (list, tuple, set)):
+            try:
+                items = list(value)
+            except Exception:
+                items = []
+
+            shown = items[:20]
+            parts = [self._to_text(x, depth + 1) for x in shown]
+
+            if len(items) > len(shown):
+                parts.append(f"... +{len(items) - len(shown)} elementos")
+
+            return "[" + ", ".join(parts) + "]"
+
+        if isinstance(value, dict):
+            try:
+                items = list(value.items())
+            except Exception:
+                items = []
+
+            shown = items[:20]
+            parts = [
+                f"{self._to_text(k, depth + 1)}: {self._to_text(v, depth + 1)}"
+                for k, v in shown
+            ]
+
+            if len(items) > len(shown):
+                parts.append(f"... +{len(items) - len(shown)} elementos")
+
+            return "{" + ", ".join(parts) + "}"
+
+        return str(value)
+
+    def _matches(self, value, mode, find, case_sensitive):
+        if mode == "exists":
+            return value is not None
+
+        if mode == "not_empty":
+            return not self._is_empty(value)
+
+        if mode == "boolean_true":
+            return _mika_coerce_bool(value)
+
+        find_text = "" if find is None else str(find)
+
+        if mode == "auto":
+            if find_text.strip() == "":
+                return not self._is_empty(value)
+            mode = "contains"
+
+        texts = self._collect_texts(value)
+
+        if mode == "regex":
+            flags = 0 if case_sensitive else re.IGNORECASE
+
+            for text in texts:
+                try:
+                    if re.search(find_text, text, flags) is not None:
+                        return True
+                except re.error:
+                    return False
+
+            return False
+
+        if case_sensitive:
+            find_cmp = find_text
+            texts_cmp = texts
+        else:
+            find_cmp = find_text.lower()
+            texts_cmp = [t.lower() for t in texts]
+
+        if mode == "equals":
+            return any(t == find_cmp for t in texts_cmp)
+
+        if mode == "contains":
+            return any(find_cmp in t for t in texts_cmp)
+
+        if mode == "starts_with":
+            return any(t.startswith(find_cmp) for t in texts_cmp)
+
+        if mode == "ends_with":
+            return any(t.endswith(find_cmp) for t in texts_cmp)
+
+        # Fallback.
+        return not self._is_empty(value)
+
+
+class BypassDetectorMika:
+    """
+    Bypass Detector-Mika: detecta si el nodo indicado (por título o id)
+    está en modo bypass y devuelve el texto configurado según el estado.
+    La detección la hace el frontend (el bypass es solo visual y nunca
+    llega al backend); el estado se comunica vía el widget is_bypassed.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "target": ("STRING", {"default": "", "multiline": False}),
+                "text_on_bypass": ("STRING", {"default": "", "multiline": True}),
+                "text_on_active": ("STRING", {"default": "", "multiline": True}),
+            },
+            "optional": {
+                "is_bypassed": ("BOOLEAN", {"default": False}),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("STRING", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("text", "bypassed", "state")
+    FUNCTION = "detect"
+    CATEGORY = "Mika Utilidades/utils"
+
+    def detect(self, target="", text_on_bypass="", text_on_active="", is_bypassed=False, unique_id=None):
+        if is_bypassed:
+            return (text_on_bypass, True, "bypass")
+        return (text_on_active, False, "active")
+
+    @classmethod
+    def IS_CHANGED(cls, is_bypassed=False, **kwargs):
+        return is_bypassed
+
+
+class TextSaveMika:
+    """
+    Text Save-Mika: guarda texto en un archivo local.
+
+    write_mode:
+    - overwrite: reemplaza el contenido del archivo.
+    - append:    agrega el texto al final del archivo.
+    - prepend:   agrega el texto al inicio del archivo.
+
+    El texto puede venir por SLOT (text, forceInput) o escribirse en la
+    caja editable si el slot no está conectado.
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "save_path": ("STRING", {"default": "./ComfyUI/output/text", "multiline": False}),
+                "filename": ("STRING", {"default": "mika_text.txt", "multiline": False}),
+                "write_mode": (["overwrite", "append", "prepend"], {"default": "overwrite"}),
+                "file_format": (
+                    [".txt", ".log", ".md", ".csv", ".json", ".html", ".xml", ".yaml", ".yml", ".ini", ".cfg", ".css", ".py"],
+                    {"default": ".txt"},
+                ),
+            },
+            "optional": {
+                "text": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
+                "separator": ("STRING", {"default": "\\n", "multiline": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "INT")
+    RETURN_NAMES = ("filepath", "char_count")
+    FUNCTION = "save"
+    CATEGORY = "Mika Utilidades/string"
+    OUTPUT_NODE = True
+
+    def save(self, save_path, filename, write_mode="overwrite", file_format=".txt", text="", separator="\\n"):
+        save_path = os.path.abspath(os.path.expanduser((save_path or "").strip()))
+        filename = (filename or "").strip()
+
+        if not filename:
+            raise ValueError("Text Save-Mika: filename no puede estar vacío.")
+
+        try:
+            os.makedirs(save_path, exist_ok=True)
+        except Exception as e:
+            raise RuntimeError(f"Text Save-Mika: no se pudo crear la carpeta '{save_path}': {e}")
+
+        if not isinstance(text, str):
+            text = str(text)
+
+        ext = (file_format or ".txt").strip().lower()
+        if not ext.startswith("."):
+            ext = "." + ext
+
+        if not filename.lower().endswith(ext):
+            filename += ext
+
+        filepath = os.path.join(save_path, filename)
+        sep = _mika_decode_separator(separator)
+
+        if write_mode == "append":
+            existing = ""
+            if os.path.isfile(filepath):
+                with open(filepath, "r", encoding="utf-8") as f:
+                    existing = f.read()
+            content = existing + sep + text if existing and text else existing + text
+        elif write_mode == "prepend":
+            existing = ""
+            if os.path.isfile(filepath):
+                with open(filepath, "r", encoding="utf-8") as f:
+                    existing = f.read()
+            content = text + sep + existing if text and existing else text + existing
+        else:
+            content = text
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        print(f"Text Save-Mika: {len(content)} caracteres guardados en '{filepath}' (modo: {write_mode}).")
+
+        return (filepath, len(content))
+
+
+# ======================================================================
+# ANIMA PROMPT ORGANIZER (migrado desde Mika_Anima_Order)
+# ======================================================================
+
+HARD_NORMALIZE = True
+HARD_DEDUPE = True
+HARD_AUTO_AT_PREFIX = True
+HARD_SERIES_FROM_CHARACTER = True
+HARD_ARTIST_POLICY_KEEP_FIRST = True
+
+NEG_NO_SCORE = ("worst quality, low quality, artist name, blurry, "
+                "jpeg artifacts, chromatic aberration")
+NEG_WITH_SCORE = ("worst quality, low quality, score_1, score_2, score_3, "
+                  "artist name, blurry, jpeg artifacts, chromatic aberration")
+
+QUALITY_HUMAN = {
+    "masterpiece", "best quality", "high quality", "good quality",
+    "normal quality", "low quality", "worst quality", "very aesthetic",
+    "aesthetic",
+}
+
+SCORE_RE = re.compile(r"^score_\d(_up)?$")
+YEAR_RE = re.compile(r"^year\s+\d{3,4}$")
+
+PERIOD = {"newest", "recent", "mid", "early", "old"}
+
+SAFETY = {"safe", "sensitive", "nsfw", "explicit", "general", "questionable"}
+
+META = {
+    "highres", "absurdres", "incredibly absurdres", "lowres",
+    "anime screenshot", "anime screencap", "screencap",
+    "jpeg artifacts", "official art", "official alternate costume",
+    "artist name", "watermark", "signature", "web address", "dated",
+    "scan", "game cg", "promotional art", "key visual", "logo",
+    "commentary", "commentary request", "english commentary",
+    "translated", "traditional media", "photoshop (medium)",
+    "bad id", "bad pixiv id", "md5 mismatch", "revision",
+    "third-party edit", "chromatic aberration",
+}
+
+COUNT_RE = re.compile(r"^\d+\+?(girl|boy|other)s?$")
+COUNT_EXTRA = {
+    "solo", "solo focus", "multiple girls", "multiple boys",
+    "multiple others", "no humans", "1other", "6+girls", "6+boys",
+}
+
+PAREN_NOT_CHARACTER = {
+    "photoshop (medium)", "painting (medium)", "watercolor (medium)",
+    "marker (medium)", "pencil (medium)", "ink (medium)",
+    "sword (weapon)", "heart (symbol)", "spoken heart (symbol)",
+}
+
+DATASET_HEADERS = {"ye-pop", "deviantart"}
+
+BUCKETS = ["quality", "meta", "year", "safety", "count",
+           "character", "series", "artist", "general", "nl"]
+
+
+def _anima_split_tags(text):
+    """Corta por comas y saltos de linea respetando parentesis y escapes."""
+    parts, buf, depth, i = [], [], 0, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            buf.append(ch)
+            buf.append(text[i + 1])
+            i += 2
+            continue
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        if (ch == "," or ch == "\n") and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return [p.strip() for p in parts if p.strip()]
+
+
+_WEIGHT_RE = re.compile(r"^\((.*):\s*-?\d*\.?\d+\s*\)$", re.DOTALL)
+
+
+def _anima_core(tag):
+    """Devuelve el tag sin sintaxis de peso ni parentesis de enfasis."""
+    t = tag.strip()
+    for _ in range(8):
+        m = _WEIGHT_RE.match(t)
+        if m:
+            t = m.group(1).strip()
+            continue
+        if len(t) >= 2 and t[0] in "([" and t[-1] in ")]" and "\\" not in (t[0] + t[-1]):
+            inner = t[1:-1]
+            if inner.count("(") == inner.count(")"):
+                t = inner.strip()
+                continue
+        break
+    return t
+
+
+def _anima_normalize(tag):
+    """Minusculas, guiones bajos a espacios (salvo score_N), espacios limpios."""
+    def repl(m):
+        w = m.group(0)
+        if w.startswith("score_"):
+            return w
+        return w.replace("_", " ")
+
+    t = re.sub(r"[^\s,()\[\]:]+", repl, tag.lower())
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _anima_is_natural_language(text):
+    c = _anima_core(text)
+    if re.search(r"[.!?](\s|$)", c):
+        return True
+    return len(c.split()) >= 7
+
+
+_CHAR_PAREN_RE = re.compile(r"^(.+?)\s*\\?\((.+?)\\?\)$")
+
+_AT_IN_NL_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9 _'\-]*?)(?=\s*[,.;!?]|$)")
+
+
+class AnimaPromptOrganizer:
+    """Reordena un prompt libre al formato de tags de Anima."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "quality_tags": ("STRING", {
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "default": "masterpiece, best quality",
+                    "placeholder": ("tags de calidad / meta / year / safety, en el "
+                                    "orden que quieras (100% custom, no se auto-generan)"),
+                }),
+                "prompt": ("STRING", {
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "default": "1girl, smile, standing, simple background",
+                    "placeholder": "escena, pose, fondo, y cualquier tag suelto",
+                }),
+                "character": ("STRING", {
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "default": "",
+                    "placeholder": ("una linea por personaje, orden fijo: "
+                                    "personaje, serie, rasgo, rasgo, ...\n"
+                                    "ej: clementine \\(overlord\\), overlord \\(maruyama\\), "
+                                    "red eyes, blonde hair, short hair"),
+                }),
+                "style": ("STRING", {
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "default": "",
+                    "placeholder": "una linea por estilo, ej: @wlop  o  @wlop, anime coloring",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("positive", "negative", "report")
+    FUNCTION = "organize"
+    CATEGORY = "Mika Utilidades/prompt"
+    DESCRIPTION = ("Reordena al formato de Anima: [quality/meta/year/safety] "
+                   "[count] [character] [series] @artist [general]. "
+                   "'quality_tags' es literal/custom; 'character' separa "
+                   "personaje/serie/rasgos por posicion (una linea por "
+                   "personaje); 'style' detecta el/los @artista.")
+
+    @staticmethod
+    def _lines(block):
+        """Bloque multilinea -> lista de lineas no vacias, en orden."""
+        if not block:
+            return []
+        return [ln for ln in block.split("\n") if ln.strip()]
+
+    def _classify(self, tag, known_artists, known_chars, known_series):
+        c = _anima_normalize(_anima_core(tag))
+
+        if c.startswith("@"):
+            return "artist", c[1:].strip()
+        if c.startswith("by ") and len(c) > 3:
+            return "artist", c[3:].strip()
+        if c in known_artists:
+            return "artist", c
+
+        if c in QUALITY_HUMAN or SCORE_RE.match(c):
+            return "quality", c
+        if YEAR_RE.match(c) or c in PERIOD:
+            return "year", c
+        if c in SAFETY:
+            return "safety", c
+        if c in META:
+            return "meta", c
+        if COUNT_RE.match(c) or c in COUNT_EXTRA:
+            return "count", c
+
+        if c in known_chars:
+            return "character", c
+        if c in known_series:
+            return "series", c
+
+        if c not in PAREN_NOT_CHARACTER:
+            m = _CHAR_PAREN_RE.match(c)
+            if m and not re.match(r"^-?\d*\.?\d+$", m.group(2).strip()):
+                return "character", c
+
+        return "general", c
+
+    def organize(self, quality_tags, prompt, character, style):
+        notes = []
+        raw = prompt or ""
+
+        head_lines = raw.split("\n")
+        if head_lines and head_lines[0].strip().lower() in DATASET_HEADERS:
+            report = ("=== Anima Prompt Organizer ===\n"
+                      "Prompt con dataset tag ('%s'): se pasa tal cual, sin "
+                      "reordenar, porque ese formato depende de los saltos de "
+                      "linea." % head_lines[0].strip())
+            return (raw.strip(), NEG_NO_SCORE, report)
+
+        buckets = {b: [] for b in BUCKETS}
+        seen = set()
+        dropped = []
+
+        for t in _anima_split_tags(quality_tags or ""):
+            key = _anima_normalize(_anima_core(t)) if HARD_NORMALIZE else t.strip()
+            if HARD_DEDUPE and key in seen:
+                dropped.append("%s (duplicado en quality_tags)" % key)
+                continue
+            seen.add(key)
+            buckets["quality"].append(key)
+
+        char_lines = self._lines(character)
+        style_lines = self._lines(style)
+
+        known_chars, known_series, known_artists = set(), set(), set()
+        for ln in char_lines:
+            items = _anima_split_tags(ln)
+            if items:
+                known_chars.add(_anima_normalize(_anima_core(items[0])))
+            if len(items) > 1:
+                known_series.add(_anima_normalize(_anima_core(items[1])))
+        for ln in style_lines:
+            for it in _anima_split_tags(ln):
+                c = _anima_normalize(_anima_core(it))
+                if c.startswith("@"):
+                    known_artists.add(c[1:])
+                elif c.startswith("by ") and len(c) > 3:
+                    known_artists.add(c[3:])
+
+        slot_segments = []
+        for ln in char_lines:
+            items = _anima_split_tags(ln)
+            if not items:
+                continue
+
+            char_txt = _anima_normalize(_anima_core(items[0])) if HARD_NORMALIZE else items[0].strip()
+            if not (HARD_DEDUPE and char_txt in seen):
+                seen.add(char_txt)
+                buckets["character"].append(char_txt)
+
+            if len(items) > 1:
+                ser_txt = _anima_normalize(_anima_core(items[1])) if HARD_NORMALIZE else items[1].strip()
+                if not (HARD_DEDUPE and ser_txt in seen):
+                    seen.add(ser_txt)
+                    buckets["series"].append(ser_txt)
+            else:
+                notes.append("Una linea de 'character' no trae serie "
+                             "(2a posicion vacia): %s" % ln.strip())
+
+            if len(items) > 2:
+                slot_segments += items[2:]
+
+        style_segments = []
+        any_artist_tag = False
+        for ln in style_lines:
+            items = _anima_split_tags(ln)
+            style_segments += items
+            if any(_anima_normalize(_anima_core(it)).startswith(("@", "by ")) for it in items):
+                any_artist_tag = True
+        if style_lines and not any_artist_tag:
+            notes.append("El campo 'style' no trae ningun tag con '@' o 'by '; "
+                         "no se reconocera como artista.")
+
+        segments = slot_segments + style_segments + _anima_split_tags(raw)
+
+        for seg in segments:
+            if _anima_is_natural_language(seg):
+                found = _AT_IN_NL_RE.findall(seg)
+                for name in found:
+                    key = "@" + _anima_normalize(name)
+                    if HARD_DEDUPE and key in seen:
+                        continue
+                    seen.add(key)
+                    buckets["artist"].append(key)
+                if found:
+                    seg = _AT_IN_NL_RE.sub("", seg)
+                seg = re.sub(r"\s+", " ", seg).strip(" ,.")
+                if seg:
+                    buckets["nl"].append(seg)
+                continue
+
+            bucket, key = self._classify(seg, known_artists, known_chars, known_series)
+            text = _anima_normalize(seg) if HARD_NORMALIZE else seg.strip()
+
+            if bucket == "artist":
+                base = key
+                if HARD_AUTO_AT_PREFIX or _anima_normalize(_anima_core(seg)).startswith("@"):
+                    text = "@" + base
+                else:
+                    text = base
+                    notes.append(
+                        "'%s' quedo sin '@'; sin el prefijo el efecto del "
+                        "artista es muy debil." % base)
+                key = "@" + base
+
+            if HARD_DEDUPE:
+                if key in seen:
+                    continue
+                seen.add(key)
+
+            buckets[bucket].append(text)
+
+            if bucket == "character" and HARD_SERIES_FROM_CHARACTER:
+                m = _CHAR_PAREN_RE.match(_anima_normalize(_anima_core(seg)))
+                if m:
+                    ser = m.group(2).strip()
+                    if ser and ser not in seen and ser not in known_artists:
+                        buckets["series"].append(ser)
+                        seen.add(ser)
+                        notes.append(
+                            "Serie '%s' inferida de '%s' (verifica que sea la "
+                            "serie y no una variante del personaje)." % (ser, m.group(1)))
+
+        if buckets["artist"]:
+            if HARD_ARTIST_POLICY_KEEP_FIRST and len(buckets["artist"]) > 1:
+                extra = buckets["artist"][1:]
+                buckets["artist"] = buckets["artist"][:1]
+                dropped += ["%s (multi-artista)" % a for a in extra]
+                notes.append(
+                    "Se conservo solo el primer artista. Apilar artistas diluye "
+                    "el estilo hacia ilustracion plana.")
+            name = buckets["artist"][0].lstrip("@")
+            if len(name.split()) == 1 and len(name) <= 6:
+                notes.append(
+                    "'%s' es un nombre corto (pocos tokens) y tiende a ser "
+                    "menos estable entre prompts." % name)
+        else:
+            notes.append("No hay tag de artista: el estilo quedara al gusto "
+                         "por defecto del modelo.")
+
+        head = (buckets["quality"] + buckets["meta"] + buckets["year"] +
+                buckets["safety"])
+        tags_body = (buckets["count"] + buckets["character"] +
+                     buckets["series"] + buckets["general"])
+        body = (buckets["count"] + buckets["character"] + buckets["series"] +
+                buckets["artist"] + buckets["general"])
+
+        nl = ""
+        for piece in buckets["nl"]:
+            if not nl:
+                nl = piece
+            elif nl[-1] in ".!?":
+                nl += " " + piece
+            else:
+                nl += ", " + piece
+        nl = nl.strip()
+
+        pure_nl = not tags_body and bool(nl)
+
+        if nl and pure_nl:
+            lead_txt = ", ".join(head + buckets["artist"])
+            positive = (lead_txt + ". " if lead_txt else "") + nl
+            if tags_body:
+                positive += ", " + ", ".join(tags_body)
+        else:
+            positive = ", ".join(head + body)
+            if nl:
+                positive = (positive + ", " if positive else "") + nl
+
+        has_score = any(SCORE_RE.match(t) for t in buckets["quality"])
+        negative = NEG_WITH_SCORE if has_score else NEG_NO_SCORE
+
+        total_tags = sum(len(buckets[b]) for b in BUCKETS if b != "nl")
+        if total_tags < 8 and not nl:
+            notes.append("Prompt corto: Anima rellena huecos por su cuenta y "
+                         "aparece mas sangrado de estilo. Agrega pelo, ojos, "
+                         "ropa, pose y fondo.")
+        if len(buckets["character"]) > 1:
+            notes.append("Varios personajes: dale a cada uno al menos un rasgo "
+                         "distintivo no compartido o el modelo los fusiona.")
+
+        report_lines = ["=== Anima Prompt Organizer ==="]
+        for b in BUCKETS:
+            if buckets[b]:
+                val = nl if b == "nl" else ", ".join(buckets[b])
+                report_lines.append("%-10s : %s" % (b, val))
+        if dropped:
+            report_lines.append("%-10s : %s" % ("removidos", ", ".join(dropped)))
+        if notes:
+            report_lines.append("--- avisos ---")
+            report_lines += ["* " + n for n in dict.fromkeys(notes)]
+
+        return (positive, negative, "\n".join(report_lines))
+
+
+class PromptCleanDedupeMika:
+    """
+    Prompt Clean & Dedupe-Mika: une las funciones de AnimaPromptFormatter y
+    Remove Duplicate Tags [LP] en un solo nodo.
+
+    1. Formata el prompt: quita saltos de línea, separa por comas, limpia
+       espacios y descarta tags vacíos.
+    2. Elimina tags repetidos conservando solo la primera aparición.
+
+    Ejemplo: "tag1\\ntag2 ,, tag1" -> "tag1, tag2"
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "display": "prompt",
+                }),
+            },
+            "optional": {
+                "trailing_comma": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "coma final",
+                    "label_off": "sin coma final",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/prompt"
+
+    def run(self, text, trailing_comma=False):
+        if not text:
+            return ("",)
+
+        text = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+        seen = set()
+        unique_tags = []
+        for tag in text.split(","):
+            tag = tag.strip()
+            if tag and tag not in seen:
+                seen.add(tag)
+                unique_tags.append(tag)
+
+        result = ", ".join(unique_tags)
+        if trailing_comma and result:
+            result += ","
+
+        return (result,)
+
+
+# ======================================================================
+# FILTROS-MIKA (versión sólida del subgrafo "FILTROS")
+# ======================================================================
+
+class FiltrosMika:
+    """
+    FILTROS-Mika: nodo sólido equivalente al subgrafo "FILTROS".
+
+    Entradas (todas linkeables):
+    - prompt: prompt general completo.
+    - filtro_gen / filtro_cara / filtro_ropa / filtro_lugar: tags a
+      seleccionar del prompt (modo include).
+    - all_gen / all_lugar: listas completas de categorías que se excluyen
+      del prompt en la salida TEXTO SIN FILTRO.
+    - per_f_extra / per_m_extra (opcionales): textos multilínea con un
+      personaje por línea. Si no hay nada conectado cuentan como vacíos.
+      Según los tags del prompt "1boy"/"Nboys" se añaden N personajes
+      masculinos, y con "2girls"/"Ngirls" se añaden N-1 femeninos.
+
+    - min_palabras: frases del filtro GEN con ese número de palabras o más
+      se separan como "lenguaje natural" (0 = sin separación). Ej: con 4
+      pasan a TAGS NATURAL frases como "boy standing on flor".
+    - concatenar_natural: si está activo, las frases de TAGS NATURAL se
+      concatenan también en F GEN y sus combinaciones.
+
+    Salidas: combinaciones F GEN + extras con CARA/ROPA/LUGAR, más los
+    filtros individuales, los TAGS SIN FILTRO y el PROMPT SIN FILTRO.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        slot = ("*", {"forceInput": True})
+        return {
+            "required": {
+                "prompt": slot,
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "min_palabras": ("INT", {"default": 0, "min": 0, "max": 20}),
+                "concatenar_natural": ("BOOLEAN", {"default": False}),
+                "modo_personajes": (["index", "random"], {"default": "index"}),
+                "modo": (["NSFW", "SFW"], {"default": "NSFW"}),
+                "add_comma_space_end": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "filtro_gen": slot,
+                "filtro_cara": slot,
+                "filtro_ropa": slot,
+                "filtro_lugar": slot,
+                "all_gen": slot,
+                "all_lugar": slot,
+                "per_f_extra": slot,
+                "per_m_extra": slot,
+                "ignore_color_prefix": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = tuple(["STRING"] * 14)
+    RETURN_NAMES = (
+        "F GEN",
+        "F GEN + CARA",
+        "F GEN + ROPA",
+        "F GEN + ROPA + CARA",
+        "F GEN + ROPA + CARA + LUGAR",
+        "F GEN + CARA + LUGAR",
+        "F GEN + LUGAR",
+        "TAGS SIN FILTRO",
+        "TAGS NATURAL",
+        "FILTRO GENERAL",
+        "FILTRO ROPA",
+        "FILTRO CARA",
+        "FILTRO LUGAR",
+        "PROMPT SIN FILTRO",
+    )
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    @staticmethod
+    def _scalar(value, default=""):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _join(*parts):
+        clean = [re.sub(r"[,\s]*$", "", str(p)) for p in parts]
+        return ", ".join([p for p in clean if p])
+
+    @staticmethod
+    def _pick_lines(text, count, rng, modo="index"):
+        lines = [ln for ln in str(text).splitlines() if ln.strip()]
+        if not lines or count <= 0:
+            return ""
+        count = min(count, len(lines))
+        # index: respeta el orden del nodo conectado (línea 1 = índice 0...).
+        # random: selección aleatoria sin repetir usando la seed.
+        elegidas = lines[:count] if modo == "index" else rng.sample(lines, count)
+        return ", ".join(elegidas)
+
+    def execute(
+        self,
+        prompt,
+        seed=0,
+        min_palabras=0,
+        concatenar_natural=False,
+        modo_personajes="index",
+        modo="NSFW",
+        add_comma_space_end=True,
+        filtro_gen="",
+        filtro_cara="",
+        filtro_ropa="",
+        filtro_lugar="",
+        all_gen="",
+        all_lugar="",
+        per_f_extra="",
+        per_m_extra="",
+        ignore_color_prefix=True,
+    ):
+        scalar = self._scalar
+        prompt = str(scalar(prompt, ""))
+        ignore_color_prefix = _mika_coerce_bool(scalar(ignore_color_prefix, True))
+
+        filtros = {}
+        for nombre, tags_in, icp in (
+            ("gen", filtro_gen, False),
+            ("ropa", filtro_ropa, ignore_color_prefix),
+            ("cara", filtro_cara, False),
+            ("lugar", filtro_lugar, False),
+        ):
+            filtro = SmartTagFilterMika()
+            filtros[nombre] = filtro.filter_tags(
+                prompt,
+                scalar(tags_in, ""),
+                mode="include",
+                case_sensitive=False,
+                ignore_weight=True,
+                ignore_color_prefix=icp,
+                add_comma_space_end=True,
+            )[0]
+
+        # Extras por cantidad de personajes, detectados sobre el filtro GEN
+        # (antes del filtro por largo de frase, para que "2girls" siga
+        # contando aunque min_palabras > 1).
+        # Se cuentan los "Ngirls"/"Nboys" tanto en el filtro GEN como en el
+        # prompt completo, para que los extras también se sumen en la salida
+        # SIN FILTRO aunque esos tags no estén en la lista del filtro GEN.
+        tag_list = TagIfMika().parse_tags_list(filtros["gen"]) + \
+            TagIfMika().parse_tags_list(prompt)
+
+        def _max_count(genero):
+            mejor = 0
+            for t in tag_list:
+                # Tolera "2girls", "2_girls" y "2 girls" (normalizado o no).
+                m = re.fullmatch(r"(\d+)\+?[\s_]*" + genero + r"s?\+?", t)
+                if m:
+                    mejor = max(mejor, int(m.group(1)))
+            return mejor
+
+        rng = random_module.Random(scalar(seed, 0))
+        modo_personajes = scalar(modo_personajes, "index")
+        if modo_personajes not in ("index", "random"):
+            modo_personajes = "index"
+        n_girls = _max_count("girl")
+        n_boys = _max_count("boy")
+        extra_f = self._pick_lines(per_f_extra, n_girls - 1 if n_girls >= 2 else 0, rng, modo_personajes)
+        extra_m = self._pick_lines(per_m_extra, n_boys, rng, modo_personajes)
+        extras = self._join(extra_f, extra_m)
+
+        # Detección de frases en lenguaje natural sobre el prompt completo:
+        # los fragmentos con min_palabras palabras o más van a TAGS NATURAL
+        # (0 = apagado). El filtro GEN nunca se modifica; las frases solo se
+        # concatenan al resultado si concatenar_natural está activo.
+        min_palabras = int(scalar(min_palabras, 0) or 0)
+        concatenar_natural = _mika_coerce_bool(scalar(concatenar_natural, False))
+        tags_natural = ""
+        naturales = []
+        if min_palabras > 0:
+            frases = [f.strip() for f in prompt.split(",") if f.strip()]
+            naturales = [f for f in frases if len(f.split()) >= min_palabras]
+            tags_natural = (", ".join(naturales) + ", ") if naturales else ""
+
+        if concatenar_natural and naturales:
+            gen_clean = filtros["gen"].rstrip(" ,")
+            presentes = {t.strip().lower() for t in gen_clean.split(",") if t.strip()}
+            extras_natural = [t for t in naturales if t.lower() not in presentes]
+            base = self._join(filtros["gen"], ", ".join(extras_natural), extras)
+        else:
+            base = self._join(filtros["gen"], extras)
+
+        union_exclusion = self._join(
+            scalar(all_gen, ""),
+            scalar(filtro_ropa, ""),
+            scalar(all_lugar, ""),
+            scalar(filtro_cara, ""),
+        )
+        # TAGS SIN FILTRO: se quita del prompt todo lo que coincida con la
+        # unión de listas, ignorando pesos y prefijos de color (así, si la
+        # lista tiene "shirt", "white shirt" también se filtra).
+        lista_exclusion = _parse_prompt(union_exclusion, False)
+        if lista_exclusion:
+            texto_sin_filtro = ", ".join(
+                f["original"]
+                for f in _parse_prompt(prompt, False)
+                if not any(
+                    _tags_match(f, ex, ignore_weight=True, ignore_color_prefix=True)
+                    for ex in lista_exclusion
+                )
+            )
+        else:
+            texto_sin_filtro = prompt
+
+        prompt_sin_filtro = self._join(prompt, extras)
+
+        # Modo SFW / NSFW: con NSFW, si el prompt contiene un tag adulto se
+        # agrega el tag "uncensored". Con SFW, esos tags se eliminan.
+        # Disparadores: cualquier tag que contenga "penis" o "pussy"
+        # (cubre large penis, huge penis, gigantic penis, etc.) o la
+        # palabra exacta "sex".
+        modo = scalar(modo, "NSFW")
+
+        def _es_tag_nsfw(tag):
+            t = tag.lower().replace("_", " ")
+            palabras = re.findall(r"[a-z]+", t)
+            return "penis" in t or "pussy" in t or "sex" in palabras
+
+        def _hay_nsfw(texto):
+            return any(
+                _es_tag_nsfw(t) for t in str(texto).split(",") if t.strip()
+            )
+
+        def _limpiar_nsfw(texto):
+            partes = [t.strip() for t in str(texto).split(",")]
+            partes = [t for t in partes if t and not _es_tag_nsfw(t)]
+            return ", ".join(partes)
+
+        if modo == "SFW":
+            base = _limpiar_nsfw(base)
+            prompt_sin_filtro = _limpiar_nsfw(prompt_sin_filtro)
+        elif _hay_nsfw(prompt) and "uncensored" not in base.lower():
+            base = self._join(base, "uncensored")
+
+        coma_final = _mika_coerce_bool(scalar(add_comma_space_end, True))
+        ensure = SmartTagFilterMika._ensure_trailing_comma_space
+
+        def _fin(t):
+            return ensure(t) if coma_final else t
+
+        return (
+            _fin(base),
+            _fin(self._join(base, filtros["cara"])),
+            _fin(self._join(base, filtros["ropa"])),
+            _fin(self._join(base, filtros["ropa"], filtros["cara"])),
+            _fin(self._join(base, filtros["ropa"], filtros["cara"], filtros["lugar"])),
+            _fin(self._join(base, filtros["cara"], filtros["lugar"])),
+            _fin(self._join(base, filtros["lugar"])),
+            _fin(texto_sin_filtro),
+            tags_natural,
+            filtros["gen"],
+            filtros["ropa"],
+            filtros["cara"],
+            filtros["lugar"],
+            _fin(prompt_sin_filtro),
+        )
+
+
+class FiltrosMikaSelect:
+    """
+    FILTROS Select-Mika: misma lógica que FILTROS-Mika pero con una sola
+    salida elegida con el selector "salida" (equivalente a FILTROS + switch
+    de 8 opciones por índice).
+    """
+
+    OPCIONES = [
+        "1 F GEN",
+        "2 F GEN + CARA",
+        "3 F GEN + ROPA",
+        "4 F GEN + ROPA + CARA",
+        "5 F GEN + ROPA + CARA + LUGAR",
+        "6 F GEN + CARA + LUGAR",
+        "7 F GEN + LUGAR",
+        "8 SIN FILTRO",
+    ]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        base = FiltrosMika.INPUT_TYPES()
+        base["required"]["salida"] = (cls.OPCIONES, {"default": cls.OPCIONES[0]})
+        return base
+
+    RETURN_TYPES = ("STRING",) * 7
+    RETURN_NAMES = (
+        "prompt filtro",
+        "FILTRO GENERAL",
+        "FILTRO ROPA",
+        "FILTRO CARA",
+        "FILTRO LUGAR",
+        "TAGS SIN FILTRO",
+        "TAGS NATURAL",
+    )
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    def execute(self, salida="1 F GEN", **kwargs):
+        resultados = FiltrosMika().execute(**kwargs)
+        # "8 SIN FILTRO" corresponde a la salida PROMPT SIN FILTRO (índice 13),
+        # igual que en el switch original; 1-7 son las salidas 0-6.
+        idx = self.OPCIONES.index(salida) if salida in self.OPCIONES else 0
+        if idx == 7:
+            idx = 13
+        return (
+            resultados[idx],
+            resultados[9],
+            resultados[10],
+            resultados[11],
+            resultados[12],
+            resultados[7],
+            resultados[8],
+        )
+
+
+class FiltrosPromptMika:
+    """
+    FILTROS Prompt-Mika: solo filtrado de prompts para extraer datos.
+
+    Aplica los cuatro filtros (GEN/ROPA/CARA/LUGAR) sobre el prompt y
+    devuelve el resultado de cada uno por separado, más los TAGS SIN
+    FILTRO y los TAGS NATURAL. Sin lógica de personajes, sin selector de
+    salida y sin combinaciones.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        slot = ("*", {"forceInput": True})
+        return {
+            "required": {
+                "prompt": slot,
+                "min_palabras": ("INT", {"default": 0, "min": 0, "max": 20}),
+                "add_comma_space_end": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "filtro_gen": slot,
+                "filtro_cara": slot,
+                "filtro_ropa": slot,
+                "filtro_lugar": slot,
+                "all_gen": slot,
+                "all_lugar": slot,
+                "ignore_color_prefix": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",) * 6
+    RETURN_NAMES = (
+        "FILTRO GENERAL",
+        "FILTRO ROPA",
+        "FILTRO CARA",
+        "FILTRO LUGAR",
+        "TAGS SIN FILTRO",
+        "TAGS NATURAL",
+    )
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    def execute(
+        self,
+        prompt,
+        min_palabras=0,
+        add_comma_space_end=True,
+        filtro_gen="",
+        filtro_cara="",
+        filtro_ropa="",
+        filtro_lugar="",
+        all_gen="",
+        all_lugar="",
+        ignore_color_prefix=True,
+    ):
+        scalar = FiltrosMika._scalar
+        prompt = str(scalar(prompt, ""))
+        ignore_color_prefix = _mika_coerce_bool(scalar(ignore_color_prefix, True))
+
+        filtros = {}
+        for nombre, tags_in, icp in (
+            ("gen", filtro_gen, False),
+            ("ropa", filtro_ropa, ignore_color_prefix),
+            ("cara", filtro_cara, False),
+            ("lugar", filtro_lugar, False),
+        ):
+            filtro = SmartTagFilterMika()
+            filtros[nombre] = filtro.filter_tags(
+                prompt,
+                scalar(tags_in, ""),
+                mode="include",
+                case_sensitive=False,
+                ignore_weight=True,
+                ignore_color_prefix=icp,
+                add_comma_space_end=True,
+            )[0]
+
+        join = FiltrosMika._join
+
+        # TAGS SIN FILTRO: se quita del prompt todo lo que coincida con la
+        # unión de listas, ignorando pesos y prefijos de color.
+        union_exclusion = join(
+            scalar(all_gen, ""),
+            scalar(filtro_ropa, ""),
+            scalar(all_lugar, ""),
+            scalar(filtro_cara, ""),
+        )
+        lista_exclusion = _parse_prompt(union_exclusion, False)
+        if lista_exclusion:
+            texto_sin_filtro = ", ".join(
+                f["original"]
+                for f in _parse_prompt(prompt, False)
+                if not any(
+                    _tags_match(f, ex, ignore_weight=True, ignore_color_prefix=True)
+                    for ex in lista_exclusion
+                )
+            )
+        else:
+            texto_sin_filtro = prompt
+
+        # TAGS NATURAL: frases del prompt con min_palabras palabras o más
+        # (0 = apagado).
+        min_palabras = int(scalar(min_palabras, 0) or 0)
+        tags_natural = ""
+        if min_palabras > 0:
+            frases = [f.strip() for f in prompt.split(",") if f.strip()]
+            naturales = [f for f in frases if len(f.split()) >= min_palabras]
+            tags_natural = (", ".join(naturales) + ", ") if naturales else ""
+
+        coma_final = _mika_coerce_bool(scalar(add_comma_space_end, True))
+        ensure = SmartTagFilterMika._ensure_trailing_comma_space
+
+        def _fin(t):
+            return ensure(t) if coma_final else t
+
+        return (
+            filtros["gen"],
+            filtros["ropa"],
+            filtros["cara"],
+            filtros["lugar"],
+            _fin(texto_sin_filtro),
+            tags_natural,
+        )
+
+
+class PromptReorganizeMika:
+    """
+    Prompt Reorganize-Mika: reorganiza el prompt en secciones con un orden
+    elegido manualmente.
+
+    Cada fragmento del prompt se asigna a UNA sola sección por cascada:
+    1) si aparece en all_gen → GEN; 2) en filtro_ropa → ROPA;
+    3) en filtro_cara → CARA; 4) en all_lugar → LUGAR; 6) el resto → SIN
+    FILTRO. La sección NATURAL recibe solo las frases de min_palabras
+    palabras o más que NO coinciden con ningún filtro.
+
+    Dentro de cada sección, las frases de min_palabras o más se mueven al
+    final (así "looking at viewer, 1boy, 2girls" queda
+    "1boy, 2girls, looking at viewer") sin que el filtro natural afecte a
+    los otros filtros.
+
+    Los widgets orden_1..orden_6 eligen qué sección va en cada posición.
+    Repetir una sección la imprime dos veces; omitirla la descarta.
+    """
+
+    SECCIONES = ["GEN", "ROPA", "CARA", "LUGAR", "NATURAL", "SIN FILTRO"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        slot = ("*", {"forceInput": True})
+        orden = {
+            f"orden_{i}": (cls.SECCIONES, {"default": cls.SECCIONES[i - 1]})
+            for i in range(1, len(cls.SECCIONES) + 1)
+        }
+        return {
+            "required": {
+                "prompt": slot,
+                "filtro_cara": slot,
+                "filtro_ropa": slot,
+                "all_gen": slot,
+                "all_lugar": slot,
+                "min_palabras": ("INT", {"default": 3, "min": 0, "max": 20}),
+                "add_comma_space_end": ("BOOLEAN", {"default": True}),
+                "agrupar_similares": ("BOOLEAN", {"default": False}),
+                **orden,
+            },
+            "optional": {
+                "ignore_color_prefix": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("prompt",)
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    @staticmethod
+    def _scalar(value, default=""):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    _STOPWORDS = {
+        "a", "an", "the", "of", "on", "in", "at", "to", "and", "with",
+        "el", "la", "los", "las", "un", "una", "de", "del", "en", "y", "o",
+        "esta", "este", "estan", "su", "sus", "its", "is",
+    }
+
+    @classmethod
+    def _agrupar_similares(cls, fragmentos):
+        """
+        Agrupa tags que comparten palabras: cada grupo ocupa la posición
+        de su primer miembro, los grupos se ordenan alfabéticamente por la
+        palabra que comparten y los miembros por número de palabras.
+        Ej: "1girl, solo, shirt, ass, white shirt, huge ass, standing"
+            → "1girl, solo, ass, huge ass, shirt, white shirt, standing".
+        """
+        por_palabra = {}
+        palabras_de = []
+        for i, texto in enumerate(fragmentos):
+            palabras = {
+                p for p in re.findall(r"[\w]+", texto.lower())
+                if len(p) > 1 and p not in cls._STOPWORDS
+            }
+            palabras_de.append(palabras)
+            for p in palabras:
+                por_palabra.setdefault(p, []).append(i)
+
+        # Componentes conexos por palabra compartida (union-find simple).
+        padre = list(range(len(fragmentos)))
+
+        def raiz(i):
+            while padre[i] != i:
+                padre[i] = padre[padre[i]]
+                i = padre[i]
+            return i
+
+        for indices in por_palabra.values():
+            for j in indices[1:]:
+                ri, rj = raiz(indices[0]), raiz(j)
+                if ri != rj:
+                    padre[rj] = ri
+
+        grupos = {}
+        for i in range(len(fragmentos)):
+            grupos.setdefault(raiz(i), []).append(i)
+
+        items = []
+        for miembros in grupos.values():
+            pos = miembros[0]
+            if len(miembros) > 1:
+                comunes = set(palabras_de[miembros[0]])
+                for m in miembros[1:]:
+                    comunes &= palabras_de[m]
+                clave = sorted(comunes)[0] if comunes else ""
+                ordenados = sorted(
+                    miembros,
+                    key=lambda m: (len(fragmentos[m].split()), fragmentos[m].lower()),
+                )
+                items.append([pos, True, clave, [fragmentos[m] for m in ordenados]])
+            else:
+                items.append([pos, False, "", [fragmentos[miembros[0]]]])
+
+        # Los grupos forman un bloque en la posición de su miembro más
+        # temprano y entre ellos se ordenan alfabéticamente por la palabra
+        # que comparten; los tags sueltos conservan su orden original.
+        clusters = [it for it in items if it[1]]
+        if clusters:
+            pos_bloque = min(it[0] for it in clusters)
+            clusters.sort(key=lambda it: it[2])
+            for orden_g, it in enumerate(clusters):
+                it[0] = pos_bloque
+                it[2] = orden_g
+        items.sort(key=lambda it: (it[0], 0 if it[1] else 1, it[2]))
+
+        resultado = []
+        for it in items:
+            resultado.extend(it[3])
+        return resultado
+
+    def execute(
+        self,
+        prompt,
+        filtro_cara,
+        filtro_ropa,
+        all_gen,
+        all_lugar,
+        min_palabras=3,
+        add_comma_space_end=True,
+        agrupar_similares=False,
+        orden_1="GEN",
+        orden_2="ROPA",
+        orden_3="CARA",
+        orden_4="LUGAR",
+        orden_5="NATURAL",
+        orden_6="SIN FILTRO",
+        ignore_color_prefix=True,
+    ):
+        scalar = self._scalar
+        prompt = str(scalar(prompt, ""))
+        icp = _mika_coerce_bool(scalar(ignore_color_prefix, True))
+        min_palabras = int(scalar(min_palabras, 3) or 0)
+
+        fragmentos = [t for t in _parse_prompt(prompt, False)]
+
+        listas = {}
+        for nombre, tags_in, usar_icp in (
+            ("GEN", all_gen, False),
+            ("ROPA", filtro_ropa, icp),
+            ("CARA", filtro_cara, False),
+            ("LUGAR", all_lugar, False),
+        ):
+            listas[nombre] = (_parse_prompt(str(scalar(tags_in, "")), False), usar_icp)
+
+        secciones = {clave: [] for clave in self.SECCIONES}
+        for frag in fragmentos:
+            asignado = None
+            # Los filtros mandan: el filtro natural no les quita fragmentos.
+            for clave in ("GEN", "ROPA", "CARA", "LUGAR"):
+                lista, usar_icp = listas[clave]
+                if any(
+                    _tags_match(frag, ft, ignore_weight=True, ignore_color_prefix=usar_icp)
+                    for ft in lista
+                ):
+                    asignado = clave
+                    break
+
+            if asignado is None and min_palabras > 0:
+                if len(frag["original"].split()) >= min_palabras:
+                    asignado = "NATURAL"
+
+            secciones[asignado or "SIN FILTRO"].append(frag["original"])
+
+        orden = [
+            scalar(o, d) for o, d in (
+                (orden_1, "GEN"), (orden_2, "ROPA"), (orden_3, "CARA"),
+                (orden_4, "LUGAR"), (orden_5, "NATURAL"), (orden_6, "SIN FILTRO"),
+            )
+        ]
+
+        agrupar = _mika_coerce_bool(scalar(agrupar_similares, False))
+        partes = []
+        for clave in orden:
+            if clave in secciones and secciones[clave]:
+                # Con similitud activa se agrupa cada sección por separado,
+                # respetando el orden de secciones y sin mezclar secciones
+                # (los tags sin filtro se agrupan solo entre ellos).
+                contenido = secciones[clave]
+                if agrupar:
+                    contenido = self._agrupar_similares(contenido)
+                # Las frases naturales (min_palabras o más) van al final de
+                # cada sección, sin cambiar a qué sección pertenecen.
+                if min_palabras > 0:
+                    cortos = [t for t in contenido if len(t.split()) < min_palabras]
+                    largos = [t for t in contenido if len(t.split()) >= min_palabras]
+                    contenido = cortos + largos
+                partes.append(", ".join(contenido))
+
+        resultado = ", ".join(partes)
+        if _mika_coerce_bool(scalar(add_comma_space_end, True)):
+            resultado = SmartTagFilterMika._ensure_trailing_comma_space(resultado)
+
+        return (resultado,)
+
+
+class TextCleanOrganizeMika:
+    """
+    Text Clean & Organize-Mika: procesa listas o párrafos de texto en
+    general (no depende de filtros). Puede eliminar elementos repetidos,
+    eliminar palabras de color ("black", "white", etc. de cada elemento)
+    y agrupar por similitud, respetando el formato original del texto
+    (comas y saltos de línea de cada elemento se conservan).
+
+    Muestra dentro del nodo cuántos elementos entraron y cuántos salieron.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"default": "", "multiline": True, "forceInput": True}),
+                "eliminar_repetidos": ("BOOLEAN", {"default": True}),
+                "eliminar_colores": ("BOOLEAN", {"default": False}),
+                "agrupar_similares": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "eliminados")
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    @staticmethod
+    def _scalar(value, default=""):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @staticmethod
+    def _sin_colores(seg):
+        """Quita las palabras de color de un elemento p. ej.
+        "white shirt" → "shirt", "black_hair" → "hair"."""
+        partes = re.split(r"([_\s]+)", seg)
+        palabras = partes[0::2]
+        delims = partes[1::2] + [""]
+
+        conservados = [
+            (i, w) for i, w in enumerate(palabras)
+            if w and w.lower() not in _COLORS
+        ]
+        if not conservados:
+            return ""
+
+        resultado = conservados[0][1]
+        for (prev, _), (_, w) in zip(conservados, conservados[1:]):
+            resultado += delims[prev] + w
+
+        return resultado.strip(" _")
+
+    @classmethod
+    def _split_items(cls, text):
+        """Divide texto en segmentos conservando su separador original."""
+        partes = re.split(r"(\s*(?:,\s*|\n)+)", text)
+        items = []  # (texto visible, separador siguiente original)
+        for i in range(0, len(partes), 2):
+            seg = partes[i]
+            sep = partes[i + 1] if i + 1 < len(partes) else ""
+            if seg.strip():
+                items.append((seg.strip(), sep))
+        return items
+
+    @classmethod
+    def _reconstruir(cls, items):
+        # Si al reordenar un elemento sin separador original queda en medio,
+        # usa el separador dominante del texto (salto de línea o coma).
+        con_nueva_linea = [sep for _, sep in items if "\n" in sep]
+        sep_dominante = con_nueva_linea[0] if con_nueva_linea else ", "
+        reconstruido = ""
+        for i, (seg, sep) in enumerate(items):
+            if not sep and i < len(items) - 1:
+                sep = sep_dominante
+            reconstruido += seg + sep
+        return reconstruido
+
+    @classmethod
+    def _procesar(cls, items, eliminar_colores, eliminar_repetidos, agrupar_similares):
+        """Pipeline sobre items (seg, sep): colores, repetidos, similares.
+        Devuelve (items_procesados, eliminados)."""
+        eliminados = []
+
+        if _mika_coerce_bool(eliminar_colores, False):
+            procesados = [(cls._sin_colores(seg), sep) for seg, sep in items]
+            eliminados += [
+                seg for (seg, _), (limpio, _) in zip(items, procesados) if seg and not limpio
+            ]
+            items = [(seg, sep) for seg, sep in procesados if seg]
+
+        if _mika_coerce_bool(eliminar_repetidos, True):
+            vistos = set()
+            unicos = []
+            for seg, sep in items:
+                clave = seg.lower()
+                if clave not in vistos:
+                    vistos.add(clave)
+                    unicos.append((seg, sep))
+                else:
+                    eliminados.append(seg)
+            items = unicos
+
+        if _mika_coerce_bool(agrupar_similares, False):
+            orden = PromptReorganizeMika._agrupar_similares([seg for seg, _ in items])
+            # Colas por texto (no índice único): con repetidos conservados
+            # un dict colapsaba todas las ocurrencias en una sola.
+            por_texto = {}
+            for i, (seg, _) in enumerate(items):
+                por_texto.setdefault(seg, []).append(i)
+            reordenados = []
+            for seg in orden:
+                cola = por_texto.get(seg)
+                if cola:
+                    reordenados.append(items[cola.pop(0)])
+            items = reordenados
+
+        return items, eliminados
+
+    def execute(self, text, eliminar_repetidos=True, eliminar_colores=False, agrupar_similares=False):
+        text = str(self._scalar(text, ""))
+        if not text.strip():
+            return {"ui": {"text": ["IN (0):", "QUITADOS (0):", "OUT (0):"]}, "result": (text, "")}
+
+        items = self._split_items(text)
+        if not items:
+            return {"ui": {"text": ["IN (0):", "QUITADOS (0):", "OUT (0):"]}, "result": (text, "")}
+
+        cantidad_in = len(items)
+        items, eliminados = self._procesar(items, eliminar_colores, eliminar_repetidos, agrupar_similares)
+        reconstruido = self._reconstruir(items)
+
+        info = [
+            f"IN ({cantidad_in}):",
+            f"QUITADOS ({len(eliminados)}):",
+            f"OUT ({len(items)}):",
+        ]
+        return {
+            "ui": {"text": info},
+            "result": (reconstruido, ", ".join(eliminados)),
+        }
+
+
+class TextCleanOrganizeConcatMika:
+    """
+    Text Clean & Organize Concat-Mika: igual que Text Clean & Organize-Mika
+    pero con varios slots linkeables (text_1..N): concatena las listas o
+    párrafos de todos los nodos conectados, luego elimina colores, repeti-
+    dos y agrupa por similares. Muestra in/out en el propio nodo.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {
+            f"text_{i}": ("STRING", {"default": "", "multiline": False})
+            for i in range(1, MAX_CONCAT_SLOTS + 1)
+        }
+        optional["eliminar_repetidos"] = ("BOOLEAN", {"default": True})
+        optional["eliminar_colores"] = ("BOOLEAN", {"default": False})
+        optional["agrupar_similares"] = ("BOOLEAN", {"default": False})
+        optional["text_count"] = (
+            "INT",
+            {
+                "default": DEFAULT_CONCAT_SLOTS,
+                "min": 1,
+                "max": MAX_CONCAT_SLOTS,
+                "step": 1,
+                "display": "number",
+            },
+        )
+        return {"required": {}, "optional": optional}
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "eliminados")
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    def execute(
+        self,
+        eliminar_repetidos=True,
+        eliminar_colores=False,
+        agrupar_similares=False,
+        text_count=DEFAULT_CONCAT_SLOTS,
+        **kwargs,
+    ):
+        scalar = TextCleanOrganizeMika._scalar
+        count = max(1, min(MAX_CONCAT_SLOTS, int(scalar(text_count, DEFAULT_CONCAT_SLOTS))))
+
+        items = []
+        for i in range(1, count + 1):
+            value = scalar(kwargs.get(f"text_{i}"), "")
+            if not isinstance(value, str):
+                value = str(value)
+            if value.strip():
+                items.extend(TextCleanOrganizeMika._split_items(value))
+
+        if not items:
+            return {"ui": {"text": ["IN (0):", "QUITADOS (0):", "OUT (0):"]}, "result": ("", "")}
+
+        cantidad_in = len(items)
+        items, eliminados = TextCleanOrganizeMika._procesar(
+            items, eliminar_colores, eliminar_repetidos, agrupar_similares
+        )
+        reconstruido = TextCleanOrganizeMika._reconstruir(items)
+
+        info = [
+            f"IN ({cantidad_in}):",
+            f"QUITADOS ({len(eliminados)}):",
+            f"OUT ({len(items)}):",
+        ]
+        return {
+            "ui": {"text": info},
+            "result": (reconstruido, ", ".join(eliminados)),
+        }
+
+
+class TextCleanerCompareMika:
+    """
+    Text Cleaner Compare-Mika: elimina de una lista o grupo de tags los
+    elementos que se repiten en otra lista base, respetando el formato
+    (comas / saltos de línea) del texto de entrada.
+
+    - base: lista/grupo que sirve de referencia.
+    - tags_in: lista/grupo a la que se le quitan los repetidos de base.
+    - eliminar_repetidos: además quita duplicados dentro de tags_in.
+    - eliminar_colores / agrupar_similares: opciones del Clean & Organize.
+
+    Muestra en el nodo cuántos entraron, cuántos se quitaron y cuántos
+    salieron.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        slot = ("STRING", {"default": "", "multiline": True, "forceInput": True})
+        return {
+            "required": {
+                "base": slot,
+                "tags_in": slot,
+            },
+            "optional": {
+                "eliminar_repetidos": ("BOOLEAN", {"default": True}),
+                "eliminar_colores": ("BOOLEAN", {"default": False}),
+                "agrupar_similares": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "eliminados")
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/tags"
+
+    @staticmethod
+    def _scalar(value, default=""):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    def execute(
+        self,
+        base,
+        tags_in,
+        eliminar_repetidos=True,
+        eliminar_colores=False,
+        agrupar_similares=False,
+    ):
+        scalar = self._scalar
+        base = str(scalar(base, ""))
+        tags_in = str(scalar(tags_in, ""))
+
+        tco = TextCleanOrganizeMika
+        items = tco._split_items(tags_in)
+        if not items:
+            vacio = {"text": ["IN (0):", "QUITADOS (0):", "OUT (0):"]}
+            return {"ui": vacio, "result": ("", "")}
+
+        base_set = {
+            TagRemoverMika._normalize_for_compare(seg, False, True)
+            for seg, _ in tco._split_items(base)
+        }
+        base_set.discard("")
+
+        cantidad_in = len(items)
+        quitados = []
+
+        if _mika_coerce_bool(scalar(eliminar_colores, False), False):
+            items = [(tco._sin_colores(seg), sep) for seg, sep in items]
+            items = [(seg, sep) for seg, sep in items if seg]
+
+        filtrados = []
+        for seg, sep in items:
+            clave = TagRemoverMika._normalize_for_compare(seg, False, True)
+            if clave and clave in base_set:
+                quitados.append(seg)
+            else:
+                filtrados.append((seg, sep))
+        items = filtrados
+
+        if _mika_coerce_bool(scalar(eliminar_repetidos, True), True):
+            vistos = set()
+            unicos = []
+            for seg, sep in items:
+                clave = seg.lower()
+                if clave not in vistos:
+                    vistos.add(clave)
+                    unicos.append((seg, sep))
+            items = unicos
+
+        if _mika_coerce_bool(scalar(agrupar_similares, False), False):
+            orden = PromptReorganizeMika._agrupar_similares([s for s, _ in items])
+            por_texto = {}
+            for i, (s, _) in enumerate(items):
+                por_texto.setdefault(s, []).append(i)
+            reordenados = []
+            for s in orden:
+                cola = por_texto.get(s)
+                if cola:
+                    reordenados.append(items[cola.pop(0)])
+            items = reordenados
+
+        reconstruido = tco._reconstruir(items)
+
+        info = [
+            f"IN ({cantidad_in}):",
+            f"QUITADOS ({len(quitados)}):",
+            f"OUT ({len(items)}):",
+        ]
+        return {
+            "ui": {"text": info},
+            "result": (reconstruido, ", ".join(quitados)),
+        }
+
+
+# ======================================================================
+# TRADUCCIÓN (Smart Prompt Translate, portado de kkTranslator)
+# ======================================================================
+
+_MIKA_MARIAN_DEFAULTS = [
+    "opus-mt-es-en", "opus-mt-zh-en", "opus-mt-rn-en", "opus-mt-taw-en",
+    "opus-mt-az-en", "opus-mt-ru-en", "opus-mt-ja-en", "opus-mt-en-zh",
+    "opus-mt-en-ru", "opus-mt-en-jap", "opus-mt-en-rn",
+]
+
+
+def _mika_get_marian_list():
+    try:
+        base_path = os.path.join(folder_paths.models_dir, "MikaTranslator")
+        if os.path.isdir(base_path):
+            found = sorted(
+                d for d in os.listdir(base_path)
+                if os.path.isdir(os.path.join(base_path, d)) and not d.startswith(".")
+            )
+            if found:
+                return found
+    except Exception:
+        pass
+    return _MIKA_MARIAN_DEFAULTS
+
+
+def _mika_translate_raw(model, tokenizer, text):
+    with torch.inference_mode():
+        translated = model.generate(**tokenizer(text, return_tensors="pt", padding=True))
+    result = ""
+    for t in translated:
+        result += tokenizer.decode(t, skip_special_tokens=True)
+    result = result.strip()
+    if result.endswith(".") and not text.strip().endswith("."):
+        result = result[:-1]
+    return result
+
+
+def _mika_translate_mixed(model, tokenizer, prompt_text, use_lang_detect=True, min_words=3):
+    """Traduce solo los segmentos en español, coma a coma; el inglés y
+    los tags conocidos quedan intactos (con sus espacios originales).
+    Devuelve (texto, debug_lines)."""
+    segments = prompt_text.split(",")
+    result_parts = []
+    debug_lines = []
+
+    for seg in segments:
+        stripped = seg.strip()
+        if not stripped:
+            result_parts.append(seg)
+            continue
+
+        if stripped.lower() in _MIKA_SD_TAGS:
+            result_parts.append(seg)
+            debug_lines.append(f"INTACTO   [tag SD]: '{stripped}'")
+            continue
+
+        if stripped.startswith('"') and stripped.endswith('"') and len(stripped) >= 2:
+            result_parts.append(seg)
+            debug_lines.append(f"INTACTO   [entre comillas]: '{stripped}'")
+            continue
+
+        if use_lang_detect:
+            should_translate = _mika_is_spanish(stripped)
+            reason = "es=español" if should_translate else "no=español"
+        else:
+            should_translate = len(stripped.split()) > min_words
+            reason = f">{min_words}pal" if should_translate else f"<={min_words}pal"
+
+        if should_translate:
+            translated = _mika_translate(model, tokenizer, stripped)
+            leading_space = " " if seg.startswith(" ") else ""
+            trailing_space = " " if seg.endswith(" ") else ""
+            result_parts.append(f"{leading_space}{translated}{trailing_space}")
+            debug_lines.append(f"TRADUCIDO [{reason}]: '{stripped}' -> '{translated}'")
+            print(f"[MikaTranslate] '{stripped}' -> '{translated}'")
+        else:
+            result_parts.append(seg)
+            debug_lines.append(f"INTACTO   [{reason}]: '{stripped}'")
+
+    return (",".join(result_parts), "\n".join(debug_lines))
+
+
+def _mika_translate(model, tokenizer, text):
+    """Traduce text pero preserva intacto lo que esté entre comillas dobles."""
+    parts = re.split(r'("(?:[^"]*)")', text)
+    if len(parts) == 1:
+        return _mika_translate_raw(model, tokenizer, text)
+    result_parts = []
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith('"') and part.endswith('"') and len(part) >= 2:
+            result_parts.append(part)
+        else:
+            stripped = part.strip()
+            if stripped:
+                translated_part = _mika_translate_raw(model, tokenizer, stripped)
+                if part.startswith(" "):
+                    translated_part = " " + translated_part
+                if part.endswith(" "):
+                    translated_part = translated_part + " "
+                result_parts.append(translated_part)
+            else:
+                result_parts.append(part)
+    return "".join(result_parts)
+
+
+_MIKA_ES_WORDS = {
+    "el","la","los","las","un","una","unos","unas","lo",
+    "yo","tu","ella","nosotros","ellos","ellas","me","te","se","nos",
+    "mi","mis","tus","su","sus","este","esta","estos","estas",
+    "ese","esa","esos","esas","aquel","aquella",
+    "es","son","estan","fue","ser","estar","tiene","tienen",
+    "hace","hacen","puede","pueden","va","van","viene","vienen",
+    "quiere","quieren","sabe","saben","ve","ven","da","dan",
+    "pone","ponen","lleva","llevan","trae","traen","dice","dicen",
+    "mira","miran","toma","toman","deja","dejan","sigue","siguen",
+    "de","del","en","con","por","para","sin","sobre","bajo","entre",
+    "hacia","desde","hasta","ante","tras","contra","durante","mediante",
+    "segun","excepto","salvo","incluso","ademas","tambien","tampoco",
+    "pero","sino","aunque","porque","como","cuando","donde","si","que",
+    "y","o","ni","pues","luego","entonces","asi","ya","aun","todavia",
+    "grande","pequeño","pequeña","alto","alta","bajo","baja",
+    "largo","larga","corto","corta","nuevo","nueva","viejo","vieja",
+    "bueno","buena","malo","mala","bonito","bonita","feo","fea",
+    "feliz","triste","enojado","enojada","cansado","cansada",
+    "rapido","rapida","lento","lenta","fuerte","debil","duro","dura",
+    "mucho","mucha","muchos","muchas","poco","poca","pocos","pocas",
+    "todo","toda","todos","todas","nada","nadie","alguien","algo",
+    "muy","mas","menos","tan","tanto","tanta","aqui","ahi","alla",
+    "ahora","antes","despues","siempre","nunca","jamas",
+    "chica","chico","mujer","hombre","niña","niño","persona","gente",
+    "cara","cabeza","cabello","pelo","ojos","boca","nariz","manos",
+    "cuerpo","piel","ropa","vestido","camisa","pantalon","zapatos",
+    "fondo","cielo","tierra","agua","fuego","luz","sombra","color",
+    "bosque","ciudad","casa","cuarto","cama","silla","mesa","puerta",
+    "arbol","flor","hierba","roca","montaña","playa","mar","rio",
+    "sol","luna","estrella","nube","lluvia","nieve","viento",
+    "gato","perro","pajaro","pez","caballo","conejo",
+    "dia","noche","tarde","mañana","momento","tiempo","vida","mundo",
+    "amor","miedo","alegria","tristeza","fuerza","poder","magia",
+    "facil","dificil","unico","unica","tipico","tipica",
+    "magico","magica","romantico","romantica","dramatico","dramatica",
+    "parada","parado","sentada","sentado","acostada","acostado",
+    "corriendo","saltando","volando","nadando","bailando","cantando",
+}
+
+# Señales inglesas (función + adjetivos/colores típicos de prompts). El
+# inglés sin señales se conserva por defecto; esto solo decide empates
+# a favor de no traducir. Sin solape intencionado con el set español
+# (las de 1 letra no puntúan en ningún lado).
+_MIKA_EN_WORDS = {
+    "the","of","and","or","with","without","from","for","in","on","at",
+    "to","an","is","are","was","were","be","been","being",
+    "this","that","these","those","it","its","he","she","him","her",
+    "his","hers","they","them","their","theirs","we","our","you","your",
+    "yours","as","by","do","does","did","has","have","had","will",
+    "would","can","could","should","very","more","most",
+    "young","old","little","big","small","long","short","tall",
+    "white","black","red","blue","green","yellow","pink","purple",
+    "brown","gray","grey","blonde",
+}
+
+_MIKA_SD_TAGS = {
+    "masterpiece","best quality","high quality","ultra detailed","ultra-detailed",
+    "highly detailed","extremely detailed","intricate details","professional",
+    "photorealistic","hyperrealistic","8k","4k","hd","uhd","sharp focus",
+    "looking at viewer","looking away","looking back","looking down","looking up",
+    "upper body","lower body","full body","close-up","portrait","cowboy shot",
+    "from above","from below","from behind","from side",
+    "depth of field","bokeh","lens flare","cinematic lighting","dramatic lighting",
+    "soft lighting","natural lighting","studio lighting","rim lighting",
+    "white background","simple background","gradient background","no background",
+    "detailed background","blurred background","outdoors","indoors",
+}
+
+
+def _mika_is_spanish(text, tokenizer=None):
+    """Detecta español por señales fuertes, en orden:
+    1. Diacríticos (áéíóúüñ¿¡): el inglés no los usa.
+    2. Duelo de palabras ES vs EN (de 2+ letras).
+    Sin señales o en empate se devuelve False: lo desconocido se
+    conserva intacto para no deformar inglés con traducciones.
+    El ratio <unk> del tokenizer NO sirve como señal: el vocabulario
+    Marian cubre inglés y clasificaba todo como español."""
+    t = (text or "").lower()
+    if not t.strip():
+        return False
+    if re.search(r"[áéíóúüñ¿¡]", t):
+        return True
+    words = re.findall(r"[^\W\d_]+", t)
+    es = sum(1 for w in words if len(w) > 1 and w in _MIKA_ES_WORDS)
+    en = sum(1 for w in words if len(w) > 1 and w in _MIKA_EN_WORDS)
+    if es == 0 and en == 0:
+        return False
+    return es > en
+
+
+_MIKA_MARIAN_CACHE = {}
+
+
+def _mika_load_marian(checkpoint):
+    """Carga (y cachea en memoria) un modelo MarianMT + tokenizer desde
+    models/MikaTranslator/<modelo>."""
+    if checkpoint in _MIKA_MARIAN_CACHE:
+        return _MIKA_MARIAN_CACHE[checkpoint]
+
+    from transformers import MarianMTModel, MarianTokenizer
+
+    base_path = os.path.join(folder_paths.models_dir, "MikaTranslator")
+    os.makedirs(base_path, exist_ok=True)
+    translate_path = os.path.join(base_path, checkpoint)
+    if not os.path.isdir(translate_path):
+        raise ValueError(
+            f"Modelo no encontrado: {translate_path}\n"
+            f"Descarga Helsinki-NLP/{checkpoint} de HuggingFace"
+        )
+    pair = (
+        MarianMTModel.from_pretrained(translate_path),
+        MarianTokenizer.from_pretrained(translate_path),
+    )
+    # Solo inferencia: sin eval() el dropout sigue activo y la misma
+    # entrada traduce distinto entre ejecuciones.
+    pair[0].eval()
+    _MIKA_MARIAN_CACHE[checkpoint] = pair
+    return pair
+
+
+class LoadMarianMTCheckPoint:
+    """Carga un modelo MarianMT local desde models/MikaTranslator/<modelo>."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        dynamic = _mika_get_marian_list()
+        return {
+            "required": {
+                "checkpoint": (dynamic, {"multiline": False, "default": dynamic[0]}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "TOKENIZER")
+    RETURN_NAMES = ("model", "tokenizer")
+    FUNCTION = "load_marian_mt"
+    CATEGORY = "Mika Utilidades/translate"
+
+    def load_marian_mt(self, checkpoint):
+        model, tokenizer = _mika_load_marian(checkpoint)
+        return (model, tokenizer)
+
+
+class SmartPromptTranslate:
+    """Traduce al inglés solo los segmentos en español (por valor de modo).
+    Carga el modelo MarianMT elegido con `checkpoint` (cacheado en memoria);
+    ya no requiere un nodo loader aparte, pero sigue aceptando model/tokenizer
+    conectados para compatibilidad con workflows viejos."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        dynamic = _mika_get_marian_list()
+        return {
+            "required": {
+                "checkpoint": (dynamic, {"multiline": False, "default": dynamic[0]}),
+                "modo": (["detectar idioma", "contar palabras"], {
+                    "default": "detectar idioma"
+                }),
+                "min_words": ("INT", {
+                    "default": 3, "min": 1, "max": 20, "step": 1,
+                    "display": "number"
+                }),
+            },
+            "optional": {
+                "prompt_text": ("STRING", {"forceInput": True}),
+                "model": ("MODEL",),
+                "tokenizer": ("TOKENIZER",),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("prompt_translated", "debug_info")
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/translate"
+
+    def run(self, checkpoint, modo="detectar idioma", min_words=3, prompt_text="",
+            model=None, tokenizer=None):
+        if not prompt_text or not prompt_text.strip():
+            return ("", "Sin texto de entrada")
+
+        if model is None or tokenizer is None:
+            model, tokenizer = _mika_load_marian(checkpoint)
+
+        use_lang_detect = (modo == "detectar idioma")
+        return _mika_translate_mixed(model, tokenizer, prompt_text, use_lang_detect, min_words)
+
+
+class PromptTranslateToText:
+    """Traduce texto al inglés. Con `solo_español` activo traduce solo los
+    segmentos en español (coma a coma) y conserva el inglés intacto para
+    no deformar prompts; apagado traduce todo como antes."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        dynamic = _mika_get_marian_list()
+        return {
+            "required": {
+                "checkpoint": (dynamic, {"multiline": False, "default": dynamic[0]}),
+            },
+            "optional": {
+                "prompt_text": ("STRING", {"forceInput": True}),
+                "model": ("MODEL",),
+                "tokenizer": ("TOKENIZER",),
+                "solo_español": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/translate"
+
+    def run(self, checkpoint, prompt_text="", model=None, tokenizer=None, solo_español=False):
+        if not prompt_text or not prompt_text.strip():
+            return ("",)
+        if model is None or tokenizer is None:
+            model, tokenizer = _mika_load_marian(checkpoint)
+        if _mika_coerce_bool(solo_español, False):
+            return (_mika_translate_mixed(model, tokenizer, prompt_text)[0],)
+        with torch.inference_mode():
+            translated = model.generate(**tokenizer(prompt_text, return_tensors="pt", padding=True))
+        text = ""
+        for t in translated:
+            text += tokenizer.decode(t, skip_special_tokens=True)
+        return (text,)
+
+
+class ClipboardToMultiRefMika:
+    """
+    Clipboard to MultiRef-Mika: la imagen del portapapeles cae en la ranura
+    elegida (image_1 ... image_10) del nodo "Academia SD Multi Image
+    Reference" cuyo título coincida con `target_node_title`.
+
+    Todo ocurre en el navegador (web/clipboard_to_multiref_mika.js): sube la
+    imagen a input/ y llama a `asdReceiveImage` del nodo destino. En
+    ejecución este nodo no hace nada.
+    """
+
+    SLOT_COUNT = 10
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "target_node_title": ("STRING", {"default": ""}),
+                "slot": ([f"image_{i}" for i in range(1, cls.SLOT_COUNT + 1)],
+                         {"default": "image_1"}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/image"
+    OUTPUT_NODE = True
+
+    def doit(self, target_node_title="", slot="image_1"):
+        return ()
+
+
+def _lora_list():
+    return sorted(folder_paths.get_filename_list("loras"))
+
+
+class LoadLoraMika:
+    """
+    Load Lora-Mika: carga un LoRA navegando por carpetas/subcarpetas.
+
+    El combo `lora` guarda la ruta relativa completa; web/load_lora_mika.js
+    muestra el desplegable como menú en cascada por directorios.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "lora": (_lora_list(),),
+                "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0,
+                                             "max": 100.0, "step": 0.01}),
+                "strength_clip": ("FLOAT", {"default": 1.0, "min": -100.0,
+                                            "max": 100.0, "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL", "CLIP")
+    FUNCTION = "load_lora"
+    CATEGORY = "Mika Utilidades/loaders"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, lora, **_kwargs):
+        if not folder_paths.get_full_path("loras", lora):
+            return f"LoRA no encontrado: {lora}"
+        return True
+
+    def load_lora(self, model, clip, lora, strength_model, strength_clip):
+        return LoraLoader().load_lora(
+            model, clip, lora, strength_model, strength_clip
+        )
+
+
+class LoadLoraMikaNoClip:
+    """Load Lora (no CLIP)-Mika: igual que Load Lora-Mika pero solo MODEL."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "lora": (_lora_list(),),
+                "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0,
+                                             "max": 100.0, "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_lora"
+    CATEGORY = "Mika Utilidades/loaders"
+
+    VALIDATE_INPUTS = LoadLoraMika.VALIDATE_INPUTS
+
+    def load_lora(self, model, lora, strength_model):
+        model_out, _ = LoraLoader().load_lora(model, None, lora, strength_model, 0.0)
+        return (model_out,)
+
+
+MAX_LORA_STACK = 10
+DEFAULT_LORA_STACK = 3
+
+
+class LoadLoraStackMika:
+    """
+    Load Lora Stack-Mika: apila hasta MAX_LORA_STACK LoRAs en orden
+    (1 -> N). Cada slot tiene su combo `lora_N` (con menú en cascada),
+    fuerzas propias y toggle `enable_N` para prender/apagar sin borrar
+    la selección. `lora_count` controla cuántos slots se usan y se ven.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = _lora_list()
+        optional = {
+            "lora_count": ("INT", {"default": DEFAULT_LORA_STACK,
+                                   "min": 1, "max": MAX_LORA_STACK,
+                                   "step": 1}),
+        }
+        for i in range(1, MAX_LORA_STACK + 1):
+            optional[f"lora_{i}"] = (loras,)
+            optional[f"enable_{i}"] = ("BOOLEAN", {"default": True})
+            optional[f"strength_model_{i}"] = ("FLOAT", {"default": 1.0,
+                                                        "min": -100.0,
+                                                        "max": 100.0,
+                                                        "step": 0.01})
+            optional[f"strength_clip_{i}"] = ("FLOAT", {"default": 1.0,
+                                                       "min": -100.0,
+                                                       "max": 100.0,
+                                                       "step": 0.01})
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("MODEL", "CLIP")
+    FUNCTION = "load_loras"
+    CATEGORY = "Mika Utilidades/loaders"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        try:
+            count = int(kwargs.get("lora_count", DEFAULT_LORA_STACK))
+        except Exception:
+            count = DEFAULT_LORA_STACK
+        count = max(1, min(MAX_LORA_STACK, count))
+        for i in range(1, count + 1):
+            if not _mika_coerce_bool(kwargs.get(f"enable_{i}", True), True):
+                continue
+            lora = kwargs.get(f"lora_{i}", "")
+            if lora and not folder_paths.get_full_path("loras", lora):
+                return f"LoRA no encontrado: {lora}"
+        return True
+
+    def load_loras(self, model, clip, lora_count=DEFAULT_LORA_STACK, **kwargs):
+        try:
+            count = int(lora_count)
+        except Exception:
+            count = DEFAULT_LORA_STACK
+        count = max(1, min(MAX_LORA_STACK, count))
+        for i in range(1, count + 1):
+            if not _mika_coerce_bool(kwargs.get(f"enable_{i}", True), True):
+                continue
+            lora = kwargs.get(f"lora_{i}", "")
+            if not lora:
+                continue
+            try:
+                strength_model = float(kwargs.get(f"strength_model_{i}", 1.0))
+            except Exception:
+                strength_model = 1.0
+            try:
+                strength_clip = float(kwargs.get(f"strength_clip_{i}", 1.0))
+            except Exception:
+                strength_clip = 1.0
+            model, clip = LoraLoader().load_lora(
+                model, clip, lora, strength_model, strength_clip)
+        return (model, clip)
+
+
+class LoadLoraStackNoClipMika:
+    """Load Lora Stack (no CLIP)-Mika: igual que el stack pero solo MODEL."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = _lora_list()
+        optional = {
+            "lora_count": ("INT", {"default": DEFAULT_LORA_STACK,
+                                   "min": 1, "max": MAX_LORA_STACK,
+                                   "step": 1}),
+        }
+        for i in range(1, MAX_LORA_STACK + 1):
+            optional[f"lora_{i}"] = (loras,)
+            optional[f"enable_{i}"] = ("BOOLEAN", {"default": True})
+            optional[f"strength_model_{i}"] = ("FLOAT", {"default": 1.0,
+                                                        "min": -100.0,
+                                                        "max": 100.0,
+                                                        "step": 0.01})
+        return {
+            "required": {
+                "model": ("MODEL",),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_loras"
+    CATEGORY = "Mika Utilidades/loaders"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        try:
+            count = int(kwargs.get("lora_count", DEFAULT_LORA_STACK))
+        except Exception:
+            count = DEFAULT_LORA_STACK
+        count = max(1, min(MAX_LORA_STACK, count))
+        for i in range(1, count + 1):
+            if not _mika_coerce_bool(kwargs.get(f"enable_{i}", True), True):
+                continue
+            lora = kwargs.get(f"lora_{i}", "")
+            if lora and not folder_paths.get_full_path("loras", lora):
+                return f"LoRA no encontrado: {lora}"
+        return True
+
+    def load_loras(self, model, lora_count=DEFAULT_LORA_STACK, **kwargs):
+        try:
+            count = int(lora_count)
+        except Exception:
+            count = DEFAULT_LORA_STACK
+        count = max(1, min(MAX_LORA_STACK, count))
+        for i in range(1, count + 1):
+            if not _mika_coerce_bool(kwargs.get(f"enable_{i}", True), True):
+                continue
+            lora = kwargs.get(f"lora_{i}", "")
+            if not lora:
+                continue
+            try:
+                strength_model = float(kwargs.get(f"strength_model_{i}", 1.0))
+            except Exception:
+                strength_model = 1.0
+            model, _ = LoraLoader().load_lora(
+                model, None, lora, strength_model, 0.0)
+        return (model,)
+
+
+# ======================================================================
+# PLOT DE PRUEBAS XY (alimenta al nodo XYZ-GridPlot)
+# ======================================================================
+
+_MIKA_PLOT_TARGETS = [
+    "prompt", "negative", "sampler", "scheduler",
+    "cfg", "steps", "seed", "denoise", "model", "checkpoint", "none",
+]
+_MIKA_PLOT_MAX_COMBOS = 100
+
+
+def _mika_plot_values(text):
+    return [l.strip() for l in str(text).splitlines() if l.strip()]
+
+
+def _mika_plot_typed(target, raw):
+    try:
+        if target in ("steps", "seed"):
+            v = int(float(raw))
+        elif target in ("cfg", "denoise"):
+            v = float(raw)
+        else:
+            return str(raw).strip()
+    except Exception:
+        raise ValueError(f"[Mika] valor no válido para '{target}': {raw!r}")
+    if target == "steps" and v < 1:
+        raise ValueError("[Mika] steps debe ser >= 1")
+    if target == "seed" and v < 0:
+        raise ValueError("[Mika] seed debe ser >= 0")
+    if target == "cfg" and v < 0:
+        raise ValueError("[Mika] cfg debe ser >= 0")
+    return v
+
+
+def _mika_plot_check(target, value):
+    if target == "sampler" and value not in comfy.samplers.SAMPLER_NAMES:
+        hint = " (¿es un prompt? cambia el target a prompt)" if " " in str(value) else ""
+        raise ValueError(f"[Mika] sampler desconocido: {value!r}{hint}")
+    if target == "scheduler" and value not in comfy.samplers.SCHEDULER_NAMES:
+        hint = " (¿es un prompt? cambia el target a prompt)" if " " in str(value) else ""
+        raise ValueError(f"[Mika] scheduler desconocido: {value!r}{hint}")
+
+
+def _mika_plot_load(target, name, cache):
+    name = str(name).strip()
+    key = (target, name)
+    if key in cache:
+        return cache[key]
+    folder = "diffusion_models" if target == "model" else "checkpoints"
+    if name not in folder_paths.get_filename_list(folder):
+        raise ValueError(f"[Mika] '{name}' no está en {folder}")
+    try:
+        if target == "model":
+            model, = UNETLoader().load_unet(name, "default")
+        else:
+            model, _, _ = CheckpointLoaderSimple().load_checkpoint(name)
+    except Exception as e:
+        raise ValueError(f"[Mika] no se pudo cargar '{name}': {e}")
+    cache[key] = model
+    return model
+
+
+def _mika_plot_value(target, raw, cache):
+    if target in ("model", "checkpoint"):
+        return _mika_plot_load(target, raw, cache)
+    return _mika_plot_typed(target, raw)
+
+
+class SinglePlotRunnerMika:
+    """
+    Single Plot Runner-Mika: versión de un solo eje del XY Plot Runner.
+    Una salida universal (*) con los valores tipados (un valor sale normal,
+    varios salen como lista) + labels. Ideal para plots 1D.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "target": (_MIKA_PLOT_TARGETS,),
+                "values": ("STRING", {"multiline": True, "default": "euler\ndpmpp_2m"}),
+            },
+        }
+
+    RETURN_TYPES = ("*", "STRING")
+    RETURN_NAMES = ("out", "labels")
+    OUTPUT_IS_LIST = [True, True]
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/plot"
+
+    def run(self, target, values):
+        raw = [] if target == "none" else _mika_plot_values(values)
+        if len(raw) > _MIKA_PLOT_MAX_COMBOS:
+            raise ValueError(f"[Mika] máximo {_MIKA_PLOT_MAX_COMBOS} valores")
+        cache = {}
+        vals = [_mika_plot_value(target, v, cache) for v in raw]
+        for v in vals:
+            _mika_plot_check(target, v)
+        labels = [f"{target}={v}" for v in raw] or [target]
+        if len(vals) == 1:
+            # Siempre lista (OUTPUT_IS_LIST fijo): un solo valor sale
+            # como lista de uno, sin mutar el contrato por ejecución.
+            return ([vals[0]], labels)
+        return (vals, labels)
+
+
+class XYPlotRunnerMika:
+    """
+    XY Plot Runner-Mika: listas de valores tipados para plots de pruebas.
+    X e Y son salidas universales (*) con el producto cruzado aplanado en
+    orden por filas: texto si eliges prompt, sampler si eliges sampler,
+    MODELO cargado si eliges model/checkpoint, etc. Siempre salen como
+    lista (un solo valor = lista de uno). Conéctalas DIRECTO al
+    KSampler externo sin loops: con listas de igual largo ejecuta un
+    combo por vez. Cada eje puede quedar vacío (no se conecta y el
+    KSampler usa su widget). row/col_labels van a XY Grid-Mika o
+    XYZ-GridPlot (X=columnas, Y=filas).
+
+    Ojo con model/checkpoint: compara UNETs (o checkpoints por su MODEL,
+    con tu CLIP/VAE fijos) pero carga todos en RAM: no pases de 2-4.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "x_target": (_MIKA_PLOT_TARGETS,),
+                "x_values": ("STRING", {"multiline": True, "default": "euler\ndpmpp_2m"}),
+                "y_target": (_MIKA_PLOT_TARGETS,),
+                "y_values": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("*", "*", "STRING", "STRING")
+    RETURN_NAMES = ("x", "y", "row_labels", "col_labels")
+    OUTPUT_IS_LIST = [True, True, True, True]
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/plot"
+
+    def run(self, x_target, x_values, y_target, y_values):
+        # Eje vacío o target none = no se conecta; el KSampler usa su widget.
+        x_vals = [] if x_target == "none" else _mika_plot_values(x_values)
+        y_vals = [] if y_target == "none" else _mika_plot_values(y_values)
+        total = (len(x_vals) or 1) * (len(y_vals) or 1)
+        if total > _MIKA_PLOT_MAX_COMBOS:
+            raise ValueError(f"[Mika] grid de {len(x_vals) or 1}x{len(y_vals) or 1}: máximo {_MIKA_PLOT_MAX_COMBOS} combinaciones")
+
+        cache = {}
+        xs = [_mika_plot_value(x_target, v, cache) for v in x_vals]
+        ys = [_mika_plot_value(y_target, v, cache) for v in y_vals]
+        for v in xs:
+            _mika_plot_check(x_target, v)
+        for v in ys:
+            _mika_plot_check(y_target, v)
+
+        # x/y unificadas: el producto cruzado aplanado en orden por filas.
+        # Con listas de igual largo el KSampler ejecuta un combo por vez.
+        if x_vals and y_vals:
+            x_flat = [x for _ in ys for x in xs]
+            y_flat = [y for y in ys for _ in xs]
+        else:
+            x_flat = list(xs)
+            y_flat = list(ys)
+
+        row_labels = [f"{y_target}={v}" for v in y_vals] or [y_target]
+        col_labels = [f"{x_target}={v}" for v in x_vals] or [x_target]
+
+        # Salidas x/y siempre listas (OUTPUT_IS_LIST fijo): con un solo
+        # valor sale lista de uno; el KSampler ejecuta un combo por vez.
+        return (x_flat, y_flat, row_labels, col_labels)
+
+
+class ListPickMika:
+    """
+    List Pick-Mika: devuelve el item i-ésimo de una lista (con wrap
+    opcional). Para leer los parámetros hermanos dentro de un loop
+    IterateBegin/IterateEnd usando su salida index.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "list_in": ("*", {"forceInput": True}),
+                "index": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "wrap": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("value",)
+    FUNCTION = "pick"
+    CATEGORY = "Mika Utilidades/plot"
+
+    def pick(self, list_in, index, wrap):
+        items = list(list_in) if isinstance(list_in, (list, tuple)) else [list_in]
+        if not items:
+            raise ValueError("[Mika] lista vacía, nada que elegir")
+        i = int(index)
+        if wrap:
+            i %= len(items)
+        elif i >= len(items):
+            raise ValueError(f"[Mika] índice {i} fuera de rango (0..{len(items) - 1})")
+        return (items[i],)
+
+
+class TextListMika:
+    """
+    Text List-Mika: convierte un texto multilínea en lista de strings.
+    Útil para alimentar a mano row_labels/col_labels de XYZ-GridPlot.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("list",)
+    OUTPUT_IS_LIST = [True]
+    FUNCTION = "make"
+    CATEGORY = "Mika Utilidades/plot"
+
+    def make(self, text):
+        return (_mika_plot_values(text),)
+
+
+class OptionListMika:
+    """
+    Inspector-Mika: conecta su única salida a cualquier slot y hace
+    inspect: copia las opciones de ese slot a su caja `text` (una por
+    línea), lista para copiar a mano. El cable es solo el gesto de
+    inspección y se quita solo.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("any",)
+    FUNCTION = "run"
+    CATEGORY = "Mika Utilidades/plot"
+
+    def run(self, text=""):
+        return (text,)
+
+
+def _mika_grid_first(value, default):
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _mika_grid_strs(value):
+    if isinstance(value, (list, tuple)) and len(value) == 1 and isinstance(value[0], (list, tuple)):
+        value = value[0]
+    if not isinstance(value, (list, tuple)):
+        value = [value]
+    return [str(v).strip() for v in value]
+
+
+def _mika_grid_font(size):
+    for path in (r"C:\Windows\Fonts\arial.ttf",
+                 r"C:\Windows\Fonts\DejaVuSans.ttf"):
+        try:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, int(size))
+        except Exception:
+            pass
+    try:
+        return ImageFont.load_default(size=int(size))
+    except Exception:
+        return ImageFont.load_default()
+
+
+class XYGridMika(grid_io.ComfyNode):
+    """
+    XY Grid-Mika: cuadrícula rows×cols desde un batch en orden por filas.
+    A diferencia de XYZ-GridPlot, la forma la mandan las etiquetas:
+    columnas = len(col_labels), o se deducen (imágenes ÷ filas) si solo
+    hay row_labels, o `columns` manual sin etiquetas; filas =
+    len(row_labels) o el resto.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return grid_io.Schema(
+            description="Grid de imágenes en filas×columnas con etiquetas. Conecta el batch en orden por filas (como sale de x_combo/y_combo) y column_labels/row_labels del XY Plot Runner: la forma se deduce sola (`columns` solo se usa sin etiquetas).",
+            node_id="XYGridMika",
+            display_name="XY Grid-Mika",
+            category="Mika Utilidades/plot",
+            is_input_list=True,
+            inputs=[
+                grid_io.Image.Input("images", display_name="images"),
+                grid_io.Int.Input("columns", display_name="columns", default=2, min=1, max=100),
+                grid_io.AnyType.Input("row_labels", display_name="row_labels", optional=True),
+                grid_io.AnyType.Input("column_labels", display_name="column_labels", optional=True),
+                grid_io.Int.Input("gap", display_name="gap", default=0, min=0, max=1024),
+                grid_io.Float.Input("font_size", display_name="font_size", default=40, min=6, max=500),
+            ],
+            outputs=[
+                grid_io.Image.Output("image", display_name="image", is_output_list=True),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, images: list = [], columns: list = [2],
+                column_labels: list = [], row_labels: list = [],
+                gap: list = [0], font_size: list = [40]):
+        flats = []
+        for img in images:
+            if not torch.is_tensor(img):
+                raise ValueError(f"[Mika] XY Grid: esperaba imágenes, llegó {type(img).__name__}")
+            if img.ndim == 4:
+                for b in range(img.shape[0]):
+                    flats.append(img[b])
+            elif img.ndim == 3:
+                flats.append(img)
+            else:
+                raise ValueError(f"[Mika] XY Grid: forma rara {tuple(img.shape)}, se espera BHWC")
+        if not flats:
+            blank = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            return grid_io.NodeOutput([blank])
+
+        cols = max(1, _mika_grid_first(columns, 2))
+        rows = (len(flats) + cols - 1) // cols
+
+        col_labels = _mika_grid_strs(column_labels)
+        row_labels_s = _mika_grid_strs(row_labels)
+
+        # Las etiquetas mandan: definen la forma del grid. Lo que falte
+        # se deduce del batch; sin ninguna etiqueta vale el `columns`
+        # manual.
+        if col_labels:
+            cols = len(col_labels)
+        if row_labels_s:
+            rows = len(row_labels_s)
+        if not row_labels_s:
+            rows = (len(flats) + cols - 1) // cols
+        elif not col_labels:
+            cols = max(1, (len(flats) + rows - 1) // rows)
+        gap = max(0, _mika_grid_first(gap, 0))
+        fsize = max(6, _mika_grid_first(font_size, 40))
+
+        # Celdas exactas: sobran se recortan, faltan se rellenan en blanco.
+        need = rows * cols
+        if len(flats) != need:
+            print(f"[Mika] XY Grid: {len(flats)} imágenes para grid {rows}x{cols} ({need} celdas): se recorta/rellena para encajar.")
+        flats = flats[:need]
+        col_labels = col_labels[:cols] + [""] * (cols - len(col_labels))
+        row_labels_s = row_labels_s[:rows] + [""] * (rows - len(row_labels_s))
+
+        pil_imgs = []
+        for t in flats:
+            arr = (t.detach().float().clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+            if arr.shape[2] == 1:
+                arr = np.repeat(arr, 3, axis=2)
+            pil_imgs.append(Image.fromarray(arr[:, :, :3]))
+        # Anchos por columna y altos por fila (como el XYZ-GridPlot de
+        # referencia): sin reescalar, sin blanco de más.
+        col_ws = [0] * cols
+        row_hs = [0] * rows
+        for idx, im in enumerate(pil_imgs):
+            r, c = divmod(idx, cols)
+            col_ws[c] = max(col_ws[c], im.width)
+            row_hs[r] = max(row_hs[r], im.height)
+
+        font = _mika_grid_font(fsize)
+        pad = max(2, fsize // 8)
+        probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+        col_h = 0
+        if any(col_labels):
+            col_h = max(probe.textbbox((0, 0), t, font=font)[3] for t in col_labels if t) + 2 * pad
+        row_w = 0
+        if any(row_labels_s):
+            row_w = max(probe.textbbox((0, 0), t, font=font)[2] for t in row_labels_s if t) + 2 * pad
+
+        W = row_w + sum(col_ws) + (cols - 1) * gap
+        H = col_h + sum(row_hs) + (rows - 1) * gap
+        canvas = Image.new("RGB", (W, H), "white")
+        draw = ImageDraw.Draw(canvas)
+
+        col_x = []
+        x = row_w
+        for w in col_ws:
+            col_x.append(x)
+            x += w + gap
+        row_y = []
+        y = col_h
+        for h in row_hs:
+            row_y.append(y)
+            y += h + gap
+
+        for c, t in enumerate(col_labels):
+            if not t:
+                continue
+            bb = draw.textbbox((0, 0), t, font=font)
+            draw.text((col_x[c] + (col_ws[c] - (bb[2] - bb[0])) / 2, pad), t, font=font, fill="black")
+        for r, t in enumerate(row_labels_s):
+            if not t:
+                continue
+            bb = draw.textbbox((0, 0), t, font=font)
+            draw.text((pad, row_y[r] + (row_hs[r] - (bb[3] - bb[1])) / 2), t, font=font, fill="black")
+
+        for idx, im in enumerate(pil_imgs):
+            r, c = divmod(idx, cols)
+            x = col_x[c] + (col_ws[c] - im.width) // 2
+            y = row_y[r] + (row_hs[r] - im.height) // 2
+            canvas.paste(im, (x, y))
+
+        out = torch.from_numpy(np.ascontiguousarray(canvas).astype(np.float32) / 255.0).unsqueeze(0).contiguous()
+        return grid_io.NodeOutput([out])
+
+
+# ======================================================================
+# IMAGE SAVER CLONES MIKA (Local + PC/Colab)
+# Clones del Image Saver de Mira: misma plantilla de filename/path
+# (%date, %time, %model, %width, %height, %seed, %counter,
+# %sampler_name, %steps, %cfg, %scheduler, %basemodelname, %denoise,
+# %clip_skip), misma metadata A1111 + workflow embebido y mismos hashes.
+# - Local: path absoluto (C:/Fotos/...) guarda fuera de output/;
+#   relativo sigue bajo output/ como el original.
+# - PC: pensado para Colab/servidor remoto. Guarda copia en el servidor
+#   y devuelve las imagenes a la UI; la extension web
+#   (image_saver_pc_mika.js) las escribe en la carpeta de tu PC que elijas
+#   en el navegador, recreando la subcarpeta indicada en path.
+# ======================================================================
+
+try:
+    import piexif as _mika_piexif
+    import piexif.helper as _mika_piexif_helper
+except ImportError:
+    _mika_piexif = None
+    _mika_piexif_helper = None
+
+_MIKA_SAVER_basenames = os.path.basename
+
+_MIKA_SAVER_CIVITAI_SAMPLERS = {
+    'euler_ancestral': 'Euler a', 'euler': 'Euler', 'lms': 'LMS',
+    'heun': 'Heun', 'dpm_2': 'DPM2', 'dpm_2_ancestral': 'DPM2 a',
+    'dpmpp_2s_ancestral': 'DPM++ 2S a', 'dpmpp_2m': 'DPM++ 2M',
+    'dpmpp_sde': 'DPM++ SDE', 'dpmpp_2m_sde': 'DPM++ 2M SDE',
+    'dpmpp_3m_sde': 'DPM++ 3M SDE', 'dpm_fast': 'DPM fast',
+    'dpm_adaptive': 'DPM adaptive', 'ddim': 'DDIM', 'plms': 'PLMS',
+    'uni_pc_bh2': 'UniPC', 'uni_pc': 'UniPC', 'lcm': 'LCM',
+}
+
+_MIKA_SAVER_A1111_SCHEDULES = {
+    "karras": "Karras", "exponential": "Exponential",
+    "sgm_uniform": "SGM Uniform", "kl_optimal": "KL Optimal",
+    "simple": "Simple", "normal": "Normal",
+    "ddim_uniform": "DDIM", "beta": "Beta",
+}
+
+_MIKA_SAVER_HASH_RE = re.compile(r'^\s*([^:]+?)(?:\s*:\s*([^\s:][^:]*?))?\s*$')
+_MIKA_SAVER_BAD_CHARS = re.compile(r'[\\/:*?"<>|]')
+
+
+def _mika_saver_timestamp(time_format):
+    try:
+        return datetime.now().strftime(time_format)
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d-%H%M%S")
+
+
+def _mika_saver_ckpt_name(ckpt_name):
+    return os.path.basename(ckpt_name or "")
+
+
+def _mika_saver_ckpt_base(ckpt_name):
+    return os.path.splitext(_mika_saver_ckpt_name(ckpt_name))[0]
+
+
+def _mika_saver_make_pathname(filename, width, height, seed, modelname,
+                              counter, time_format, sampler_name, steps,
+                              cfg, scheduler, denoise, clip_skip):
+    filename = filename.replace("%date", _mika_saver_timestamp("%Y-%m-%d"))
+    filename = filename.replace("%time", _mika_saver_timestamp(time_format))
+    filename = filename.replace("%model", _mika_saver_ckpt_name(modelname))
+    filename = filename.replace("%width", str(width))
+    filename = filename.replace("%height", str(height))
+    filename = filename.replace("%seed", str(seed))
+    filename = filename.replace("%counter", str(counter))
+    filename = filename.replace("%sampler_name", sampler_name)
+    filename = filename.replace("%steps", str(steps))
+    filename = filename.replace("%cfg", str(cfg))
+    filename = filename.replace("%scheduler", scheduler)
+    filename = filename.replace(
+        "%basemodelname", _mika_saver_ckpt_base(modelname))
+    filename = filename.replace("%denoise", str(denoise))
+    filename = filename.replace("%clip_skip", str(clip_skip))
+    return filename
+
+
+def _mika_saver_make_filename(filename, width, height, seed, modelname,
+                              counter, time_format, sampler_name, steps,
+                              cfg, scheduler, denoise, clip_skip):
+    filename = _mika_saver_make_pathname(
+        filename, width, height, seed, modelname, counter, time_format,
+        sampler_name, steps, cfg, scheduler, denoise, clip_skip)
+    return _mika_saver_timestamp(time_format) if filename == "" else filename
+
+
+def _mika_saver_civitai_sampler(sampler_name, scheduler):
+    name = _MIKA_SAVER_CIVITAI_SAMPLERS.get(sampler_name, sampler_name)
+    if sampler_name in _MIKA_SAVER_CIVITAI_SAMPLERS:
+        if scheduler == "karras":
+            name += " Karras"
+        elif scheduler == "exponential":
+            name += " Exponential"
+    return name
+
+
+def _mika_saver_a1111_schedule(scheduler):
+    return _MIKA_SAVER_A1111_SCHEDULES.get(scheduler, scheduler)
+
+
+def _mika_saver_sha256_file(file_path):
+    sha = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1048576), b""):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def _mika_saver_model_hash(modelname):
+    if not modelname:
+        return "", None
+    ckpt_path = folder_paths.get_full_path("checkpoints", modelname)
+    if not ckpt_path:
+        ckpt_path = folder_paths.get_full_path("diffusion_models", modelname)
+    if not ckpt_path:
+        return "", None
+    try:
+        from custom_nodes.ComfyUI_Mira.image_saver.utils import \
+            get_sha256 as _mira_sha
+        return _mira_sha(ckpt_path)[:10], ckpt_path
+    except Exception:
+        try:
+            return _mika_saver_sha256_file(ckpt_path)[:10], ckpt_path
+        except Exception:
+            return "", ckpt_path
+
+
+def _mika_saver_collect_hashes(modelname, positive, negative,
+                              additional_hashes):
+    try:
+        from custom_nodes.ComfyUI_Mira.image_saver.prompt_metadata_extractor \
+            import PromptMetadataExtractor
+        extractor = PromptMetadataExtractor([positive, negative])
+        embeddings = extractor.get_embeddings()
+        loras = extractor.get_loras()
+    except Exception:
+        embeddings, loras = {}, {}
+    modelhash, ckpt_path = _mika_saver_model_hash(modelname)
+    existing = {modelhash.lower()} | \
+        {t[2].lower() for t in loras.values()} | \
+        {t[2].lower() for t in embeddings.values()}
+    manual, unnamed = {}, 0
+    for entry in (additional_hashes or "").replace("\n", ",").split(","):
+        if not entry.strip():
+            continue
+        match = _MIKA_SAVER_HASH_RE.search(entry)
+        if match is None:
+            continue
+        groups = tuple(g for g in match.groups() if g)
+        if not groups:
+            continue
+        name, hashv = groups if len(groups) > 1 else (None, groups[0])
+        if len(hashv) > 16:
+            continue
+        if any(hashv.lower() == h.lower()
+               for _, _, h in manual.values()):
+            continue
+        if hashv.lower() in existing:
+            continue
+        if name is None:
+            unnamed += 1
+            name = f"manual{unnamed}"
+        manual[name] = (None, None, hashv)
+        if len(manual) > 29:
+            break
+    hashes = {k: v[2] for k, v in embeddings.items()} | \
+        {k: v[2] for k, v in loras.items()} | \
+        {k: v[2] for k, v in manual.items()} | {"model": modelhash}
+    chain = {modelname: (ckpt_path, None, modelhash)} | loras | \
+        embeddings | manual
+    return hashes, chain, modelhash
+
+
+def _mika_saver_save_image(img, filepath, extension, quality, lossless,
+                           optimize, a111_params, prompt, extra_pnginfo,
+                           embed_workflow):
+    if extension == "png":
+        metadata = PngInfo()
+        metadata.add_text("parameters", a111_params)
+        if embed_workflow:
+            if extra_pnginfo is not None:
+                for k, v in extra_pnginfo.items():
+                    metadata.add_text(
+                        k, json.dumps(v, separators=(',', ':')))
+            if prompt is not None:
+                metadata.add_text(
+                    "prompt", json.dumps(prompt, separators=(',', ':')))
+        img.save(filepath, pnginfo=metadata, optimize=optimize)
+        return
+    img.save(filepath, optimize=True, quality=quality, lossless=lossless)
+    if _mika_piexif is None:
+        return
+    pnginfo_json, prompt_json = {}, {}
+    try:
+        if embed_workflow:
+            if extra_pnginfo is not None:
+                pnginfo_json = {
+                    _mika_piexif.ImageIFD.Make - i:
+                    f"{k}:{json.dumps(v, separators=(',', ':'))}"
+                    for i, (k, v) in enumerate(extra_pnginfo.items())}
+            if prompt is not None:
+                prompt_json = {_mika_piexif.ImageIFD.Model:
+                               f"prompt:{json.dumps(prompt)}"}
+
+        def _exif():
+            return _mika_piexif.dump(({
+                "0th": pnginfo_json | prompt_json
+            } if pnginfo_json or prompt_json else {}) | {
+                "Exif": {_mika_piexif.ExifIFD.UserComment:
+                         _mika_piexif_helper.UserComment.dump(
+                             a111_params, encoding="unicode")},
+            })
+
+        exif_bytes = _exif()
+        if extension in ("jpg", "jpeg") and len(exif_bytes) > 65535:
+            pnginfo_json, prompt_json = {}, {}
+            exif_bytes = _exif()
+        if len(exif_bytes) <= 65535 or extension not in ("jpg", "jpeg"):
+            _mika_piexif.insert(exif_bytes, filepath)
+    except Exception as e:
+        print(f"[Mika Saver] aviso: sin metadata EXIF ({e})")
+
+
+def _mika_saver_unique_filename(output_path, filename_prefix, extension):
+    existing = [f for f in os.listdir(output_path)
+                if f.startswith(filename_prefix) and f.endswith(extension)]
+    if not existing:
+        return filename_prefix
+    suffixes = []
+    for f in existing:
+        tail = os.path.splitext(f)[0].split("_")[-1]
+        if tail.isdigit():
+            suffixes.append(int(tail))
+    return f"{filename_prefix}_{(max(suffixes) + 1) if suffixes else 1:02d}"
+
+
+def _mika_saver_is_inside(child, parent):
+    try:
+        return os.path.commonpath(
+            [os.path.realpath(child), os.path.realpath(parent)]) == \
+            os.path.realpath(parent)
+    except Exception:
+        return False
+
+
+def _mika_saver_pc_relative(templated):
+    rel = str(templated or "").replace("\\", "/")
+    rel = re.sub(r"^[A-Za-z]:", "", rel).lstrip("/")
+    parts = [p for p in rel.split("/") if p not in ("", ".", "..")]
+    parts = [_MIKA_SAVER_BAD_CHARS.sub("_", p).strip(" .") or "_"
+             for p in parts]
+    return os.path.join(*parts) if parts else ""
+
+
+def _mika_saver_inputs(extra_optional=None):
+    optional = {
+        "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+        "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+        "modelname": ("STRING", {"default": "", "multiline": False}),
+        "sampler_name": ("STRING", {"default": "", "multiline": False}),
+        "scheduler": ("STRING", {"default": "normal", "multiline": False}),
+        "positive": ("STRING", {"default": "unknown", "multiline": True}),
+        "negative": ("STRING", {"default": "unknown", "multiline": True}),
+        "seed_value": ("INT", {"default": 0, "min": 0,
+                               "max": 0xffffffffffffffff}),
+        "width": ("INT", {"default": 512, "min": 0, "max": 16384, "step": 8}),
+        "height": ("INT", {"default": 512, "min": 0, "max": 16384, "step": 8}),
+        "lossless_webp": ("BOOLEAN", {"default": True}),
+        "quality_jpeg_or_webp": ("INT", {"default": 100, "min": 1,
+                                         "max": 100}),
+        "optimize_png": ("BOOLEAN", {"default": False}),
+        "counter": ("INT", {"default": 0, "min": 0,
+                            "max": 0xffffffffffffffff}),
+        "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
+        "clip_skip": ("INT", {"default": 0, "min": -24, "max": 24}),
+        "time_format": ("STRING", {"default": "%Y-%m-%d-%H%M%S",
+                                   "multiline": False}),
+        "save_workflow_as_json": ("BOOLEAN", {"default": False}),
+        "embed_workflow": ("BOOLEAN", {"default": True}),
+        "additional_hashes": ("STRING", {"default": "",
+                                         "multiline": False}),
+    }
+    if extra_optional:
+        optional.update(extra_optional)
+    return {
+        "required": {
+            "images": ("IMAGE",),
+            "filename": ("STRING", {"default": "%time_%basemodelname_%seed",
+                                    "multiline": False}),
+            "path": ("STRING", {"default": "", "multiline": False}),
+            "extension": (["png", "jpeg", "jpg", "webp"],),
+        },
+        "optional": optional,
+        "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+    }
+
+
+def _mika_saver_run(images, filename, path, extension, mode="local",
+                    save_on_server=True, prompt=None, extra_pnginfo=None,
+                    **kw):
+    steps = int(kw.get("steps", 20))
+    cfg = float(kw.get("cfg", 7.0))
+    modelname = str(kw.get("modelname", "") or "")
+    sampler_name = str(kw.get("sampler_name", "") or "")
+    scheduler = str(kw.get("scheduler", "") or "normal")
+    positive = str(kw.get("positive", "unknown"))
+    negative = str(kw.get("negative", "unknown"))
+    seed_value = int(kw.get("seed_value", 0))
+    width = int(kw.get("width", 512))
+    height = int(kw.get("height", 512))
+    lossless = _mika_coerce_bool(kw.get("lossless_webp", True), True)
+    quality = int(kw.get("quality_jpeg_or_webp", 100))
+    optimize = _mika_coerce_bool(kw.get("optimize_png", False), False)
+    counter = int(kw.get("counter", 0))
+    denoise = float(kw.get("denoise", 1.0))
+    clip_skip = int(kw.get("clip_skip", 0))
+    time_format = str(kw.get("time_format", "%Y-%m-%d-%H%M%S"))
+    save_json_flag = _mika_coerce_bool(
+        kw.get("save_workflow_as_json", False), False)
+    embed = _mika_coerce_bool(kw.get("embed_workflow", True), True)
+    additional = str(kw.get("additional_hashes", "") or "")
+
+    fname = _mika_saver_make_filename(
+        filename, width, height, seed_value, modelname, counter,
+        time_format, sampler_name, steps, cfg, scheduler, denoise, clip_skip)
+    templated_path = _mika_saver_make_pathname(
+        path, width, height, seed_value, modelname, counter,
+        time_format, sampler_name, steps, cfg, scheduler, denoise, clip_skip)
+
+    if mode == "pc":
+        rel = _mika_saver_pc_relative(templated_path)
+        output_path = os.path.join(
+            folder_paths.get_output_directory(), rel) if rel else \
+            folder_paths.get_output_directory()
+    else:
+        expanded = os.path.expandvars(
+            os.path.expanduser(templated_path.strip()))
+        if not expanded:
+            output_path = folder_paths.get_output_directory()
+        elif os.path.isabs(expanded):
+            output_path = os.path.normpath(expanded)
+        else:
+            output_path = os.path.join(
+                folder_paths.get_output_directory(), expanded)
+    os.makedirs(output_path, exist_ok=True)
+
+    if mode == "pc" and not _mika_coerce_bool(save_on_server, True):
+        output_path = folder_paths.get_temp_directory()
+        os.makedirs(output_path, exist_ok=True)
+
+    hashes, chain, modelhash = _mika_saver_collect_hashes(
+        modelname, positive, negative, additional)
+    base = _mika_saver_ckpt_base(modelname)
+    clip_str = f", Clip skip: {abs(clip_skip)}" if clip_skip != 0 else ""
+    hash_str = f", Model hash: {modelhash}" if modelhash else ""
+    res_str = f", Hashes: {json.dumps(hashes, separators=(',', ':'))}" \
+        if hashes else ""
+    a111 = (f"{positive.strip()}\nNegative prompt: {negative.strip()}\n"
+            f"Steps: {steps}, Sampler: "
+            f"{_mika_saver_civitai_sampler(sampler_name.replace('_gpu', ''), scheduler)}, "
+            f"Schedule type: {_mika_saver_a1111_schedule(scheduler)}, "
+            f"CFG scale: {cfg}, Seed: {seed_value}, "
+            f"Size: {width}x{height}{clip_str}{hash_str}, "
+            f"Model: {base}{res_str}, Version: ComfyUI")
+
+    saved, array = [], (255. * images.cpu().numpy())
+    array = np.clip(array, 0, 255).astype(np.uint8)
+    for img_arr in array:
+        img = Image.fromarray(img_arr)
+        if extension in ("jpg", "jpeg"):
+            img = img.convert("RGB")
+        prefix = _mika_saver_unique_filename(output_path, fname, extension)
+        name = f"{prefix}.{extension}"
+        full = os.path.join(output_path, name)
+        _mika_saver_save_image(img, full, extension, quality, lossless,
+                               optimize, a111, prompt, extra_pnginfo, embed)
+        if save_json_flag:
+            try:
+                with open(os.path.join(output_path, prefix + ".json"),
+                          "w") as f:
+                    json.dump((extra_pnginfo or {}).get("workflow"), f)
+            except Exception:
+                pass
+        saved.append(name)
+
+    hashes_out = ",".join(
+        f"{os.path.splitext(n.split(':')[-1])[0] + ':' if n else ''}"
+        f"{h}{':' + str(w) if w is not None else ''}"
+        for n, (_, w, h) in chain.items())
+
+    out_root = os.path.realpath(folder_paths.get_output_directory())
+    if _mika_saver_is_inside(output_path, out_root):
+        subfolder = os.path.relpath(os.path.realpath(output_path), out_root)
+        if subfolder == ".":
+            subfolder = ""
+        ui_type = "output"
+        ui_images = [{"filename": n, "subfolder": subfolder,
+                      "type": ui_type} for n in saved]
+    else:
+        tmp = folder_paths.get_temp_directory()
+        ui_images = []
+        for n in saved:
+            try:
+                with Image.open(os.path.join(output_path, n)) as im:
+                    prev = f"mika_local_{hashlib.sha256(n.encode()).hexdigest()[:8]}.png"
+                    im.save(os.path.join(tmp, prev), "PNG")
+                    ui_images.append({"filename": prev, "subfolder": "",
+                                      "type": "temp"})
+            except OSError:
+                pass
+    return {"ui": {"images": ui_images}, "result": (hashes_out,)}
+
+
+class ImageSaverLocalMika:
+    """
+    Image Saver Local-Mika: clon del Image Saver de Mira para guardar en
+    local. Acepta rutas absolutas (C:/Fotos/...) fuera de output/; si path
+    es relativo, guarda bajo output/ igual que el original.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return _mika_saver_inputs()
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("hashes",)
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/image"
+    OUTPUT_NODE = True
+
+    def execute(self, images, filename, path, extension, prompt=None,
+                extra_pnginfo=None, **kwargs):
+        return _mika_saver_run(
+            images, filename, path, extension, mode="local",
+            prompt=prompt, extra_pnginfo=extra_pnginfo, **kwargs)
+
+
+class ImageSaverPcMika:
+    """
+    Image Saver PC-Mika: clon para Colab/servidor remoto. Guarda copia en
+    el servidor y la extension web escribe cada imagen en la carpeta de tu
+    PC que elijas en el navegador (te pedira permiso), recreando como
+    subcarpetas la ruta indicada en path (C:/Fotos/... -> Fotos/...).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return _mika_saver_inputs(
+            {"save_on_server": ("BOOLEAN", {"default": True})})
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("hashes",)
+    FUNCTION = "execute"
+    CATEGORY = "Mika Utilidades/image"
+    OUTPUT_NODE = True
+
+    def execute(self, images, filename, path, extension, prompt=None,
+                extra_pnginfo=None, **kwargs):
+        return _mika_saver_run(
+            images, filename, path, extension, mode="pc",
+            prompt=prompt, extra_pnginfo=extra_pnginfo, **kwargs)
+
+
+# ======================================================================
+# MAPPINGS
+# ======================================================================
+
+NODE_CLASS_MAPPINGS = {
+    "LoadLoraMika": LoadLoraMika,
+    "LoadLoraMikaNoClip": LoadLoraMikaNoClip,
+    "LoadLoraStackMika": LoadLoraStackMika,
+    "LoadLoraStackNoClipMika": LoadLoraStackNoClipMika,
+    "StringSelectorCut": StringSelectorCut,
+    "StringSelectorMika": StringSelectorMika,
+    "StringSelectorCutMika": StringSelectorCutMika,
+    "FilePickerMika": FilePickerMika,
+    "SwitchMika": SwitchMika,
+    "SwitchBypassMika": SwitchBypassMika,
+    "TextAffixMika": TextAffixMika,
+    "ScoreListExtendable": ScoreListExtendable,
+    "ExcelMika": ExcelMika,
+    "PrimitiveMika": PrimitiveMika,
+    "TextBoxClipboard": TextBoxClipboard,
+    "NoteMika": NoteMika,
+    "TextBoxPasteMika": TextBoxPasteMika,
+    "TextBoxVisor": TextBoxVisor,
+    "TagFilter": TagFilter,
+    "TextReplaceDynamic": TextReplaceDynamic,
+    "TextConcatenateDynamic": TextConcatenateDynamic,
+    "LoadImageMika": LoadImageMika,
+    "SmartTagFilterMika": SmartTagFilterMika,
+    "TagIfMika": TagIfMika,
+    "TagRemoverMika": TagRemoverMika,
+    "TagEnchantMika": TagEnchantMika,
+    "TagSwapListMika": TagSwapListMika,
+    "TagSwapOrganizerMika": TagSwapOrganizerMika,
+    "TagEnchantListMika": TagEnchantListMika,
+    "FloatOutputList": FloatOutputList,
+    "ExecutionTimerConfig": ExecutionTimerConfig,
+    "PromptEditLoopMika": PromptEditLoopMika,
+    "TextLineSelectorMika": TextLineSelectorMika,
+    "TextLineStepperMika": TextLineStepperMika,
+    "ImagePreviewCleanMika": ImagePreviewCleanMika,
+    "FastGroupsBypasserMika": FastGroupsBypasserMika,
+    "FastGroupsMuterMika": FastGroupsMuterMika,
+    "FastNodesBypasserMika": FastNodesBypasserMika,
+    "FastNodesMuterMika": FastNodesMuterMika,
+    "ListUnpackMika": ListUnpackMika,
+    "AnimaResolutionsMika": AnimaResolutionsMika,
+    "SamplerSelectorMika": SamplerSelectorMika,
+    "SchedulerSelectorMika": SchedulerSelectorMika,
+    "ImageSaveAutoMika": ImageSaveAutoMika,
+    "IndexIntMika": IndexIntMika,
+    "IndexStepperMika": IndexStepperMika,
+    "PromptPresetSelectorMika": PromptPresetSelectorMika,
+    "PromptPresetStepperMika": PromptPresetStepperMika,
+    "LoadImageNameMika": LoadImageNameMika,
+    "LoadImageNameMaskMika": LoadImageNameMaskMika,
+    "LoadImageDirMika": LoadImageDirMika,
+    "IfAnyMika": IfAnyMika,
+    "BypassDetectorMika": BypassDetectorMika,
+    "TextSaveMika": TextSaveMika,
+    "AnimaPromptOrganizer": AnimaPromptOrganizer,
+    "PromptCleanDedupeMika": PromptCleanDedupeMika,
+    "FiltrosMika": FiltrosMika,
+    "FiltrosMikaSelect": FiltrosMikaSelect,
+    "FiltrosPromptMika": FiltrosPromptMika,
+    "PromptReorganizeMika": PromptReorganizeMika,
+    "TextCleanOrganizeMika": TextCleanOrganizeMika,
+    "TextCleanOrganizeConcatMika": TextCleanOrganizeConcatMika,
+    "TextCleanerCompareMika": TextCleanerCompareMika,
+    "LoadMarianMTCheckPoint": LoadMarianMTCheckPoint,
+    "SmartPromptTranslate": SmartPromptTranslate,
+    "PromptTranslateToText": PromptTranslateToText,
+    "ClipboardToMultiRefMika": ClipboardToMultiRefMika,
+    "XYPlotRunnerMika": XYPlotRunnerMika,
+    "SinglePlotRunnerMika": SinglePlotRunnerMika,
+    "XYGridMika": XYGridMika,
+    "ListPickMika": ListPickMika,
+    "OptionListMika": OptionListMika,
+    "TextListMika": TextListMika,
+    "ImageSaverLocalMika": ImageSaverLocalMika,
+    "ImageSaverPcMika": ImageSaverPcMika,
+    "AnimaLineartCanvasMika": AnimaLineartCanvasMika,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "LoadLoraMika": "Load Lora-Mika",
+    "LoadLoraMikaNoClip": "Load Lora (no CLIP)-Mika",
+    "LoadLoraStackMika": "Load Lora Stack-Mika",
+    "LoadLoraStackNoClipMika": "Load Lora Stack (no CLIP)-Mika",
+    "StringSelectorCut": "String Selector Multi-Mika",
+    "StringSelectorMika": "String Selector-Mika",
+    "StringSelectorCutMika": "String Selector Cut-Mika",
+    "FilePickerMika": "File Picker-Mika",
+    "SwitchMika": "Switch-Mika",
+    "SwitchBypassMika": "Switch Bypass-Mika",
+    "TextAffixMika": "Text Affix-Mika",
+    "ScoreListExtendable": "Score List",
+    "ExcelMika": "Excel-Mika",
+    "PrimitiveMika": "Primitive-Mika",
+    "TextBoxClipboard": "Text Box-Mika",
+    "NoteMika": "Note-Mika",
+    "TextBoxPasteMika": "Text Box Paste-Mika",
+    "TextBoxVisor": "Visor-Mika",
+    "TagFilter": "Tag Filter-Mika",
+    "TextReplaceDynamic": "Text Replace Dynamic-Mika",
+    "TextConcatenateDynamic": "Text Concatenate-Mika",
+    "LoadImageMika": "Load Image Path-Mika",
+    "SmartTagFilterMika": "Smart Tag Filter-Mika",
+    "TagIfMika": "Tag If-Mika",
+    "TagRemoverMika": "Tag Remover-Mika",
+    "TagEnchantMika": "Tag Enchant-Mika",
+    "TagSwapListMika": "Tag Swap List-Mika",
+    "TagSwapOrganizerMika": "Tag Editor-Mika",
+    "TagEnchantListMika": "Tag Enchant List-Mika",
+    "FloatOutputList": "Float OutputList",
+    "ExecutionTimerConfig": "⏱ Tiempos de Ejecución (config)",
+    "PromptEditLoopMika": "Prompt Edit (Loop)-Mika",
+    "TextLineSelectorMika": "Text Line Selector-Mika",
+    "TextLineStepperMika": "Text Line Stepper-Mika",
+    "ImagePreviewCleanMika": "Image Preview Clean-Mika",
+    "FastGroupsBypasserMika": "Fast Groups Bypasser-Mika",
+    "FastGroupsMuterMika": "Fast Groups Muter-Mika",
+    "FastNodesBypasserMika": "Fast Nodes Bypasser-Mika",
+    "FastNodesMuterMika": "Fast Nodes Muter-Mika",
+    "ListUnpackMika": "List Unpack-Mika",
+    "AnimaResolutionsMika": "Anima Resolutions-Mika",
+    "SamplerSelectorMika": "Sampler Selector-Mika",
+    "SchedulerSelectorMika": "Scheduler Selector-Mika",
+    "ImageSaveAutoMika": "Image Save Auto-Mika",
+    "IndexIntMika": "Index Int-Mika",
+    "IndexStepperMika": "Index Stepper-Mika",
+    "PromptPresetSelectorMika": "Prompt Preset Selector-Mika",
+    "PromptPresetStepperMika": "Prompt Preset Stepper-Mika",
+    "LoadImageNameMika": "Load Image-Mika",
+    "LoadImageNameMaskMika": "Load Image Mask-Mika",
+    "LoadImageDirMika": "Load Image from Dir-Mika",
+    "IfAnyMika": "If Any-Mika",
+    "BypassDetectorMika": "Bypass Detector-Mika",
+    "TextSaveMika": "Text Save-Mika",
+    "AnimaPromptOrganizer": "Anima Prompt Organizer",
+    "PromptCleanDedupeMika": "Prompt Clean & Dedupe-Mika",
+    "FiltrosMika": "FILTROS-Mika",
+    "FiltrosMikaSelect": "FILTROS Select-Mika",
+    "FiltrosPromptMika": "FILTROS Prompt-Mika",
+    "PromptReorganizeMika": "Prompt Reorganize-Mika",
+    "TextCleanOrganizeMika": "Text Clean & Organize-Mika",
+    "TextCleanOrganizeConcatMika": "Text Clean & Organize Concat-Mika",
+    "TextCleanerCompareMika": "Text Cleaner Compare-Mika",
+    "LoadMarianMTCheckPoint": "Load MarianMT CheckPoint-Mika",
+    "SmartPromptTranslate": "Smart Prompt Translate-Mika",
+    "PromptTranslateToText": "Prompt Translate to Text-Mika",
+    "ClipboardToMultiRefMika": "Clipboard to MultiRef-Mika",
+    "XYPlotRunnerMika": "Combo PlotXY-Mika",
+    "SinglePlotRunnerMika": "Single PlotXY-Mika",
+    "XYGridMika": "XY Grid-Mika",
+    "ListPickMika": "List Pick-Mika",
+    "OptionListMika": "Inspector-Mika",
+    "TextListMika": "Text List-Mika",
+    "ImageSaverLocalMika": "Image Saver Local-Mika",
+    "ImageSaverPcMika": "Image Saver PC-Mika",
+    "AnimaLineartCanvasMika": "Anima Lineart Canvas-Mika",
+}
