@@ -3456,6 +3456,10 @@ class AnimaLineartCanvasMika:
 
     modo="lineart": fondo negro, trazo blanco (convención de lineart).
     modo="dibujo normal": fondo blanco, color de trazo libre.
+
+    Salida "calco": el calco del lienzo (base + capas unidas) sobre fondo
+    blanco, para conectar a un autotagger. Viaja en el widget oculto
+    "calco" (solo de sesión: no se guarda en el workflow).
     """
 
     MODOS = ["lineart", "dibujo normal"]
@@ -3468,6 +3472,7 @@ class AnimaLineartCanvasMika:
                 "resolucion": (resoluciones, {"default": resoluciones[0]}),
                 "modo": (cls.MODOS, {"default": cls.MODOS[0]}),
                 "dibujo": ("STRING", {"default": "", "multiline": True}),
+                "calco": ("STRING", {"default": "", "multiline": True}),
             },
             "optional": {
                 # Nombre del último archivo cargado en el lienzo (lo escribe el
@@ -3476,17 +3481,18 @@ class AnimaLineartCanvasMika:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING")
-    RETURN_NAMES = ("image", "width", "height", "nombre_archivo")
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING", "IMAGE")
+    RETURN_NAMES = ("image", "width", "height", "nombre_archivo", "calco")
     FUNCTION = "render"
     CATEGORY = "Mika Utilidades/image"
 
-    def render(self, resolucion, modo="lineart", dibujo="", archivo=""):
+    def render(self, resolucion, modo="lineart", dibujo="", calco="", archivo=""):
         dims = resolucion.split(" ")[0]
         width, height = (int(v) for v in dims.split("x"))
         bg = (0, 0, 0) if modo == "lineart" else (255, 255, 255)
         image = _mika_lineart_to_tensor(dibujo, width, height, bg)
-        return (image, width, height, archivo)
+        calco_img = _mika_lineart_to_tensor(calco, width, height, (255, 255, 255))
+        return (image, width, height, archivo, calco_img)
 
 
 class AnimaResolutionsMika:
