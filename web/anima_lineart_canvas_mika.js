@@ -297,26 +297,6 @@ app.registerExtension({
 
 		const paintCtx = (node) => node._mikaLineart.paint.getContext("2d");
 
-		// La transformación del trazo se guarda en node.properties (lo
-		// serializa el workflow) para que sobreviva a recargar la página.
-		const TF_KEY = "mikaLineartTf";
-		function savePaintTf(node) {
-			const t = node._mikaLineart?.paintTransform;
-			node.properties = node.properties || {};
-			if (t) node.properties[TF_KEY] = JSON.stringify({ ...t, w: node._mikaLineart.paint.width, h: node._mikaLineart.paint.height });
-			else delete node.properties[TF_KEY];
-		}
-		function loadPaintTf(node) {
-			const raw = node.properties?.[TF_KEY];
-			if (!raw) return null;
-			try {
-				const t = JSON.parse(raw);
-				if (typeof t?.cx !== "number") return null;
-				const k = t.w ? node._mikaLineart.paint.width / t.w : 1;
-				return { cx: t.cx * k, cy: t.cy * k, sx: t.sx * k, sy: t.sy * k, rot: t.rot };
-			} catch (e) { return null; }
-		}
-
 		function setWidget(node, value) {
 			const w = dibujoWidget(node);
 			if (!w) return;
@@ -350,7 +330,21 @@ app.registerExtension({
 		function write(node) {
 			const st = node._mikaLineart;
 			if (!st) return;
-			setWidget(node, st.paint.toDataURL("image/png").split(",")[1]);
+			// La salida del trazo incluye su transformación: si hay una viva,
+			// se hornea acá (transparente; el fondo lo pone el nodo Python).
+			const t = st.paintTransform;
+			let out = st.paint;
+			if (t) {
+				out = document.createElement("canvas");
+				out.width = st.paint.width;
+				out.height = st.paint.height;
+				const ctx = out.getContext("2d");
+				ctx.translate(t.cx, t.cy);
+				ctx.rotate(t.rot);
+				ctx.scale(t.sx, t.sy);
+				ctx.drawImage(st.paint, -st.paint.width / 2, -st.paint.height / 2);
+			}
+			setWidget(node, out.toDataURL("image/png").split(",")[1]);
 			st.dirty = true;
 		}
 
@@ -1458,7 +1452,6 @@ app.registerExtension({
 			}
 			clearOverlay(node);
 			drawTransformUI(node);
-			savePaintTf(node);
 		}
 
 		function cancelSel(node) {
@@ -1480,7 +1473,8 @@ app.registerExtension({
 				drawTransformUI(node);
 				return;
 			}
-			for (const which of affectedLayers(node)) {
+			const touched = affectedLayers(node);
+			for (const which of touched) {
 				const g = layerGeom(node, which);
 				if (!g) continue;
 				const t = { ...g.t };
@@ -1491,7 +1485,7 @@ app.registerExtension({
 			renderPreview(node);
 			if (st.sel) drawSel(node);
 			drawTransformUI(node);
-			savePaintTf(node);
+			if (touched.includes("paint")) write(node);
 		}
 
 		// Punto del lienzo -> coordenadas fuente de la capa de trazo.
@@ -1729,15 +1723,15 @@ app.registerExtension({
 				const ow = prevState.paint?.width;
 				if (ow && ow !== st.paint.width) {
 					const k = st.paint.width / ow;
-					for (const key of ["underlayTransform", "paintTransform"]) {
+					for (const key of ["underlayTransform"]) {
 						const t = st[key];
 						if (t) st[key] = { cx: t.cx * k, cy: t.cy * k, sx: t.sx * k, sy: t.sy * k, rot: t.rot };
 					}
 				}
 			} else {
-				// Arranque limpio (recarga del workflow): recuperamos la
-				// transformación del trazo desde node.properties.
-				st.paintTransform = loadPaintTf(node);
+				// Arranque limpio (recarga del workflow): el trazo ya viene
+				// horneado en el widget "dibujo", sin transformación viva.
+				st.paintTransform = null;
 			}
 
 			// --- Herramientas: pincel / borrador / forma / texto ---
@@ -1915,7 +1909,7 @@ app.registerExtension({
 				drawUnderlay(node);
 				renderPreview(node);
 				drawTransformUI(node);
-				savePaintTf(node);
+				write(node);
 			};
 			const stretchBtn = mkButton("⛶", "Ajustar al tamaño del nodo (estirar para llenar; según el selector)");
 			stretchBtn.onclick = () => {
@@ -1933,7 +1927,7 @@ app.registerExtension({
 				drawUnderlay(node);
 				renderPreview(node);
 				drawTransformUI(node);
-				savePaintTf(node);
+				write(node);
 			};
 			const flipHBtn = mkButton("↔", "Invertir horizontalmente (según el selector o el texto)");
 			flipHBtn.onclick = () => flipTarget(node, "h");
@@ -2246,8 +2240,9 @@ app.registerExtension({
 			});
 			const endStroke = () => {
 				if (st.transformDrag) {
+					const touchedPaint = st.transformDrag.layers.includes("paint");
 					st.transformDrag = null;
-					savePaintTf(node);
+					if (touchedPaint) write(node);
 					drawTransformUI(node);
 					return;
 				}
