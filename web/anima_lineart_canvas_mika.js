@@ -959,7 +959,9 @@ app.registerExtension({
 
 		function placeCursor(node, clientX, clientY) {
 			const st = node._mikaLineart;
-			if (!st?.brushCursor || st.transformMode || st.tool === "text" || st.tool === "select" || st.textObj || st.sel || affectedLayers(node).length) return;
+			// El círculo del pincel solo se oculta si hay una transformación
+			// en curso: tener una capa seleccionada no cambia el cursor.
+			if (!st?.brushCursor || st.transformMode || st.tool === "text" || st.tool === "select" || st.textObj || st.sel) return;
 			const c = st.preview;
 			const r = c.getBoundingClientRect();
 			if (!r.width || !r.height) return;
@@ -1001,7 +1003,11 @@ app.registerExtension({
 			const c = st?.preview;
 			if (!c) return;
 			st.lastClientPos = [clientX, clientY];
-			if (!st.transformMode && !st.textObj && !st.sel && !affectedLayers(node).length) { c.style.cursor = CURSOR_CROSS; return; }
+			// Los cursores de mover/redimensionar/rotar solo aparecen cuando la
+			// transformación está activa (✥, un texto en edición o una pieza
+			// del lazo); con solo tener una capa seleccionada, el cursor sigue
+			// siendo el de la herramienta.
+			if (!st.transformMode && !st.textObj && !st.sel) { c.style.cursor = CURSOR_CROSS; return; }
 			const [x, y] = clientToCanvas(node, clientX, clientY);
 			const hit = transformHit(node, x, y);
 			if (!hit) c.style.cursor = CURSOR_CROSS;
