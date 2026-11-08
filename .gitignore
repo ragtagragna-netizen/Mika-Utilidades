@@ -11,9 +11,6 @@ venv/
 # Listas de presets personales (se crean solas en runtime; no se publican)
 presets/
 
-# Fuentes descargadas (Blambot/dafont: licencia personal, no se publican)
-web/fonts/
-
 # Notas de diseño y tests: se quedan en la carpeta local pero no se publican
 # ni se sincronizan al actualizar con el Manager.
 docs/

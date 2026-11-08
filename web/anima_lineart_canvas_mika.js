@@ -79,8 +79,9 @@ const COMIC_FONTS = [
 ];
 
 // --- Registro de fuentes ---
-// Las fuentes descargadas viven en web/fonts/ (carpeta ignorada por git) y se
-// cargan con @font-face, así se ven sin instalarlas en Windows.
+// Las fuentes de cómic viven en web/fonts/ (empaquetadas como .woff2, ~35 % de
+// su tamaño original) y se cargan con @font-face, así se ven sin instalarlas.
+// El manifiesto es web/fonts/fonts.json.
 const BUNDLED_FONTS = [];
 const ADDED_FONTS = (() => {
 	try { return JSON.parse(localStorage.getItem("mikaLineartFonts") || "[]"); } catch (e) { return []; }
