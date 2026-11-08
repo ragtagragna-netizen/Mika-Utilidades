@@ -48,10 +48,6 @@ const CURSOR_ROTATE = cursorUrl(
 	'<path d="M14.9 3.4l1.9.4-.3 1.9z" fill="#fff"/>',
 ) + ", grab";
 
-// Íconos del botón mostrar/ocultar calco (ojo abierto / cerrado).
-const EYE_OPEN = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
-const EYE_CLOSED = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M2 12s4-7 10-7c1.9 0 3.5.6 4.8 1.4M22 12s-4 7-10 7c-1.9 0-3.5-.6-4.8-1.4"/></svg>';
-
 // Figuras del Paint ([id, etiqueta]).
 const SHAPES = [
 	["line", "Línea"], ["curve", "Curva"], ["ellipse", "Círculo"], ["rect", "Rectángulo"],
@@ -963,7 +959,7 @@ app.registerExtension({
 
 		function placeCursor(node, clientX, clientY) {
 			const st = node._mikaLineart;
-			if (!st?.brushCursor || st.transformMode || st.tool === "text" || st.tool === "select" || st.textObj || st.sel || activeLayerOf(node)) return;
+			if (!st?.brushCursor || st.transformMode || st.tool === "text" || st.tool === "select" || st.textObj || st.sel || affectedLayers(node).length) return;
 			const c = st.preview;
 			const r = c.getBoundingClientRect();
 			if (!r.width || !r.height) return;
@@ -1005,7 +1001,7 @@ app.registerExtension({
 			const c = st?.preview;
 			if (!c) return;
 			st.lastClientPos = [clientX, clientY];
-			if (!st.transformMode && !st.textObj && !st.sel && !activeLayerOf(node)) { c.style.cursor = CURSOR_CROSS; return; }
+			if (!st.transformMode && !st.textObj && !st.sel && !affectedLayers(node).length) { c.style.cursor = CURSOR_CROSS; return; }
 			const [x, y] = clientToCanvas(node, clientX, clientY);
 			const hit = transformHit(node, x, y);
 			if (!hit) c.style.cursor = CURSOR_CROSS;
@@ -1091,14 +1087,14 @@ app.registerExtension({
 			thumb.width = Math.max(1, Math.round(src.width * ts));
 			thumb.height = Math.max(1, Math.round(src.height * ts));
 			thumb.getContext("2d").drawImage(src, 0, 0, thumb.width, thumb.height);
-			return { id: "L" + (st.layerSeq++), w: src.width, h: src.height, src, tf, tf0: { ...tf }, visible: true, thumb: thumb.toDataURL("image/png") };
+			return { id: "L" + (st.layerSeq++), name: "calco" + (++st.calcoNameSeq), w: src.width, h: src.height, src, tf, tf0: { ...tf }, visible: true, thumb: thumb.toDataURL("image/png") };
 		}
 
 		function addCalcoLayer(node, img, name) {
 			const st = node._mikaLineart;
 			const layer = makeLayer(node, img);
 			st.calcoLayers.push(layer);
-			st.activeLayerId = layer.id;
+			st.selection = [layerKey(layer)];
 			if (name) setArchivo(node, name);
 			drawCalcoLayers(node);
 			renderLayerPanel(node);
@@ -1106,17 +1102,10 @@ app.registerExtension({
 			writeCalco(node);
 		}
 
-		function selectCalcoLayer(node, id) {
-			const st = node._mikaLineart;
-			st.activeLayerId = st.activeLayerId === id ? null : id;
-			drawTransformUI(node);
-			renderLayerPanel(node);
-		}
-
 		function removeCalcoLayer(node, id) {
 			const st = node._mikaLineart;
 			st.calcoLayers = st.calcoLayers.filter((l) => l.id !== id);
-			if (st.activeLayerId === id) st.activeLayerId = null;
+			st.selection = st.selection.filter((k) => k !== "L:" + id);
 			drawCalcoLayers(node);
 			renderLayerPanel(node);
 			drawTransformUI(node);
@@ -1210,75 +1199,157 @@ app.registerExtension({
 			setCalcoWidget(node, composeCalco(node).toDataURL("image/png").split(",")[1]);
 			CALCO_CACHE.set(calcoKey(node), {
 				underlayImg: st.underlayImg, underlayTransform: st.underlayTransform,
-				calcoLayers: st.calcoLayers, activeLayerId: st.activeLayerId,
-				layerSeq: st.layerSeq, contentSize: st.contentSize,
+				calcoLayers: st.calcoLayers, selection: st.selection.slice(),
+				layerSeq: st.layerSeq, calcoNameSeq: st.calcoNameSeq, contentSize: st.contentSize,
 			});
 		}
 
-		// Aplana las capas visibles sobre el calco base.
-		function mergeCalcoLayers(node) {
+		// Funde en el calco base las capas calco SELECCIONADAS y visibles.
+		function mergeSelected(node) {
 			const st = node._mikaLineart;
-			if (!st.calcoLayers.length) return;
-			const img = new Image();
-			img.onload = () => {
-				st.underlayImg = img;
-				fitUnderlay(node);
-				st.calcoLayers = [];
-				st.activeLayerId = null;
+			const keys = st.selection.filter((k) => String(k).startsWith("L:"));
+			const sel = keys.map((k) => layerByKey(node, k)).filter((l) => l && l.visible);
+			if (!sel.length) return;
+			const W = st.paint.width, H = st.paint.height;
+			const comp = document.createElement("canvas");
+			comp.width = W; comp.height = H;
+			const ctx = comp.getContext("2d");
+			const img = st.underlayImg;
+			const t = st.underlayTransform;
+			if (img && t) {
+				ctx.save();
+				ctx.translate(t.cx, t.cy); ctx.rotate(t.rot); ctx.scale(t.sx, t.sy);
+				ctx.drawImage(img, -img.width / 2, -img.height / 2);
+				ctx.restore();
+			}
+			for (const l of st.calcoLayers) {
+				if (!sel.includes(l)) continue;
+				ctx.save();
+				ctx.translate(l.tf.cx, l.tf.cy); ctx.rotate(l.tf.rot); ctx.scale(l.tf.sx, l.tf.sy);
+				ctx.drawImage(l.src, -l.w / 2, -l.h / 2);
+				ctx.restore();
+			}
+			const out = new Image();
+			out.onload = () => {
+				st.underlayImg = out;
+				st.underlayTransform = { cx: W / 2, cy: H / 2, sx: 1, sy: 1, rot: 0 };
+				st.calcoLayers = st.calcoLayers.filter((l) => !sel.includes(l));
+				st.selection = st.selection.filter((k) => !keys.includes(k) && layerGeom(node, k));
 				drawUnderlay(node);
 				renderLayerPanel(node);
 				drawTransformUI(node);
 				writeCalco(node);
 			};
-			img.src = composeCalco(node).toDataURL("image/png");
+			out.src = comp.toDataURL("image/png");
 		}
 
-		// Tira de miniaturas: elige/ojo/borra/reordena cada capa.
+		// Miniatura chica de una capa ("paint" | "underlay").
+		function thumbOf(node, key) {
+			const st = node._mikaLineart;
+			const src = key === "paint" ? st.preview : (key === "underlay" ? st.underlay : null);
+			if (!src || !src.width || !src.height) return "";
+			const c = document.createElement("canvas");
+			const ts = Math.min(1, 64 / Math.max(src.width, src.height));
+			c.width = Math.max(1, Math.round(src.width * ts));
+			c.height = Math.max(1, Math.round(src.height * ts));
+			c.getContext("2d").drawImage(src, 0, 0, c.width, c.height);
+			return c.toDataURL("image/png");
+		}
+
+		function toggleBaseVisibility(node) {
+			const st = node._mikaLineart;
+			st.underlay.style.display = st.underlay.style.display === "none" ? "" : "none";
+			renderLayerPanel(node);
+		}
+
+		function removeBase(node) {
+			const st = node._mikaLineart;
+			st.underlayImg = null;
+			st.underlayTransform = null;
+			st.selection = st.selection.filter((k) => k !== "underlay");
+			drawUnderlay(node);
+			renderLayerPanel(node);
+			drawTransformUI(node);
+			writeCalco(node);
+		}
+
+		// Tira de capas: trazo, calco (base), calco2… Clic = seleccionar;
+		// Ctrl+clic = multi-selección; 👁/✕/↑↓ por capa.
 		function renderLayerPanel(node) {
 			const st = node._mikaLineart;
 			const panel = st?.layerPanel;
 			if (!panel) return;
 			panel.replaceChildren();
-			panel.style.display = st.calcoLayers.length ? "flex" : "none";
-			for (let i = st.calcoLayers.length - 1; i >= 0; i--) {
-				const l = st.calcoLayers[i];
+			panel.style.display = "flex";
+
+			const mkItemBtn = (label, title, fn) => {
+				const b = document.createElement("button");
+				b.textContent = label;
+				b.title = title;
+				b.style.fontSize = "10px";
+				b.style.lineHeight = "1";
+				b.style.padding = "1px 3px";
+				b.style.cursor = "pointer";
+				b.onclick = (e) => { e.stopPropagation(); fn(); };
+				return b;
+			};
+
+			const addItem = (key, label, thumbSrc, opts) => {
 				const item = document.createElement("div");
 				item.style.display = "inline-flex";
 				item.style.flexDirection = "column";
 				item.style.alignItems = "center";
-				item.title = "Capa " + (i + 1);
 				const th = document.createElement("img");
-				th.src = l.thumb;
+				th.src = thumbSrc || "";
 				th.style.width = "48px";
 				th.style.height = "36px";
 				th.style.objectFit = "contain";
 				th.style.background = "#000";
-				th.style.border = l.id === st.activeLayerId ? "2px solid #4a9" : "1px solid var(--border-color, #444)";
+				th.style.border = isSelected(node, key) ? "2px solid #4a9" : "1px solid var(--border-color, #444)";
 				th.style.borderRadius = "3px";
 				th.style.cursor = "pointer";
-				th.style.opacity = l.visible ? "1" : "0.35";
-				th.onclick = () => selectCalcoLayer(node, l.id);
-				item.appendChild(th);
-				const mkItemBtn = (label, title, fn) => {
-					const b = document.createElement("button");
-					b.textContent = label;
-					b.title = title;
-					b.style.fontSize = "10px";
-					b.style.lineHeight = "1";
-					b.style.padding = "1px 3px";
-					b.style.cursor = "pointer";
-					b.onclick = (e) => { e.stopPropagation(); fn(); };
-					return b;
+				if (opts && opts.dim) th.style.opacity = "0.35";
+				th.onclick = (e) => {
+					if (e.ctrlKey || e.metaKey) toggleSelection(node, key);
+					else if (isSelected(node, key) && st.selection.length === 1) clearSelection(node);
+					else setSelection(node, [key]);
 				};
-				const bar = document.createElement("div");
-				bar.style.display = "flex";
-				bar.style.gap = "1px";
-				bar.appendChild(mkItemBtn("👁", "Mostrar/ocultar", () => toggleCalcoLayer(node, l.id)));
-				bar.appendChild(mkItemBtn("✕", "Borrar capa", () => removeCalcoLayer(node, l.id)));
-				bar.appendChild(mkItemBtn("↑", "Subir", () => moveCalcoLayer(node, l.id, +1)));
-				bar.appendChild(mkItemBtn("↓", "Bajar", () => moveCalcoLayer(node, l.id, -1)));
-				item.appendChild(bar);
+				item.appendChild(th);
+				const name = document.createElement("div");
+				name.textContent = label;
+				name.style.fontSize = "10px";
+				name.style.opacity = "0.85";
+				item.appendChild(name);
+				if (opts && opts.controls) {
+					const bar = document.createElement("div");
+					bar.style.display = "flex";
+					bar.style.gap = "1px";
+					for (const [lbl, title, fn] of opts.controls) bar.appendChild(mkItemBtn(lbl, title, fn));
+					item.appendChild(bar);
+				}
 				panel.appendChild(item);
+			};
+
+			addItem("paint", "trazo", thumbOf(node, "paint"), null);
+			if (st.underlayImg) {
+				addItem("underlay", "calco", thumbOf(node, "underlay"), {
+					controls: [
+						["👁", "Mostrar/ocultar el calco base", () => toggleBaseVisibility(node)],
+						["✕", "Quitar el calco base", () => removeBase(node)],
+					],
+				});
+			}
+			for (let i = 0; i < st.calcoLayers.length; i++) {
+				const l = st.calcoLayers[i];
+				addItem(layerKey(l), l.name || ("calco" + (i + 2)), l.thumb, {
+					dim: !l.visible,
+					controls: [
+						["👁", "Mostrar/ocultar", () => toggleCalcoLayer(node, l.id)],
+						["✕", "Borrar capa", () => removeCalcoLayer(node, l.id)],
+						["↑", "Subir", () => moveCalcoLayer(node, l.id, +1)],
+						["↓", "Bajar", () => moveCalcoLayer(node, l.id, -1)],
+					],
+				});
 			}
 			st.refit?.();
 		}
@@ -1292,7 +1363,14 @@ app.registerExtension({
 			if (!w) return;
 			const calco = st?.underlayImg ? { w: st.underlayImg.width, h: st.underlayImg.height } : null;
 			const content = st?.contentSize || null;
-			const src = st?.transformTarget === "calco" ? (calco || content) : (content || calco);
+			// Fuente: la capa calco de la primaria seleccionada; si no, el trazo.
+			let selSize = null;
+			const prim = primaryLayer(node);
+			if (prim === "underlay" || (typeof prim === "string" && prim.startsWith("L:"))) {
+				const g = layerGeom(node, prim);
+				if (g) selSize = { w: g.w, h: g.h };
+			}
+			const src = selSize || content || calco;
 			if (!src) return;
 			const target = src.w / src.h;
 			const targetArea = src.w * src.h;
@@ -1306,21 +1384,42 @@ app.registerExtension({
 			if (best && best !== w.value) { w.value = best; w.callback?.(best); }
 		}
 
-		// Capa del calco seleccionada (la que muestran el marco y las
-		// transformaciones mientras esté activa).
-		function activeLayerOf(node) {
-			const st = node._mikaLineart;
-			if (!st?.activeLayerId) return null;
-			return st.calcoLayers.find((l) => l.id === st.activeLayerId) || null;
+		// --- Selección de capas (tira inferior) ---
+		// Claves: "paint" (trazo) | "underlay" (calco base) | "L:<id>" (capa).
+		function layerKey(layer) { return "L:" + layer.id; }
+		function layerByKey(node, key) {
+			if (typeof key !== "string" || !key.startsWith("L:")) return null;
+			const id = key.slice(2);
+			return node._mikaLineart.calcoLayers.find((l) => l.id === id) || null;
 		}
+		function selectedLayers(node) {
+			return node._mikaLineart.selection.filter((k) => layerGeom(node, k));
+		}
+		function isSelected(node, key) { return node._mikaLineart.selection.includes(key); }
+		function setSelection(node, keys) {
+			node._mikaLineart.selection = keys.slice();
+			drawTransformUI(node);
+			renderLayerPanel(node);
+		}
+		function toggleSelection(node, key) {
+			const s = node._mikaLineart.selection;
+			const i = s.indexOf(key);
+			if (i >= 0) s.splice(i, 1);
+			else s.push(key);
+			drawTransformUI(node);
+			renderLayerPanel(node);
+		}
+		function clearSelection(node) { setSelection(node, []); }
 
-		// Dimensiones y transformación de una capa ("paint" | "underlay" |
-		// "clayer" | "sel" | "text").
+		// Dimensiones y transformación de una capa.
 		function layerGeom(node, which) {
 			const st = node._mikaLineart;
-			if (which === "clayer") {
-				const l = activeLayerOf(node);
-				return l ? { t: l.tf, w: l.w, h: l.h } : null;
+			if (which === "paint") return { t: paintTf(node), w: st.paint.width, h: st.paint.height };
+			if (which === "underlay") {
+				const img = st.underlayImg;
+				const t = st.underlayTransform;
+				if (!img || !t) return null;
+				return { t, w: img.width, h: img.height };
 			}
 			if (which === "sel") {
 				const s = st.sel;
@@ -1330,13 +1429,8 @@ app.registerExtension({
 				const o = st.textObj;
 				return o ? { t: o.tf, w: o.w, h: o.h } : null;
 			}
-			if (which === "underlay") {
-				const img = st.underlayImg;
-				const t = st.underlayTransform;
-				if (!img || !t) return null;
-				return { t, w: img.width, h: img.height };
-			}
-			return { t: paintTf(node), w: st.paint.width, h: st.paint.height };
+			const l = layerByKey(node, which);
+			return l ? { t: l.tf, w: l.w, h: l.h } : null;
 		}
 
 		// Esquinas del rectángulo (w×h) con la transformación t.
@@ -1366,35 +1460,30 @@ app.registerExtension({
 			return { x, y, w: x2 - x, h: y2 - y };
 		}
 
-		// Capa que controla el marco/handles según el selector (el texto en
-		// edición tiene prioridad mientras exista).
+		// Capa que controla el marco/handles (el lazo/texto en curso tienen
+		// prioridad; si no, la última capa seleccionada).
 		function primaryLayer(node) {
 			const st = node._mikaLineart;
 			if (st.sel) return "sel";
 			if (st.textObj) return "text";
-			if (activeLayerOf(node)) return "clayer";
-			if (st.transformTarget === "trazo") return "paint";
-			if (st.transformTarget === "ambas") return st.underlayImg ? "underlay" : "paint";
-			return "underlay";
+			const s = affectedLayers(node);
+			return s.length ? s[s.length - 1] : null;
 		}
 
 		function affectedLayers(node) {
 			const st = node._mikaLineart;
 			if (st.sel) return ["sel"];
 			if (st.textObj) return ["text"];
-			if (activeLayerOf(node)) return ["clayer"];
-			if (st.transformTarget === "trazo") return ["paint"];
-			if (st.transformTarget === "ambas") return st.underlayImg ? ["paint", "underlay"] : ["paint"];
-			return st.underlayImg ? ["underlay"] : [];
+			return selectedLayers(node);
 		}
 
 		function setLayerTf(node, which, t) {
 			const st = node._mikaLineart;
-			if (which === "clayer") { const l = activeLayerOf(node); if (l) l.tf = t; }
+			if (which === "paint") st.paintTransform = t;
+			else if (which === "underlay") st.underlayTransform = t;
 			else if (which === "sel") { if (st.sel) st.sel.tf = t; }
 			else if (which === "text") { if (st.textObj) st.textObj.tf = t; }
-			else if (which === "underlay") st.underlayTransform = t;
-			else st.paintTransform = t;
+			else { const l = layerByKey(node, which); if (l) l.tf = t; }
 		}
 
 		function handleSize(node) {
@@ -1436,7 +1525,7 @@ app.registerExtension({
 			if (!st?.handles) return;
 			const ctx = st.handles.getContext("2d");
 			ctx.clearRect(0, 0, st.handles.width, st.handles.height);
-			if (!st.transformMode && !st.textObj && !st.sel && !activeLayerOf(node)) return;
+			if (!st.transformMode && !st.textObj && !st.sel && !selectedLayers(node).length) return;
 			const which = primaryLayer(node);
 			const layers = affectedLayers(node);
 			if (!layers.length) return;
@@ -1477,7 +1566,7 @@ app.registerExtension({
 
 		function transformHit(node, x, y) {
 			const st = node._mikaLineart;
-			if (!st?.transformMode && !st?.textObj && !st?.sel && !activeLayerOf(node)) return null;
+			if (!st?.transformMode && !st?.textObj && !st?.sel && !selectedLayers(node).length) return null;
 			const which = primaryLayer(node);
 			const corners = layerCorners(node, which);
 			if (!corners) return null;
@@ -1624,22 +1713,43 @@ app.registerExtension({
 			const s = st.sel;
 			if (!s) return;
 			ctx.globalAlpha = s.opacity;
-			ctx.drawImage(s.base, 0, 0);
+			for (const p of s.pieces) ctx.drawImage(p.base, 0, 0);
 			ctx.save();
 			ctx.translate(s.tf.cx, s.tf.cy);
 			ctx.rotate(s.tf.rot);
 			ctx.scale(s.tf.sx, s.tf.sy);
-			ctx.drawImage(s.float, -s.w / 2, -s.h / 2);
+			for (const p of s.pieces) ctx.drawImage(p.float, -s.w / 2, -s.h / 2);
 			ctx.restore();
 			ctx.globalAlpha = 1;
 		}
 
-		// Crea la pieza flotante a partir del lazo (coordenadas de lienzo).
+		// Canvas (tamaño lienzo) con la capa "tal como se ve", para cortarle un
+		// área con el lazo.
+		function sourceOf(node, key) {
+			const st = node._mikaLineart;
+			if (key === "paint") return st.preview;
+			if (key === "underlay") return st.underlay;
+			const l = layerByKey(node, key);
+			if (!l) return null;
+			const c = document.createElement("canvas");
+			c.width = st.paint.width; c.height = st.paint.height;
+			const cx = c.getContext("2d");
+			cx.save();
+			cx.translate(l.tf.cx, l.tf.cy);
+			cx.rotate(l.tf.rot);
+			cx.scale(l.tf.sx, l.tf.sy);
+			cx.drawImage(l.src, -l.w / 2, -l.h / 2);
+			cx.restore();
+			return c;
+		}
+
+		// Crea la pieza flotante a partir del lazo: corta la misma área de
+		// TODAS las capas seleccionadas; una sola transformación para todas.
 		function createSelection(node, pts) {
 			const st = node._mikaLineart;
 			if (!pts || pts.length < 3) return;
-			const which = st.transformTarget === "calco" ? "underlay" : "paint";
-			const src = which === "underlay" ? st.underlay : st.preview;
+			const keys = affectedLayers(node).filter((k) => k !== "text" && k !== "sel");
+			if (!keys.length) return;
 			const W = st.paint.width, H = st.paint.height;
 			let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 			for (const [x, y] of pts) {
@@ -1654,29 +1764,33 @@ app.registerExtension({
 			const bh = Math.min(H - by, Math.ceil(maxY) - by);
 			if (bw < 4 || bh < 4) return;
 
-			// Base: la capa completa con la zona del lazo vaciada.
-			const base = document.createElement("canvas");
-			base.width = W; base.height = H;
-			const bctx = base.getContext("2d");
-			bctx.drawImage(src, 0, 0);
-			bctx.globalCompositeOperation = "destination-out";
-			traceLasso(bctx, pts, 0, 0);
-			bctx.fill();
-			bctx.globalCompositeOperation = "source-over";
-
-			// Recorte: solo lo que queda dentro del lazo.
-			const float = document.createElement("canvas");
-			float.width = bw; float.height = bh;
-			const fctx = float.getContext("2d");
-			fctx.save();
-			traceLasso(fctx, pts, -bx, -by);
-			fctx.clip();
-			fctx.drawImage(src, -bx, -by);
-			fctx.restore();
-
-			const opacity = which === "underlay" ? (parseFloat(st.underlay.style.opacity) || 1) : 1;
+			const pieces = [];
+			for (const key of keys) {
+				const src = sourceOf(node, key);
+				if (!src) continue;
+				// Base: la capa completa con la zona del lazo vaciada.
+				const base = document.createElement("canvas");
+				base.width = W; base.height = H;
+				const bctx = base.getContext("2d");
+				bctx.drawImage(src, 0, 0);
+				bctx.globalCompositeOperation = "destination-out";
+				traceLasso(bctx, pts, 0, 0);
+				bctx.fill();
+				bctx.globalCompositeOperation = "source-over";
+				// Recorte: solo lo que queda dentro del lazo.
+				const float = document.createElement("canvas");
+				float.width = bw; float.height = bh;
+				const fctx = float.getContext("2d");
+				fctx.save();
+				traceLasso(fctx, pts, -bx, -by);
+				fctx.clip();
+				fctx.drawImage(src, -bx, -by);
+				fctx.restore();
+				pieces.push({ key, base, float });
+			}
+			if (!pieces.length) return;
 			const tf = { cx: bx + bw / 2, cy: by + bh / 2, sx: 1, sy: 1, rot: 0 };
-			st.sel = { which, w: bw, h: bh, base, float, tf, tf0: { ...tf }, opacity };
+			st.sel = { keys: pieces.map((p) => p.key), pieces, w: bw, h: bh, tf, tf0: { ...tf }, opacity: 1 };
 			drawSel(node);
 			drawTransformUI(node);
 		}
@@ -1686,32 +1800,47 @@ app.registerExtension({
 			const s = st.sel;
 			if (!s) return;
 			const W = st.paint.width, H = st.paint.height;
-			const out = document.createElement("canvas");
-			out.width = W; out.height = H;
-			const ctx = out.getContext("2d");
-			ctx.drawImage(s.base, 0, 0);
-			ctx.save();
-			ctx.translate(s.tf.cx, s.tf.cy);
-			ctx.rotate(s.tf.rot);
-			ctx.scale(s.tf.sx, s.tf.sy);
-			ctx.drawImage(s.float, -s.w / 2, -s.h / 2);
-			ctx.restore();
+			const outs = s.pieces.map((p) => {
+				const out = document.createElement("canvas");
+				out.width = W; out.height = H;
+				const ctx = out.getContext("2d");
+				ctx.drawImage(p.base, 0, 0);
+				ctx.save();
+				ctx.translate(s.tf.cx, s.tf.cy);
+				ctx.rotate(s.tf.rot);
+				ctx.scale(s.tf.sx, s.tf.sy);
+				ctx.drawImage(p.float, -s.w / 2, -s.h / 2);
+				ctx.restore();
+				return { key: p.key, out };
+			});
 			st.sel = null;
-			if (s.which === "paint") {
-				const pctx = paintCtx(node);
-				pctx.setTransform(1, 0, 0, 1, 0, 0);
-				pctx.globalCompositeOperation = "source-over";
-				pctx.clearRect(0, 0, W, H);
-				pctx.drawImage(out, 0, 0);
-				st.paintTransform = null;
-				renderPreview(node);
-				write(node);
-			} else {
-				const img = new Image();
-				img.onload = () => { drawUnderlay(node); writeCalco(node); };
-				st.underlayImg = img;
-				st.underlayTransform = { cx: W / 2, cy: H / 2, sx: 1, sy: 1, rot: 0 };
-				img.src = out.toDataURL("image/png");
+			for (const { key, out } of outs) {
+				if (key === "paint") {
+					const pctx = paintCtx(node);
+					pctx.setTransform(1, 0, 0, 1, 0, 0);
+					pctx.globalCompositeOperation = "source-over";
+					pctx.clearRect(0, 0, W, H);
+					pctx.drawImage(out, 0, 0);
+					st.paintTransform = null;
+					renderPreview(node);
+					write(node);
+				} else if (key === "underlay") {
+					const img = new Image();
+					img.onload = () => { drawUnderlay(node); writeCalco(node); };
+					st.underlayImg = img;
+					st.underlayTransform = { cx: W / 2, cy: H / 2, sx: 1, sy: 1, rot: 0 };
+					img.src = out.toDataURL("image/png");
+				} else {
+					const l = layerByKey(node, key);
+					if (!l) continue;
+					const img = new Image();
+					img.onload = () => { drawCalcoLayers(node); writeCalco(node); };
+					l.src = img;
+					l.w = W; l.h = H;
+					l.tf = { cx: W / 2, cy: H / 2, sx: 1, sy: 1, rot: 0 };
+					l.tf0 = { ...l.tf };
+					img.src = out.toDataURL("image/png");
+				}
 			}
 			clearOverlay(node);
 			drawTransformUI(node);
@@ -1749,7 +1878,7 @@ app.registerExtension({
 			if (st.sel) drawSel(node);
 			drawTransformUI(node);
 			if (touched.includes("paint")) write(node);
-			if (touched.includes("underlay") || touched.includes("clayer")) writeCalco(node);
+			if (touched.includes("underlay") || touched.some((k) => String(k).startsWith("L:"))) writeCalco(node);
 		}
 
 		// Punto del lienzo -> coordenadas fuente de la capa de trazo.
@@ -1990,13 +2119,13 @@ app.registerExtension({
 
 			node._mikaLineart = {
 				stage, paint, preview, underlay, calcoLayersCanvas, overlay, handles, brushCursor, underlayImg: null,
-				calcoLayers: [], activeLayerId: null, layerSeq: 0, layerPanel,
+				calcoLayers: [], selection: [], layerSeq: 0, calcoNameSeq: 1, layerPanel,
 				undo: [], redo: [],
 				tool: "brush", shape: "rect", font: "Arial", fontSize: 48, text: "", thickness: 1, eraseThickness: 40,
 				userColor: "#000",
 				color: modeStroke(node), dirty: false, erasePoints: null,
 				cursorPos: null,
-				transformMode: false, freeResize: false, transformTarget: "calco",
+				transformMode: false, freeResize: false,
 				underlayTransform: null, paintTransform: null, transformDrag: null,
 				shapeStart: null, shapeEnd: null, textObj: null,
 				sel: null, lasso: null, contentSize: null,
@@ -2004,7 +2133,7 @@ app.registerExtension({
 			const st = node._mikaLineart;
 
 			if (prevState) {
-				for (const k of ["underlayImg", "underlayTransform", "transformMode", "freeResize", "transformTarget", "tool", "shape", "font", "fontSize", "thickness", "eraseThickness", "userColor", "contentSize", "calcoLayers", "activeLayerId", "layerSeq"]) {
+				for (const k of ["underlayImg", "underlayTransform", "transformMode", "freeResize", "tool", "shape", "font", "fontSize", "thickness", "eraseThickness", "userColor", "contentSize", "calcoLayers", "selection", "layerSeq", "calcoNameSeq"]) {
 					if (prevState[k] !== undefined) st[k] = prevState[k];
 				}
 				const ow = prevState.paint?.width;
@@ -2034,7 +2163,8 @@ app.registerExtension({
 					st.underlayImg = c.underlayImg || null;
 					st.underlayTransform = c.underlayTransform || null;
 					st.calcoLayers = c.calcoLayers || [];
-					st.activeLayerId = c.activeLayerId || null;
+					st.selection = (c.selection || []).filter((k) => layerGeom(node, k));
+					if (c.calcoNameSeq) st.calcoNameSeq = c.calcoNameSeq;
 					st.layerSeq = c.layerSeq || st.layerSeq;
 					st.contentSize = c.contentSize || null;
 				}
@@ -2173,25 +2303,7 @@ app.registerExtension({
 			const loadLayerBtn = mkFileButton("📂➕", "Cargar imagen como capa del calco", (img, name) => addCalcoLayer(node, img, name));
 			const fitResBtn = mkButton("📐", "Ajustar la resolución al tamaño del calco o de la imagen cargada");
 			fitResBtn.onclick = () => adaptResolution(node);
-			// --- Selector de destino de las transformaciones ---
-			const targetSel = document.createElement("select");
-			targetSel.title = "Qué transforman ✥ / libre / ⟲ / ⛶";
-			for (const val of ["trazo", "calco", "ambas"]) {
-				const o = document.createElement("option");
-				o.value = val;
-				o.textContent = val;
-				targetSel.appendChild(o);
-			}
-			targetSel.value = st.transformTarget;
-			targetSel.style.height = "22px";
-			targetSel.style.background = "var(--comfy-input-bg, #222)";
-			targetSel.style.color = "var(--input-text, #eee)";
-			targetSel.style.border = "1px solid var(--border-color, #444)";
-			targetSel.style.borderRadius = "3px";
-			targetSel.style.fontSize = "12px";
-			targetSel.onchange = () => { st.transformTarget = targetSel.value; drawTransformUI(node); };
-
-			const transformBtn = mkButton("✥", "Mover / escalar / rotar (según el selector: trazo / calco / ambas)");
+			const transformBtn = mkButton("✥", "Mover / escalar / rotar las capas seleccionadas");
 			transformBtn.onclick = () => {
 				st.transformMode = !st.transformMode;
 				transformBtn.style.outline = st.transformMode ? "1px solid #4a9" : "none";
@@ -2208,14 +2320,13 @@ app.registerExtension({
 			};
 			transformBtn.style.outline = st.transformMode ? "1px solid #4a9" : "none";
 			freeBtn.style.outline = st.freeResize ? "1px solid #4a9" : "none";
-			const resetBtn = mkButton("⟲", "Reestablecer (según el selector: encajar y centrar, sin rotación)");
+			const resetBtn = mkButton("⟲", "Reestablecer las capas seleccionadas (encajar y centrar, sin rotación)");
 			resetBtn.onclick = () => {
 				if (st.sel) { st.sel.tf = { ...st.sel.tf0 }; drawSel(node); drawTransformUI(node); return; }
-				const cl = activeLayerOf(node);
-				if (cl) { cl.tf = { ...cl.tf0 }; drawCalcoLayers(node); drawTransformUI(node); writeCalco(node); return; }
 				for (const which of affectedLayers(node)) {
-					if (which === "underlay") fitUnderlay(node);
-					else st.paintTransform = null;
+					if (which === "paint") st.paintTransform = null;
+					else if (which === "underlay") fitUnderlay(node);
+					else { const l = layerByKey(node, which); if (l) l.tf = { ...l.tf0 }; }
 				}
 				drawUnderlay(node);
 				renderPreview(node);
@@ -2223,7 +2334,7 @@ app.registerExtension({
 				write(node);
 				writeCalco(node);
 			};
-			const stretchBtn = mkButton("⛶", "Ajustar al tamaño del nodo (estirar para llenar; según el selector)");
+			const stretchBtn = mkButton("⛶", "Ajustar al tamaño del nodo las capas seleccionadas (estirar para llenar)");
 			stretchBtn.onclick = () => {
 				if (st.sel) {
 					const W = st.paint.width, H = st.paint.height;
@@ -2232,18 +2343,11 @@ app.registerExtension({
 					drawTransformUI(node);
 					return;
 				}
-				const cl = activeLayerOf(node);
-				if (cl) {
-					const W = st.paint.width, H = st.paint.height;
-					cl.tf = { cx: W / 2, cy: H / 2, sx: W / cl.w, sy: H / cl.h, rot: 0 };
-					drawCalcoLayers(node);
-					drawTransformUI(node);
-					writeCalco(node);
-					return;
-				}
+				const W = st.paint.width, H = st.paint.height;
 				for (const which of affectedLayers(node)) {
-					if (which === "underlay") stretchUnderlay(node);
-					else st.paintTransform = null;
+					if (which === "paint") st.paintTransform = null;
+					else if (which === "underlay") stretchUnderlay(node);
+					else { const l = layerByKey(node, which); if (l) l.tf = { cx: W / 2, cy: H / 2, sx: W / l.w, sy: H / l.h, rot: 0 }; }
 				}
 				drawUnderlay(node);
 				renderPreview(node);
@@ -2265,17 +2369,6 @@ app.registerExtension({
 					}
 				}, "image/png");
 			};
-			const eyeBtn = mkButton("", "Mostrar/ocultar calco");
-			eyeBtn.style.display = "inline-flex";
-			eyeBtn.style.alignItems = "center";
-			eyeBtn.style.justifyContent = "center";
-			eyeBtn.innerHTML = EYE_OPEN;
-			eyeBtn.onclick = () => {
-				const hide = underlay.style.display !== "none";
-				underlay.style.display = hide ? "none" : "";
-				eyeBtn.innerHTML = hide ? EYE_CLOSED : EYE_OPEN;
-			};
-
 			const opacity = document.createElement("input");
 			opacity.type = "range";
 			opacity.min = "0";
@@ -2287,8 +2380,8 @@ app.registerExtension({
 				underlay.style.opacity = String((parseInt(opacity.value, 10) || 0) / 100);
 			});
 
-			const mergeBtn = mkButton("⤓", "Unir las capas visibles al calco");
-			mergeBtn.onclick = () => mergeCalcoLayers(node);
+			const mergeBtn = mkButton("⤓", "Unir las capas seleccionadas al calco");
+			mergeBtn.onclick = () => mergeSelected(node);
 
 			toolbar.appendChild(brushBtn);
 			toolbar.appendChild(eraserBtn);
@@ -2310,7 +2403,6 @@ app.registerExtension({
 			toolbar.appendChild(pasteLayerBtn);
 			toolbar.appendChild(loadLayerBtn);
 			toolbar.appendChild(fitResBtn);
-			toolbar.appendChild(targetSel);
 			toolbar.appendChild(transformBtn);
 			toolbar.appendChild(freeBtn);
 			toolbar.appendChild(resetBtn);
@@ -2318,7 +2410,6 @@ app.registerExtension({
 			toolbar.appendChild(flipHBtn);
 			toolbar.appendChild(flipVBtn);
 			toolbar.appendChild(copyBtn);
-			toolbar.appendChild(eyeBtn);
 			toolbar.appendChild(opacity);
 			toolbar.appendChild(mergeBtn);
 			wireDomDrop(node, root);
@@ -2510,20 +2601,6 @@ app.registerExtension({
 					commitTextObj(node);
 				}
 
-				// Capa del calco activa: si se toca el marco se edita; si no,
-				// se deselecciona y sigue el flujo normal (dibujar).
-				if (activeLayerOf(node)) {
-					const [tx, ty] = posCanvas(e);
-					if (transformHit(node, tx, ty)) {
-						beginTransform(tx, ty);
-						hideCursor(node);
-						return;
-					}
-					st.activeLayerId = null;
-					drawTransformUI(node);
-					renderLayerPanel(node);
-				}
-
 				hideCursor(node);
 				if (st.tool === "text") {
 					if (!st.text) { alert("Escribí un texto en el campo antes de colocarlo."); return; }
@@ -2588,7 +2665,7 @@ app.registerExtension({
 					const layers = st.transformDrag.layers;
 					st.transformDrag = null;
 					if (layers.includes("paint")) write(node);
-					if (layers.includes("clayer") || layers.includes("underlay")) writeCalco(node);
+					if (layers.includes("underlay") || layers.some((k) => String(k).startsWith("L:"))) writeCalco(node);
 					drawTransformUI(node);
 					return;
 				}
