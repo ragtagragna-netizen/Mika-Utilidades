@@ -1117,8 +1117,10 @@ app.registerExtension({
 			const l = st.calcoLayers.find((x) => x.id === id);
 			if (!l) return;
 			l.visible = !l.visible;
+			if (!l.visible) st.selection = st.selection.filter((k) => k !== layerKey(l));
 			drawCalcoLayers(node);
 			renderLayerPanel(node);
+			drawTransformUI(node);
 			writeCalco(node);
 		}
 
@@ -1197,11 +1199,7 @@ app.registerExtension({
 			const st = node._mikaLineart;
 			if (!st) return;
 			setCalcoWidget(node, composeCalco(node).toDataURL("image/png").split(",")[1]);
-			CALCO_CACHE.set(calcoKey(node), {
-				underlayImg: st.underlayImg, underlayTransform: st.underlayTransform,
-				calcoLayers: st.calcoLayers, selection: st.selection.slice(),
-				layerSeq: st.layerSeq, calcoNameSeq: st.calcoNameSeq, contentSize: st.contentSize,
-			});
+			persistCalcoCache(node);
 		}
 
 		// Funde en el calco base las capas calco SELECCIONADAS y visibles.
@@ -1258,8 +1256,12 @@ app.registerExtension({
 
 		function toggleBaseVisibility(node) {
 			const st = node._mikaLineart;
-			st.underlay.style.display = st.underlay.style.display === "none" ? "" : "none";
+			const hide = st.underlay.style.display !== "none";
+			st.underlay.style.display = hide ? "none" : "";
+			if (hide) st.selection = st.selection.filter((k) => k !== "underlay");
+			persistCalcoCache(node);
 			renderLayerPanel(node);
+			drawTransformUI(node);
 		}
 
 		function removeBase(node) {
@@ -1392,12 +1394,28 @@ app.registerExtension({
 			const id = key.slice(2);
 			return node._mikaLineart.calcoLayers.find((l) => l.id === id) || null;
 		}
+		function layerVisible(node, key) {
+			const st = node._mikaLineart;
+			if (key === "paint") return true;
+			if (key === "underlay") return st.underlay.style.display !== "none";
+			const l = layerByKey(node, key);
+			return !!(l && l.visible);
+		}
 		function selectedLayers(node) {
-			return node._mikaLineart.selection.filter((k) => layerGeom(node, k));
+			return node._mikaLineart.selection.filter((k) => layerGeom(node, k) && layerVisible(node, k));
 		}
 		function isSelected(node, key) { return node._mikaLineart.selection.includes(key); }
+		function persistCalcoCache(node) {
+			const st = node._mikaLineart;
+			CALCO_CACHE.set(calcoKey(node), {
+				underlayImg: st.underlayImg, underlayTransform: st.underlayTransform,
+				calcoLayers: st.calcoLayers, selection: st.selection.slice(),
+				layerSeq: st.layerSeq, calcoNameSeq: st.calcoNameSeq, contentSize: st.contentSize,
+			});
+		}
 		function setSelection(node, keys) {
 			node._mikaLineart.selection = keys.slice();
+			persistCalcoCache(node);
 			drawTransformUI(node);
 			renderLayerPanel(node);
 		}
@@ -1406,6 +1424,7 @@ app.registerExtension({
 			const i = s.indexOf(key);
 			if (i >= 0) s.splice(i, 1);
 			else s.push(key);
+			persistCalcoCache(node);
 			drawTransformUI(node);
 			renderLayerPanel(node);
 		}
@@ -1833,6 +1852,12 @@ app.registerExtension({
 				} else {
 					const l = layerByKey(node, key);
 					if (!l) continue;
+					const tc = document.createElement("canvas");
+					const ts = Math.min(1, 64 / Math.max(W, H));
+					tc.width = Math.max(1, Math.round(W * ts));
+					tc.height = Math.max(1, Math.round(H * ts));
+					tc.getContext("2d").drawImage(out, 0, 0, tc.width, tc.height);
+					l.thumb = tc.toDataURL("image/png");
 					const img = new Image();
 					img.onload = () => { drawCalcoLayers(node); writeCalco(node); };
 					l.src = img;
@@ -1843,6 +1868,7 @@ app.registerExtension({
 				}
 			}
 			clearOverlay(node);
+			renderLayerPanel(node);
 			drawTransformUI(node);
 		}
 
@@ -2163,7 +2189,7 @@ app.registerExtension({
 					st.underlayImg = c.underlayImg || null;
 					st.underlayTransform = c.underlayTransform || null;
 					st.calcoLayers = c.calcoLayers || [];
-					st.selection = (c.selection || []).filter((k) => layerGeom(node, k));
+					st.selection = (c.selection || []).filter((k) => layerGeom(node, k) && layerVisible(node, k));
 					if (c.calcoNameSeq) st.calcoNameSeq = c.calcoNameSeq;
 					st.layerSeq = c.layerSeq || st.layerSeq;
 					st.contentSize = c.contentSize || null;
@@ -2323,7 +2349,9 @@ app.registerExtension({
 			const resetBtn = mkButton("⟲", "Reestablecer las capas seleccionadas (encajar y centrar, sin rotación)");
 			resetBtn.onclick = () => {
 				if (st.sel) { st.sel.tf = { ...st.sel.tf0 }; drawSel(node); drawTransformUI(node); return; }
-				for (const which of affectedLayers(node)) {
+				const keys = affectedLayers(node);
+				if (!keys.length) return;
+				for (const which of keys) {
 					if (which === "paint") st.paintTransform = null;
 					else if (which === "underlay") fitUnderlay(node);
 					else { const l = layerByKey(node, which); if (l) l.tf = { ...l.tf0 }; }
@@ -2344,7 +2372,9 @@ app.registerExtension({
 					return;
 				}
 				const W = st.paint.width, H = st.paint.height;
-				for (const which of affectedLayers(node)) {
+				const keys = affectedLayers(node);
+				if (!keys.length) return;
+				for (const which of keys) {
 					if (which === "paint") st.paintTransform = null;
 					else if (which === "underlay") stretchUnderlay(node);
 					else { const l = layerByKey(node, which); if (l) l.tf = { cx: W / 2, cy: H / 2, sx: W / l.w, sy: H / l.h, rot: 0 }; }
@@ -2355,9 +2385,9 @@ app.registerExtension({
 				write(node);
 				writeCalco(node);
 			};
-			const flipHBtn = mkButton("↔", "Invertir horizontalmente (según el selector o el texto)");
+			const flipHBtn = mkButton("↔", "Invertir horizontalmente (las capas seleccionadas o el texto)");
 			flipHBtn.onclick = () => flipTarget(node, "h");
-			const flipVBtn = mkButton("↕", "Invertir verticalmente (según el selector o el texto)");
+			const flipVBtn = mkButton("↕", "Invertir verticalmente (las capas seleccionadas o el texto)");
 			flipVBtn.onclick = () => flipTarget(node, "v");
 			const copyBtn = mkButton("📄", "Copiar la imagen (fondo + trazos) al portapapeles");
 			copyBtn.onclick = () => {
@@ -2611,6 +2641,7 @@ app.registerExtension({
 				}
 
 				if (st.tool === "select") {
+					if (!selectedLayers(node).length) return;
 					const [cx, cy] = posCanvas(e);
 					st.lasso = { pts: [[cx, cy]] };
 					drawLasso(node);
