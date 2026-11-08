@@ -502,7 +502,7 @@ app.registerExtension({
 			// capas, para que nada quede recortado.
 			let bounds = boundsOf(shot);
 			if (st.underlayImg && st.underlayTransform) bounds = unionRect(bounds, cornersBounds(layerCorners(node, "underlay")));
-			for (const l of st.calcoLayers) bounds = unionRect(bounds, cornersBounds(cornersOfTf(l.tf, l.w, l.h)));
+			for (const l of st.calcoLayers) if (l.visible) bounds = unionRect(bounds, cornersBounds(cornersOfTf(l.tf, l.w, l.h)));
 
 			st.paint.width = nw;
 			st.paint.height = nh;
@@ -545,6 +545,7 @@ app.registerExtension({
 			drawTransformUI(node);
 			refreshCursor(node);
 			if (st.dirty) write(node);
+			if (st.underlayImg || st.calcoLayers.length) writeCalco(node);
 			st.refit?.();
 		}
 
@@ -1268,6 +1269,7 @@ app.registerExtension({
 				item.appendChild(bar);
 				panel.appendChild(item);
 			}
+			st.refit?.();
 		}
 
 		// Ajusta la resolución del nodo a la fuente más parecida: el calco o la
@@ -1695,7 +1697,7 @@ app.registerExtension({
 				write(node);
 			} else {
 				const img = new Image();
-				img.onload = () => drawUnderlay(node);
+				img.onload = () => { drawUnderlay(node); writeCalco(node); };
 				st.underlayImg = img;
 				st.underlayTransform = { cx: W / 2, cy: H / 2, sx: 1, sy: 1, rot: 0 };
 				img.src = out.toDataURL("image/png");
@@ -1991,7 +1993,7 @@ app.registerExtension({
 			const st = node._mikaLineart;
 
 			if (prevState) {
-				for (const k of ["underlayImg", "underlayTransform", "transformMode", "freeResize", "transformTarget", "tool", "shape", "font", "fontSize", "thickness", "eraseThickness", "userColor", "contentSize", "calcoLayers", "activeLayerId"]) {
+				for (const k of ["underlayImg", "underlayTransform", "transformMode", "freeResize", "transformTarget", "tool", "shape", "font", "fontSize", "thickness", "eraseThickness", "userColor", "contentSize", "calcoLayers", "activeLayerId", "layerSeq"]) {
 					if (prevState[k] !== undefined) st[k] = prevState[k];
 				}
 				const ow = prevState.paint?.width;
@@ -2298,6 +2300,7 @@ app.registerExtension({
 			wireCanvasNav(root);
 			drawCalcoLayers(node);
 			renderLayerPanel(node);
+			if (st.underlayImg || st.calcoLayers.length) writeCalco(node);
 
 			// --- Dibujo ---
 			let drawing = false;
@@ -2594,8 +2597,9 @@ app.registerExtension({
 				const w = width ?? node.size?.[0] ?? 320;
 				const [cw, ch] = parseRes(resolucionWidget(node)?.value);
 				const inner = Math.max(32, w - PAD);
-				const tb = (node._mikaLineart && node._mikaLineart._toolbarH) || TOOLBAR_H * 4;
-				return [w, tb + 12 + inner * ch / cw];
+				const tb = (st && st._toolbarH) || TOOLBAR_H * 4;
+				const lp = (st?.layerPanel && st.layerPanel.style.display !== "none") ? (st.layerPanel.offsetHeight || 44) : 0;
+				return [w, tb + 12 + inner * ch / cw + lp];
 			};
 			node._mikaDomWidget = domWidget;
 
