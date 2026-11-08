@@ -865,13 +865,13 @@ app.registerExtension({
 		}
 
 		// Devuelve true si tomó un archivo/URL del arrastre. Lo arrastrado se
-		// carga como CALCO (referencia), no en la capa editable.
+		// agrega como capa del CALCO (referencia tenue), no en la capa editable.
 		function handleDroppedData(node, dt) {
 			if (!dt) return false;
 			const files = Array.from(dt.files || []);
 			const file = files.find((f) => (f.type || "").startsWith("image/")) || files[0];
 			if (file) {
-				withImageFile(file, (img, name) => setUnderlay(node, img, name));
+				withImageFile(file, (img, name) => addCalcoLayer(node, img, name));
 				return true;
 			}
 			const uri = firstUri(dt.getData ? dt.getData("text/uri-list") : "") ||
@@ -881,7 +881,7 @@ app.registerExtension({
 				try { target = new URL(uri, location.href); } catch (e) { /* no-op */ }
 				// Solo mismo origen (arrastres desde el propio ComfyUI).
 				if (target && target.origin === location.origin) {
-					withImageUrl(target.href, (img, name) => setUnderlay(node, img, name));
+					withImageUrl(target.href, (img, name) => addCalcoLayer(node, img, name));
 					return true;
 				}
 			}
@@ -1057,18 +1057,13 @@ app.registerExtension({
 			};
 		}
 
-		function setUnderlay(node, img, name) {
-			const st = node._mikaLineart;
-			cancelSel(node);
-			setArchivo(node, name);
-			st.underlayImg = img;
-			fitUnderlay(node);
-			drawUnderlay(node);
-			drawTransformUI(node);
-			writeCalco(node);
-		}
-
 		// --- Capas del calco (apilables, solo de sesión) ---
+
+		// Nombre de capa: "calco", "calco2", "calco3"…
+		function calcoLayerName(st) {
+			const n = st.calcoNameSeq++;
+			return n === 0 ? "calco" : "calco" + (n + 1);
+		}
 
 		// Convierte una imagen en una capa: fuente propia, encaje "contain"
 		// centrado y miniatura para el panel.
@@ -1087,7 +1082,7 @@ app.registerExtension({
 			thumb.width = Math.max(1, Math.round(src.width * ts));
 			thumb.height = Math.max(1, Math.round(src.height * ts));
 			thumb.getContext("2d").drawImage(src, 0, 0, thumb.width, thumb.height);
-			return { id: "L" + (st.layerSeq++), name: "calco" + (++st.calcoNameSeq), w: src.width, h: src.height, src, tf, tf0: { ...tf }, visible: true, thumb: thumb.toDataURL("image/png") };
+			return { id: "L" + (st.layerSeq++), name: calcoLayerName(st), w: src.width, h: src.height, src, tf, tf0: { ...tf }, visible: true, thumb: thumb.toDataURL("image/png") };
 		}
 
 		function addCalcoLayer(node, img, name) {
@@ -1200,6 +1195,152 @@ app.registerExtension({
 			if (!st) return;
 			setCalcoWidget(node, composeCalco(node).toDataURL("image/png").split(",")[1]);
 			persistCalcoCache(node);
+		}
+
+		// --- Proyecto (importar/exportar) y guardado de imágenes ---
+
+		// Nombre base para los archivos exportados (del último archivo cargado).
+		function exportBaseName(node) {
+			const raw = archivoWidget(node)?.value || "";
+			const base = String(raw).replace(/\.[^./\\]+$/, "").trim();
+			return base || "anima_lineart";
+		}
+
+		function downloadUrl(url, filename) {
+			const a = document.createElement("a");
+			a.href = url;
+			a.download = filename;
+			a.style.display = "none";
+			document.body.appendChild(a);
+			a.click();
+			a.remove();
+		}
+
+		function imageToDataUrl(img) {
+			const c = document.createElement("canvas");
+			c.width = img.width || img.naturalWidth;
+			c.height = img.height || img.naturalHeight;
+			c.getContext("2d").drawImage(img, 0, 0);
+			return c.toDataURL("image/png");
+		}
+
+		function imageFromBase64(b64) {
+			return new Promise((resolve, reject) => {
+				const img = new Image();
+				img.onload = () => resolve(img);
+				img.onerror = () => reject(new Error("no se pudo decodificar una imagen del proyecto"));
+				img.src = "data:image/png;base64," + b64;
+			});
+		}
+
+		// Canvas del trazo con su transformación horneada (transparente).
+		function bakeTrazo(node) {
+			const st = node._mikaLineart;
+			const t = st.paintTransform;
+			if (!t) return st.paint;
+			const out = document.createElement("canvas");
+			out.width = st.paint.width;
+			out.height = st.paint.height;
+			const ctx = out.getContext("2d");
+			ctx.translate(t.cx, t.cy);
+			ctx.rotate(t.rot);
+			ctx.scale(t.sx, t.sy);
+			ctx.drawImage(st.paint, -st.paint.width / 2, -st.paint.height / 2);
+			return out;
+		}
+
+		// Guarda el trazo (igual que la salida "image") o el calco como PNG.
+		function saveImage(node, which) {
+			const st = node._mikaLineart;
+			if (!st) return;
+			const canvas = which === "calco" ? composeCalco(node) : composeOutput(node);
+			downloadUrl(canvas.toDataURL("image/png"), `${exportBaseName(node)}_${which}.png`);
+		}
+
+		// Exporta trazo + calco (base y capas) + resolución y modo a un JSON.
+		function exportProject(node) {
+			const st = node._mikaLineart;
+			if (!st) return;
+			const project = {
+				mika: "anima-lineart-canvas",
+				version: 1,
+				resolucion: resolucionWidget(node)?.value ?? null,
+				modo: modoWidget(node)?.value ?? null,
+				trazo: bakeTrazo(node).toDataURL("image/png").split(",")[1],
+				calco: {
+					base: (st.underlayImg && st.underlayTransform)
+						? { img: imageToDataUrl(st.underlayImg).split(",")[1], tf: st.underlayTransform }
+						: null,
+					capas: st.calcoLayers.map((l) => ({
+						name: l.name, tf: l.tf, tf0: l.tf0, visible: l.visible,
+						img: l.src.toDataURL("image/png").split(",")[1],
+					})),
+				},
+			};
+			const url = URL.createObjectURL(new Blob([JSON.stringify(project)], { type: "application/json" }));
+			downloadUrl(url, `${exportBaseName(node)}.mika.json`);
+			setTimeout(() => URL.revokeObjectURL(url), 10000);
+		}
+
+		// Restaura un proyecto exportado con exportProject.
+		async function importProject(node, file) {
+			const st = node._mikaLineart;
+			if (!st || !file) return;
+			let project;
+			try {
+				project = JSON.parse(await file.text());
+			} catch (e) {
+				alert("No se pudo leer el proyecto: " + ((e && e.message) || e));
+				return;
+			}
+			if (project?.mika !== "anima-lineart-canvas") {
+				alert("El archivo no es un proyecto de este nodo.");
+				return;
+			}
+			cancelSel(node);
+			const rw = resolucionWidget(node);
+			if (project.resolucion && rw && project.resolucion !== rw.value) {
+				rw.value = project.resolucion;
+				rw.callback?.(project.resolucion);
+			}
+			const mw = modoWidget(node);
+			if (project.modo && mw && project.modo !== mw.value) {
+				mw.value = project.modo;
+				mw.callback?.(project.modo);
+			}
+			const paint = paintCtx(node);
+			paint.setTransform(1, 0, 0, 1, 0, 0);
+			paint.globalCompositeOperation = "source-over";
+			paint.clearRect(0, 0, st.paint.width, st.paint.height);
+			if (project.trazo) paint.drawImage(await imageFromBase64(project.trazo), 0, 0);
+			st.paintTransform = null;
+			st.contentSize = null;
+			renderPreview(node);
+			write(node);
+
+			const calco = project.calco || {};
+			st.calcoLayers = [];
+			st.selection = [];
+			st.sel = null;
+			st.underlayImg = null;
+			st.underlayTransform = null;
+			if (calco.base?.img) {
+				st.underlayImg = await imageFromBase64(calco.base.img);
+				st.underlayTransform = calco.base.tf || null;
+			}
+			for (const c of (calco.capas || [])) {
+				const layer = makeLayer(node, await imageFromBase64(c.img));
+				if (c.name) layer.name = c.name;
+				if (c.tf) { layer.tf = c.tf; layer.tf0 = c.tf0 || c.tf; }
+				layer.visible = c.visible !== false;
+				st.calcoLayers.push(layer);
+			}
+			setArchivo(node, file.name || "");
+			drawUnderlay(node);
+			drawTransformUI(node);
+			renderLayerPanel(node);
+			writeCalco(node);
+			st.refit?.();
 		}
 
 		// Funde en el calco base las capas calco SELECCIONADAS y visibles.
@@ -1334,7 +1475,7 @@ app.registerExtension({
 
 			addItem("paint", "trazo", thumbOf(node, "paint"), null);
 			if (st.underlayImg) {
-				addItem("underlay", "calco", thumbOf(node, "underlay"), {
+				addItem("underlay", "calco base", thumbOf(node, "underlay"), {
 					controls: [
 						["👁", "Mostrar/ocultar el calco base", () => toggleBaseVisibility(node)],
 						["✕", "Quitar el calco base", () => removeBase(node)],
@@ -2061,8 +2202,8 @@ app.registerExtension({
 			underlay.style.opacity = "0.4";
 			underlay.style.pointerEvents = "none";
 
-			// Capas del calco (encima del calco base, debajo del trazo), a
-			// opacidad plena para poder colocarlas.
+			// Capas del calco (encima del calco base, debajo del trazo), al
+			// mismo tono tenue que el calco base: son referencia para calcar.
 			const calcoLayersCanvas = document.createElement("canvas");
 			calcoLayersCanvas.width = rw;
 			calcoLayersCanvas.height = rh;
@@ -2070,6 +2211,7 @@ app.registerExtension({
 			calcoLayersCanvas.style.inset = "0";
 			calcoLayersCanvas.style.width = "100%";
 			calcoLayersCanvas.style.height = "100%";
+			calcoLayersCanvas.style.opacity = "0.4";
 			calcoLayersCanvas.style.pointerEvents = "none";
 
 			// Fuente (offscreen) del contenido editable: imagen + trazos, en
@@ -2140,12 +2282,12 @@ app.registerExtension({
 			layerPanel.style.minHeight = "38px";
 
 			root.appendChild(toolbar);
-			root.appendChild(stage);
 			root.appendChild(layerPanel);
+			root.appendChild(stage);
 
 			node._mikaLineart = {
 				stage, paint, preview, underlay, calcoLayersCanvas, overlay, handles, brushCursor, underlayImg: null,
-				calcoLayers: [], selection: [], layerSeq: 0, calcoNameSeq: 1, layerPanel,
+				calcoLayers: [], selection: [], layerSeq: 0, calcoNameSeq: 0, layerPanel,
 				undo: [], redo: [],
 				tool: "brush", shape: "rect", font: "Arial", fontSize: 48, text: "", thickness: 1, eraseThickness: 40,
 				userColor: "#000",
@@ -2319,14 +2461,11 @@ app.registerExtension({
 			// --- Calcar (referencia; no se exporta) ---
 			const traceBtn = mkFileButton(
 				"🖼️",
-				"Importar imagen para calcar (o arrastrá una imagen sobre el nodo)",
-				(img, name) => setUnderlay(node, img, name),
+				"Importar imagen para calcar como capa (o arrastrá una imagen sobre el nodo)",
+				(img, name) => addCalcoLayer(node, img, name),
 			);
-			const pasteTraceBtn = mkButton("📋🖼️", "Pegar imagen del portapapeles para calcar");
-			pasteTraceBtn.onclick = () => pasteFromClipboard((img) => setUnderlay(node, img));
-			const pasteLayerBtn = mkButton("📋➕", "Pegar del portapapeles como capa del calco");
-			pasteLayerBtn.onclick = () => pasteFromClipboard((img) => addCalcoLayer(node, img));
-			const loadLayerBtn = mkFileButton("📂➕", "Cargar imagen como capa del calco", (img, name) => addCalcoLayer(node, img, name));
+			const pasteTraceBtn = mkButton("📋🖼️", "Pegar imagen del portapapeles como capa del calco");
+			pasteTraceBtn.onclick = () => pasteFromClipboard((img) => addCalcoLayer(node, img));
 			const fitResBtn = mkButton("📐", "Ajustar la resolución al tamaño del calco o de la imagen cargada");
 			fitResBtn.onclick = () => adaptResolution(node);
 			const transformBtn = mkButton("✥", "Mover / escalar / rotar las capas seleccionadas");
@@ -2407,7 +2546,9 @@ app.registerExtension({
 			opacity.title = "Opacidad del calco";
 			opacity.style.width = "60px";
 			opacity.addEventListener("input", () => {
-				underlay.style.opacity = String((parseInt(opacity.value, 10) || 0) / 100);
+				const v = String((parseInt(opacity.value, 10) || 0) / 100);
+				underlay.style.opacity = v;
+				calcoLayersCanvas.style.opacity = v;
 			});
 
 			const mergeBtn = mkButton("⤓", "Unir las capas seleccionadas al calco");
@@ -2430,8 +2571,6 @@ app.registerExtension({
 			toolbar.appendChild(pasteEditBtn);
 			toolbar.appendChild(traceBtn);
 			toolbar.appendChild(pasteTraceBtn);
-			toolbar.appendChild(pasteLayerBtn);
-			toolbar.appendChild(loadLayerBtn);
 			toolbar.appendChild(fitResBtn);
 			toolbar.appendChild(transformBtn);
 			toolbar.appendChild(freeBtn);
@@ -2736,6 +2875,19 @@ app.registerExtension({
 			};
 			node._mikaDomWidget = domWidget;
 
+			// Input oculto para "Importar proyecto" (menú contextual).
+			const projectInput = document.createElement("input");
+			projectInput.type = "file";
+			projectInput.accept = ".json,application/json";
+			projectInput.style.display = "none";
+			projectInput.addEventListener("change", () => {
+				const file = projectInput.files?.[0];
+				projectInput.value = "";
+				if (file) importProject(node, file);
+			});
+			root.appendChild(projectInput);
+			node._mikaProjectInput = projectInput;
+
 			// Enter fija el texto en edición; Escape lo cancela.
 			if (node._mikaKeyHandler) document.removeEventListener("keydown", node._mikaKeyHandler, true);
 			const onKey = (e) => {
@@ -2801,6 +2953,24 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function () {
 			const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
 			setTimeout(() => build(this), 100);
+			return r;
+		};
+
+		// Menú del botón derecho sobre el nodo: importar/exportar proyecto y
+		// guardar el trazo o el calco como imagen.
+		const onGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
+		nodeType.prototype.getExtraMenuOptions = function (canvas, options) {
+			const r = onGetExtraMenuOptions ? onGetExtraMenuOptions.apply(this, arguments) : undefined;
+			const node = this;
+			if (Array.isArray(options) && node._mikaLineart) {
+				options.push(
+					null,
+					{ content: "Importar proyecto…", callback: () => node._mikaProjectInput?.click() },
+					{ content: "Exportar proyecto (trazo + calco)", callback: () => exportProject(node) },
+					{ content: "Guardar trazo como imagen", callback: () => saveImage(node, "trazo") },
+					{ content: "Guardar calco como imagen", callback: () => saveImage(node, "calco") },
+				);
+			}
 			return r;
 		};
 
