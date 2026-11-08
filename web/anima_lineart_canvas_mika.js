@@ -21,6 +21,12 @@ const TOOLBAR_H = 30; // alto estimado de la barra (para computeSize)
 const PAD = 16;       // margen lateral que ComfyUI deja alrededor del DOM
 const MAX_UNDO = 20;
 
+// Caché en memoria (por sesión del navegador) del calco y sus capas. ComfyUI
+// recrea los nodos al cambiar de pestaña de workflow y, como el calco es solo
+// de sesión (no se serializa), se perdería. Se indexa por id de workflow + nodo.
+const CALCO_CACHE = new Map();
+const calcoKey = (node) => `${node.graph?.id ?? app.graph?.id ?? "g"}:${node.id}`;
+
 const RES_RE = /(\d+)\s*x\s*(\d+)/;
 const LIN = "lineart";
 const NORMAL = "dibujo normal";
@@ -1202,6 +1208,11 @@ app.registerExtension({
 			const st = node._mikaLineart;
 			if (!st) return;
 			setCalcoWidget(node, composeCalco(node).toDataURL("image/png").split(",")[1]);
+			CALCO_CACHE.set(calcoKey(node), {
+				underlayImg: st.underlayImg, underlayTransform: st.underlayTransform,
+				calcoLayers: st.calcoLayers, activeLayerId: st.activeLayerId,
+				layerSeq: st.layerSeq, contentSize: st.contentSize,
+			});
 		}
 
 		// Aplana las capas visibles sobre el calco base.
@@ -2013,6 +2024,20 @@ app.registerExtension({
 				// Arranque limpio (recarga del workflow): el trazo ya viene
 				// horneado en el widget "dibujo", sin transformación viva.
 				st.paintTransform = null;
+			}
+
+			// Si ComfyUI recreó el nodo (p. ej. al cambiar de pestaña de
+			// workflow), el calco de la sesión se recupera de la caché.
+			if (!st.underlayImg && !st.calcoLayers.length) {
+				const c = CALCO_CACHE.get(calcoKey(node));
+				if (c) {
+					st.underlayImg = c.underlayImg || null;
+					st.underlayTransform = c.underlayTransform || null;
+					st.calcoLayers = c.calcoLayers || [];
+					st.activeLayerId = c.activeLayerId || null;
+					st.layerSeq = c.layerSeq || st.layerSeq;
+					st.contentSize = c.contentSize || null;
+				}
 			}
 
 			// --- Herramientas: pincel / borrador / forma / texto ---
