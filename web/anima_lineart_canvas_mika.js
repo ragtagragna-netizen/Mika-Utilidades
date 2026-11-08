@@ -1233,6 +1233,11 @@ app.registerExtension({
 			});
 		}
 
+		// Nombre del proyecto (sin la extensión) para la salida "nombre_archivo".
+		function projectBaseName(name) {
+			return String(name || "").replace(/\.[^./\\]+$/, "").trim() || "anima_lineart";
+		}
+
 		// Canvas del trazo con su transformación horneada (transparente).
 		function bakeTrazo(node) {
 			const st = node._mikaLineart;
@@ -1273,7 +1278,7 @@ app.registerExtension({
 						: null,
 					capas: st.calcoLayers.map((l) => ({
 						name: l.name, tf: l.tf, tf0: l.tf0, visible: l.visible,
-						img: l.src.toDataURL("image/png").split(",")[1],
+						img: imageToDataUrl(l.src).split(",")[1],
 					})),
 				},
 			};
@@ -1285,7 +1290,7 @@ app.registerExtension({
 		// Restaura un proyecto exportado con exportProject.
 		async function importProject(node, file) {
 			const st = node._mikaLineart;
-			if (!st || !file) return;
+			if (!st || !file || st._importing) return;
 			let project;
 			try {
 				project = JSON.parse(await file.text());
@@ -1297,50 +1302,61 @@ app.registerExtension({
 				alert("El archivo no es un proyecto de este nodo.");
 				return;
 			}
-			cancelSel(node);
-			const rw = resolucionWidget(node);
-			if (project.resolucion && rw && project.resolucion !== rw.value) {
-				rw.value = project.resolucion;
-				rw.callback?.(project.resolucion);
-			}
-			const mw = modoWidget(node);
-			if (project.modo && mw && project.modo !== mw.value) {
-				mw.value = project.modo;
-				mw.callback?.(project.modo);
-			}
-			const paint = paintCtx(node);
-			paint.setTransform(1, 0, 0, 1, 0, 0);
-			paint.globalCompositeOperation = "source-over";
-			paint.clearRect(0, 0, st.paint.width, st.paint.height);
-			if (project.trazo) paint.drawImage(await imageFromBase64(project.trazo), 0, 0);
-			st.paintTransform = null;
-			st.contentSize = null;
-			renderPreview(node);
-			write(node);
+			st._importing = true;
+			try {
+				// Decodificar todo antes de tocar el estado, así un archivo
+				// incompleto no deja el nodo a medio importar.
+				const trazo = project.trazo ? await imageFromBase64(project.trazo) : null;
+				const base = project.calco?.base?.img ? await imageFromBase64(project.calco.base.img) : null;
+				const capas = [];
+				for (const c of (project.calco?.capas || [])) capas.push({ c, img: await imageFromBase64(c.img) });
 
-			const calco = project.calco || {};
-			st.calcoLayers = [];
-			st.selection = [];
-			st.sel = null;
-			st.underlayImg = null;
-			st.underlayTransform = null;
-			if (calco.base?.img) {
-				st.underlayImg = await imageFromBase64(calco.base.img);
-				st.underlayTransform = calco.base.tf || null;
+				cancelSel(node);
+				const rw = resolucionWidget(node);
+				if (project.resolucion && rw && project.resolucion !== rw.value) {
+					rw.value = project.resolucion;
+					rw.callback?.(project.resolucion);
+				}
+				const mw = modoWidget(node);
+				if (project.modo && mw && project.modo !== mw.value) {
+					mw.value = project.modo;
+					mw.callback?.(project.modo);
+				}
+				const paint = paintCtx(node);
+				paint.setTransform(1, 0, 0, 1, 0, 0);
+				paint.globalCompositeOperation = "source-over";
+				paint.clearRect(0, 0, st.paint.width, st.paint.height);
+				if (trazo) paint.drawImage(trazo, 0, 0);
+				st.paintTransform = null;
+				st.contentSize = null;
+				st.undo = [];
+				st.redo = [];
+				renderPreview(node);
+				write(node);
+
+				st.calcoLayers = capas.map(({ c, img }) => {
+					const layer = makeLayer(node, img);
+					if (c.name) layer.name = c.name;
+					if (c.tf) { layer.tf = c.tf; layer.tf0 = c.tf0 || c.tf; }
+					layer.visible = c.visible !== false;
+					return layer;
+				});
+				st.underlayImg = base;
+				st.underlayTransform = base ? (project.calco.base.tf || null) : null;
+				st.underlay.style.display = "";
+				st.selection = [];
+				st.sel = null;
+				setArchivo(node, projectBaseName(file.name));
+				drawUnderlay(node);
+				drawTransformUI(node);
+				renderLayerPanel(node);
+				writeCalco(node);
+				st.refit?.();
+			} catch (e) {
+				alert("No se pudo importar el proyecto: " + ((e && e.message) || e));
+			} finally {
+				st._importing = false;
 			}
-			for (const c of (calco.capas || [])) {
-				const layer = makeLayer(node, await imageFromBase64(c.img));
-				if (c.name) layer.name = c.name;
-				if (c.tf) { layer.tf = c.tf; layer.tf0 = c.tf0 || c.tf; }
-				layer.visible = c.visible !== false;
-				st.calcoLayers.push(layer);
-			}
-			setArchivo(node, file.name || "");
-			drawUnderlay(node);
-			drawTransformUI(node);
-			renderLayerPanel(node);
-			writeCalco(node);
-			st.refit?.();
 		}
 
 		// Funde en el calco base las capas calco SELECCIONADAS y visibles.
@@ -1484,7 +1500,7 @@ app.registerExtension({
 			}
 			for (let i = 0; i < st.calcoLayers.length; i++) {
 				const l = st.calcoLayers[i];
-				addItem(layerKey(l), l.name || ("calco" + (i + 2)), l.thumb, {
+				addItem(layerKey(l), l.name, l.thumb, {
 					dim: !l.visible,
 					controls: [
 						["👁", "Mostrar/ocultar", () => toggleCalcoLayer(node, l.id)],
