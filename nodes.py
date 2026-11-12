@@ -3,7 +3,7 @@ try:
 except Exception:
     PromptServer = None
 
-from PIL import Image, ImageOps, ImageDraw, ImageFont
+from PIL import Image, ImageOps, ImageDraw, ImageFont, ImageFilter
 from PIL.PngImagePlugin import PngInfo
 from io import BytesIO
 import numpy as np
@@ -334,6 +334,659 @@ def _mika_lineart_to_tensor(dibujo, width, height, bg=(255, 255, 255)):
 
     arr = np.asarray(canvas).astype(np.float32) / 255.0
     return torch.from_numpy(arr)[None, ...]
+
+
+def _mika_base_to_tensor(imagen, width, height, bg=(255, 255, 255)):
+    """Imagen de entrada (tensor IMAGE o None) -> IMAGE [1,H,W,3] en 0..1:
+    el fondo pedido con la imagen encajada tipo "contain" y centrada. De un
+    batch se usa el primer frame, igual que el nodo de Anima ControlNet-LLLite."""
+    canvas = Image.new("RGB", (width, height), bg)
+
+    if imagen is not None:
+        arr = imagen[0].detach().cpu().numpy()
+        base = Image.fromarray((arr * 255.0).round().astype(np.uint8), "RGB")
+        scale = min(width / base.width, height / base.height)
+        dw = max(1, round(base.width * scale))
+        dh = max(1, round(base.height * scale))
+        canvas.paste(base.resize((dw, dh), Image.LANCZOS), ((width - dw) // 2, (height - dh) // 2))
+
+    arr = np.asarray(canvas).astype(np.float32) / 255.0
+    return torch.from_numpy(arr)[None, ...]
+
+
+def _mika_mask_to_tensor(mascara, width, height):
+    """PNG base64 de la máscara de inpaint (rojo sobre transparente) ->
+    MASK [1,H,W] en 0..1: el canal alfa. 1 = zona a regenerar."""
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+
+    if isinstance(mascara, str) and mascara:
+        data = mascara.split(",", 1)[1] if mascara.startswith("data:") else mascara
+        try:
+            img = Image.open(BytesIO(base64.b64decode(data))).convert("RGBA")
+            canvas.paste(img, (0, 0))
+        except Exception:
+            pass
+
+    arr = np.asarray(canvas)[:, :, 3].astype(np.float32) / 255.0
+    return torch.from_numpy(arr)[None, ...]
+
+
+# ----------------------------------------------------------------------
+# REGIONES (Image Region Select-Mika)
+# ----------------------------------------------------------------------
+# Cada zona llega como dict {"name", "shape": rect|ellipse|free,
+# "rect": [x,y,w,h], "points": [[x,y], ...]} con coordenadas normalizadas
+# 0..1 respecto del ancho/alto de la imagen fuente.
+
+def _mika_pil_to_tensor(img):
+    """PIL (RGB o RGBA) -> torch [1, H, W, C] float 0..1."""
+    arr = np.asarray(img).astype(np.float32) / 255.0
+    return torch.from_numpy(arr)[None, ...]
+
+
+def _mika_zone_payload(zonas_json):
+    """zonas_json (str JSON o lista) -> lista de dicts de zona."""
+    if isinstance(zonas_json, str):
+        try:
+            data = json.loads(zonas_json)
+        except Exception:
+            return []
+    else:
+        data = zonas_json
+
+    if isinstance(data, dict):
+        data = data.get("zones", [])
+
+    if not isinstance(data, list):
+        return []
+
+    return [z for z in data if isinstance(z, dict)]
+
+
+def _mika_zone_points_px(zone, width, height):
+    """`points` normalizados de la zona -> píxeles [[x, y], ...]."""
+    out = []
+    for p in zone.get("points") or []:
+        try:
+            out.append((round(float(p[0]) * width), round(float(p[1]) * height)))
+        except Exception:
+            continue
+    return out
+
+
+def _mika_zone_rect_px(zone, width, height, margen=0):
+    """Caja de la zona en píxeles (left, top, right, bottom), expandida por
+    `margen` y recortada al tamaño de la imagen. None si es degenerada."""
+    shape = str(zone.get("shape") or "rect").lower()
+    x = y = w = h = None
+
+    if shape == "free":
+        # En el lazo los puntos mandan: el bbox sale de ellos (aunque falte rect).
+        pts = []
+        for p in (zone.get("points") or []):
+            try:
+                pts.append((float(p[0]), float(p[1])))
+            except Exception:
+                continue  # punto corrupto: se ignora, no rompe la zona
+        if len(pts) < 3:
+            return None
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x, y, w, h = min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+
+    if x is None:
+        try:
+            x, y, w, h = (float(v) for v in zone.get("rect"))
+        except Exception:
+            return None
+
+    left = max(0, min(width, round(x * width) - margen))
+    top = max(0, min(height, round(y * height) - margen))
+    right = max(0, min(width, round((x + w) * width) + margen))
+    bottom = max(0, min(height, round((y + h) * height) + margen))
+
+    if right - left < 1 or bottom - top < 1:
+        return None
+    return (left, top, right, bottom)
+
+
+def _mika_zone_is_valid(zone, box, width, height):
+    """Una zona cuenta si tiene caja (no degenerada) y, si es lazo, >=3 puntos."""
+    if box is None:
+        return False
+    if str(zone.get("shape") or "rect").lower() == "free":
+        return len(_mika_zone_points_px(zone, width, height)) >= 3
+    return True
+
+
+def _mika_mask_ss(w, h):
+    """Supersampling de la máscara según el tamaño de la caja: el borde queda
+    suave en zonas normales y no revienta la memoria en zonas enormes (una caja
+    de 4000x4000 a ss=4 pedía un buffer de 16000x16000)."""
+    area = max(1, int(w) * int(h))
+    if area <= 1_000_000:
+        return 4
+    if area <= 6_000_000:
+        return 2
+    return 1
+
+
+def _mika_zone_mask(zone, left, top, right, bottom, width, height, ss=None):
+    """PIL 'L' del tamaño de la caja: 255 dentro de la forma, 0 afuera.
+    Devuelve None para "rect" (el recorte entero) y para un lazo con <3 puntos.
+    El borde se suaviza dibujando a supersampling (ss) y bajando con LANCZOS."""
+    shape = str(zone.get("shape") or "rect").lower()
+
+    if shape not in ("ellipse", "free"):
+        return None
+
+    w = right - left
+    h = bottom - top
+    ss = ss or _mika_mask_ss(w, h)
+    big = Image.new("L", (max(1, w * ss), max(1, h * ss)), 0)
+    draw = ImageDraw.Draw(big)
+
+    if shape == "ellipse":
+        draw.ellipse((0, 0, w * ss - 1, h * ss - 1), fill=255)
+    else:
+        pts = _mika_zone_points_px(zone, width, height)
+        if len(pts) < 3:
+            return None
+        draw.polygon([((px - left) * ss, (py - top) * ss) for (px, py) in pts], fill=255)
+
+    return big.resize((w, h), Image.LANCZOS)
+
+
+def _mika_crop_one(rgba, zone, relleno="transparente", margen=0):
+    """Recorta UNA zona de una PIL RGBA a tamaño exacto. Devuelve un tensor
+    [1,h,w,3] (relleno blanco/negro) o [1,h,w,4] (transparente), o None si la
+    zona es inválida."""
+    width, height = rgba.size
+    box = _mika_zone_rect_px(zone, width, height, margen)
+    if not _mika_zone_is_valid(zone, box, width, height):
+        return None
+
+    left, top, right, bottom = box
+    size = (right - left, bottom - top)
+    crop = rgba.crop(box)
+    mask = _mika_zone_mask(zone, left, top, right, bottom, width, height)
+    transparente = str(relleno) not in ("blanco", "negro")
+    fill_rgba = (255, 255, 255, 255) if str(relleno) == "blanco" else (0, 0, 0, 255)
+
+    out = Image.new("RGBA", size, (0, 0, 0, 0) if transparente else fill_rgba)
+    if mask is None:
+        out.paste(crop, (0, 0))
+    else:
+        out.paste(crop, (0, 0), mask)
+
+    if not transparente:
+        out = out.convert("RGB")
+
+    return _mika_pil_to_tensor(out)
+
+
+def _mika_build_region_crops(source, zonas_json, relleno="transparente", margen=0):
+    """Recorta las zonas de una sola `source` (PIL RGB/RGBA) a tamaño exacto.
+    Devuelve una lista de tensores, en el orden de las zonas válidas."""
+    if source is None:
+        return []
+
+    rgba = source.convert("RGBA")
+    crops = []
+    for zone in _mika_zone_payload(zonas_json):
+        tensor = _mika_crop_one(rgba, zone, relleno, margen)
+        if tensor is not None:
+            crops.append(tensor)
+
+    return crops
+
+
+def _mika_source_to_pil(src):
+    """Fuente (PIL o tensor IMAGE [B,H,W,C]) -> PIL RGB/RGBA, o None."""
+    if src is None:
+        return None
+    if hasattr(src, "convert") and hasattr(src, "size"):
+        return src
+    try:
+        arr = src[0].detach().cpu().numpy()
+        arr = (arr * 255.0).round().astype(np.uint8)
+        return Image.fromarray(arr, "RGB" if arr.shape[2] == 3 else "RGBA")
+    except Exception:
+        return None
+
+
+def _mika_resolve_sources(imagenes_json, archivo, imagen):
+    """Mapa clave -> PIL de las fuentes del nodo. Clave `"wire"` para la entrada
+    cableada, y el nombre de archivo para cada imagen cargada."""
+    if isinstance(imagenes_json, str):
+        try:
+            data = json.loads(imagenes_json)
+        except Exception:
+            data = []
+    else:
+        data = imagenes_json
+
+    names = [str(n) for n in data if isinstance(n, str) and n.strip()] if isinstance(data, list) else []
+
+    archivo_name = archivo[0] if isinstance(archivo, (list, tuple)) and archivo else archivo
+    if isinstance(archivo_name, str) and archivo_name.strip() and archivo_name not in names:
+        names.append(archivo_name)
+
+    sources = {}
+    for name in names:
+        pil = _mika_resolve_input_image(name)
+        if pil is not None:
+            sources[name] = pil
+    if imagen is not None:
+        sources["wire"] = _mika_source_to_pil(imagen)
+    return sources
+
+
+def _mika_zone_source(sources, zone, default_key):
+    """Fuente de una zona: su `img`, si no la clave por defecto, si no la primera."""
+    src = sources.get(zone.get("img") or default_key)
+    if src is None:
+        src = sources.get(default_key)
+    if src is None and sources:
+        src = next(iter(sources.values()))
+    return src
+
+
+def _mika_build_region_crops_multi(sources, zonas_json, relleno="transparente", margen=0, default_key=None):
+    """Como `_mika_build_region_crops`, pero cada zona se recorta de su fuente
+    (`zone["img"]`), con fallback a `default_key`."""
+    crops = []
+    rgba_cache = {}
+    for zone in _mika_zone_payload(zonas_json):
+        src = _mika_zone_source(sources, zone, default_key)
+        if src is None:
+            continue
+        rgba = rgba_cache.setdefault(id(src), src.convert("RGBA"))
+        tensor = _mika_crop_one(rgba, zone, relleno, margen)
+        if tensor is not None:
+            crops.append(tensor)
+
+    return crops
+
+
+def _mika_valid_zone_names_multi(sources, zonas_json, margen=0, default_key=None):
+    """Nombres de las zonas válidas, en orden (mismo criterio que el recorte)."""
+    names = []
+    for i, zone in enumerate(_mika_zone_payload(zonas_json)):
+        src = _mika_zone_source(sources, zone, default_key)
+        if src is None:
+            continue
+        box = _mika_zone_rect_px(zone, src.size[0], src.size[1], margen)
+        if not _mika_zone_is_valid(zone, box, src.size[0], src.size[1]):
+            continue
+        names.append(str(zone.get("name") or (i + 1)))
+    return names
+
+
+# ----------------------------------------------------------------------
+# LINEART PROPIO (Anima Lineart Canvas-Mika)
+# ----------------------------------------------------------------------
+# Preprocesadores de lineart/bordes sin modelos ni red: solo PIL + numpy.
+# Cada uno devuelve una máscara "L" de INTENSIDAD de línea (255 = línea).
+
+_MIKA_PREPROCESSORS = [
+    "lineart", "lineart suave", "lineart xdog", "lineart sujeto", "lineart limpio",
+    "bordes", "canny", "umbral", "contraste", "tinta", "contorno", "lineas gruesas",
+]
+
+
+def _mika_np_gray(img):
+    """PIL (RGB/RGBA/L) -> numpy float32 HxW en 0..1 (luminancia)."""
+    if img.mode != "L":
+        img = img.convert("L")
+    return np.asarray(img).astype(np.float32) / 255.0
+
+
+def _mika_np_blur(gray, radius):
+    """Gaussiano sobre un array float 0..1 (vía PIL)."""
+    if radius <= 0:
+        return gray
+    lum = (np.clip(gray, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+    lum = Image.fromarray(lum, "L").filter(ImageFilter.GaussianBlur(radius))
+    return np.asarray(lum).astype(np.float32) / 255.0
+
+
+def _mika_np_box_mean(gray, radius):
+    """Media local (blur de caja) vía PIL BoxBlur."""
+    lum = (np.clip(gray, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+    lum = Image.fromarray(lum, "L").filter(ImageFilter.BoxBlur(radius))
+    return np.asarray(lum).astype(np.float32) / 255.0
+
+
+def _mika_np_sobel(gray):
+    """Magnitud de Sobel (sin normalizar)."""
+    p = np.pad(gray, 1, mode="edge")
+    gx = (p[:-2, 2:] + 2.0 * p[1:-1, 2:] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[1:-1, :-2] + p[2:, :-2])
+    gy = (p[2:, :-2] + 2.0 * p[2:, 1:-1] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[:-2, 1:-1] + p[:-2, 2:])
+    return np.sqrt(gx * gx + gy * gy)
+
+
+def _mika_np_autolevel(gray, lo=1.0, hi=99.0):
+    """Estira el contraste entre los percentiles (ayuda en imágenes oscuras)."""
+    a = float(np.percentile(gray, lo))
+    b = float(np.percentile(gray, hi))
+    if b - a < 1e-6:
+        return gray
+    return np.clip((gray - a) / (b - a), 0.0, 1.0)
+
+
+def _mika_np_local_stats(gray, radius):
+    """Media y desvío locales (ventana de caja)."""
+    mean = _mika_np_box_mean(gray, radius)
+    sq = _mika_np_box_mean(gray * gray, radius)
+    var = np.clip(sq - mean * mean, 0.0, None)
+    return mean, np.sqrt(var)
+
+
+def _mika_np_xdog(gray, sigma=1.2, k=1.6, delta=0.01):
+    """Banda XDoG: marca lo que es MÁS OSCURO que su entorno (líneas de un
+    dibujo/foto). En zonas planas da exactamente 0 (sin offset constante)."""
+    d = _mika_np_blur(gray, sigma) - _mika_np_blur(gray, sigma * k)
+    return np.clip(-d - delta, 0.0, None)
+
+
+def _mika_np_canny(gray, low=0.08, high=0.2, iters=6):
+    """Canny: Sobel + supresión de no-máximos + histéresis (0/1)."""
+    g = _mika_np_autolevel(gray)
+    p = np.pad(g, 1, mode="edge")
+    gx = (p[:-2, 2:] + 2.0 * p[1:-1, 2:] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[1:-1, :-2] + p[2:, :-2])
+    gy = (p[2:, :-2] + 2.0 * p[2:, 1:-1] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[:-2, 1:-1] + p[:-2, 2:])
+    mag = np.sqrt(gx * gx + gy * gy)
+    peak = float(mag.max()) if mag.size else 0.0
+    if peak < 1e-6:
+        return np.zeros_like(mag)
+    mag = mag / peak
+    ang = (np.arctan2(gy, gx) * 180.0 / np.pi) % 180.0
+
+    n1 = np.zeros_like(mag)
+    n2 = np.zeros_like(mag)
+    m0 = (ang < 22.5) | (ang >= 157.5)
+    m45 = (ang >= 22.5) & (ang < 67.5)
+    m90 = (ang >= 67.5) & (ang < 112.5)
+    m135 = (ang >= 112.5) & (ang < 157.5)
+    n1[m0] = np.roll(mag, 1, 1)[m0]
+    n2[m0] = np.roll(mag, -1, 1)[m0]
+    n1[m45] = np.roll(np.roll(mag, 1, 0), -1, 1)[m45]
+    n2[m45] = np.roll(np.roll(mag, -1, 0), 1, 1)[m45]
+    n1[m90] = np.roll(mag, 1, 0)[m90]
+    n2[m90] = np.roll(mag, -1, 0)[m90]
+    n1[m135] = np.roll(np.roll(mag, 1, 0), 1, 1)[m135]
+    n2[m135] = np.roll(np.roll(mag, -1, 0), -1, 1)[m135]
+    edges = np.where((mag >= n1) & (mag >= n2), mag, 0.0)
+
+    out = (edges >= high).copy()
+    weak = edges >= low
+    for _ in range(int(iters)):
+        grow = out | (weak & (np.roll(out, 1, 0) | np.roll(out, -1, 0) |
+                              np.roll(out, 1, 1) | np.roll(out, -1, 1)))
+        if not np.any(grow & ~out):
+            break
+        out = grow
+    return out.astype(np.float32)
+
+
+def _mika_np_color_sobel(rgb):
+    """Sobel sobre cada canal y máximo: agarra bordes de color (ropa vs piel)."""
+    m = None
+    for c in range(rgb.shape[2]):
+        s = _mika_np_sobel(rgb[:, :, c])
+        m = s if m is None else np.maximum(m, s)
+    return m
+
+
+def _mika_np_dilate(m, iters=1):
+    out = m
+    for _ in range(int(iters)):
+        out = np.maximum.reduce([out, np.roll(out, 1, 0), np.roll(out, -1, 0), np.roll(out, 1, 1), np.roll(out, -1, 1)])
+    return out
+
+
+def _mika_np_erode(m, iters=1):
+    out = m
+    for _ in range(int(iters)):
+        out = np.minimum.reduce([out, np.roll(out, 1, 0), np.roll(out, -1, 0), np.roll(out, 1, 1), np.roll(out, -1, 1)])
+    return out
+
+
+def _mika_np_close(m, iters=1):
+    return _mika_np_erode(_mika_np_dilate(m, iters), iters)
+
+
+def _mika_np_bool_small(mask, max_side):
+    """Baja una máscara booleana (para analizar componentes rápido)."""
+    h, w = mask.shape
+    s = min(1.0, float(max_side) / max(h, w))
+    if s >= 1.0:
+        return mask, (w, h)
+    tw, th = max(8, int(round(w * s))), max(8, int(round(h * s)))
+    im = Image.fromarray((mask.astype(np.uint8) * 255), "L").resize((tw, th), Image.NEAREST)
+    return np.asarray(im) > 127, (w, h)
+
+
+def _mika_np_label(mask):
+    """Componentes conexas (4-vecinos) por BFS. Devuelve (labels, sizes)."""
+    from collections import deque
+
+    h, w = mask.shape
+    labels = np.zeros((h, w), dtype=np.int32)
+    sizes = {}
+    cur = 0
+    ys, xs = np.nonzero(mask)
+    for y0, x0 in zip(ys.tolist(), xs.tolist()):
+        if labels[y0, x0] != 0:
+            continue
+        cur += 1
+        labels[y0, x0] = cur
+        q = deque([(y0, x0)])
+        n = 0
+        while q:
+            y, x = q.popleft()
+            n += 1
+            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and labels[ny, nx] == 0:
+                    labels[ny, nx] = cur
+                    q.append((ny, nx))
+        sizes[cur] = n
+    return labels, sizes
+
+
+def _mika_np_keep_big(mask_bool, min_frac=0.05, max_side=256):
+    """Quita componentes chicos (texto, motas): deja las islas grandes."""
+    if not mask_bool.any():
+        return mask_bool
+    small, (w, h) = _mika_np_bool_small(mask_bool, max_side)
+    labels, sizes = _mika_np_label(small)
+    if not sizes:
+        return mask_bool
+    big = max(sizes.values())
+    keep = np.zeros_like(small)
+    for lbl, size in sizes.items():
+        if size >= max(3.0, big * min_frac):
+            keep |= labels == lbl
+    if (small.shape[1], small.shape[0]) != (w, h):
+        im = Image.fromarray((keep.astype(np.uint8) * 255), "L").resize((w, h), Image.NEAREST)
+        keep = np.asarray(im) > 127
+    return keep
+
+
+def _mika_np_subject_gate(rgb, tol=0.18, max_side=256):
+    """Máscara del 'sujeto' (el personaje): quita el fondo plano conectado al
+    borde y se queda con la isla más grande. Devuelve un bool HxW (True =
+    personaje). Si no encuentra nada razonable, devuelve todo True (sin filtro)."""
+    h, w = rgb.shape[:2]
+    s = min(1.0, float(max_side) / max(h, w))
+    tw, th = max(8, int(round(w * s))), max(8, int(round(h * s)))
+    small = rgb
+    if (tw, th) != (w, h):
+        im = Image.fromarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8), "RGB").resize((tw, th), Image.BILINEAR)
+        small = np.asarray(im).astype(np.float32) / 255.0
+
+    frame = np.concatenate([small[0], small[-1], small[:, 0], small[:, -1]], axis=0)
+    bg = np.median(frame, axis=0)
+    dist = np.max(np.abs(small - bg), axis=2)
+    bg_like = dist < tol
+
+    seed = np.zeros((th, tw), dtype=bool)
+    seed[0, :] = bg_like[0, :]
+    seed[-1, :] = bg_like[-1, :]
+    seed[:, 0] = bg_like[:, 0]
+    seed[:, -1] = bg_like[:, -1]
+    bg_mask = seed.copy()
+    for _ in range(160):
+        grow = bg_mask | (bg_like & (np.roll(bg_mask, 1, 0) | np.roll(bg_mask, -1, 0) |
+                                     np.roll(bg_mask, 1, 1) | np.roll(bg_mask, -1, 1)))
+        if not (grow & ~bg_mask).any():
+            break
+        bg_mask = grow
+
+    subject = ~bg_mask
+    if subject.any():
+        labels, sizes = _mika_np_label(subject)
+        if sizes:
+            big = max(sizes, key=sizes.get)
+            subject = labels == big
+
+    # Si el "sujeto" es casi vacío o casi todo, no filtrar (evita salidas en blanco).
+    frac = float(subject.mean())
+    if frac < 0.02 or frac > 0.98:
+        gate_small = np.ones((th, tw), dtype=bool)
+    else:
+        gate_small = subject
+
+    if (tw, th) == (w, h):
+        return gate_small
+    im = Image.fromarray((gate_small.astype(np.uint8) * 255), "L").resize((w, h), Image.NEAREST)
+    return np.asarray(im) > 127
+
+
+def _mika_norm_mask(m, floor=0.006):
+    """Normaliza a 0..1 sin amplificar el ruido de una imagen plana."""
+    m = np.clip(m - floor, 0.0, None)
+    peak = float(m.max()) if m.size else 0.0
+    if peak < 1e-6:
+        return np.zeros_like(m)
+    return np.clip(m / peak, 0.0, 1.0)
+
+
+def _mika_preprocess(image_pil, preprocesador="lineart", resolution=None):
+    """Máscara de lineart "L" (255 = línea) al tamaño de `image_pil`.
+    Con `resolution`, se calcula acotado a ese lado mayor y se devuelve al
+    tamaño original. Nombre desconocido -> ValueError."""
+    if preprocesador not in _MIKA_PREPROCESSORS:
+        raise ValueError(f"preprocesador desconocido: {preprocesador}")
+
+    img = image_pil.convert("RGB")
+    orig_size = img.size
+
+    if resolution:
+        long_side = max(orig_size)
+        if long_side > int(resolution) > 0:
+            s = int(resolution) / long_side
+            img = img.resize(
+                (max(1, round(orig_size[0] * s)), max(1, round(orig_size[1] * s))),
+                Image.LANCZOS,
+            )
+
+    rgb = np.asarray(img).astype(np.float32) / 255.0
+    g = _mika_np_gray(img)
+
+    if preprocesador == "lineart":
+        mask = _mika_norm_mask(np.abs(_mika_np_blur(g, 1.0) - _mika_np_blur(g, 3.0)))
+    elif preprocesador == "lineart suave":
+        mask = _mika_norm_mask(np.abs(_mika_np_blur(g, 2.0) - _mika_np_blur(g, 6.0)))
+    elif preprocesador == "lineart xdog":
+        # XDoG con auto-niveles: anda bien en realistas/3D y en imágenes oscuras.
+        mask = _mika_norm_mask(np.clip(_mika_np_xdog(_mika_np_autolevel(g)), 0.0, None))
+    elif preprocesador == "lineart sujeto":
+        # Bordes a COLOR limitados al personaje (afuera, fondo en 0).
+        base = _mika_norm_mask(_mika_np_color_sobel(rgb))
+        mask = base * _mika_np_subject_gate(rgb).astype(np.float32)
+    elif preprocesador == "lineart limpio":
+        # A color, limitado al personaje y sin texto/motas (componentes chicos).
+        gate = _mika_np_subject_gate(rgb).astype(np.float32)
+        base = (_mika_norm_mask(_mika_np_color_sobel(rgb)) * gate) > 0.25
+        base = _mika_np_keep_big(base, 0.05)
+        mask = _mika_np_close(base.astype(np.float32), 1)
+    elif preprocesador == "bordes":
+        mask = _mika_norm_mask(_mika_np_sobel(g))
+    elif preprocesador == "canny":
+        mask = _mika_np_canny(g)
+    elif preprocesador == "umbral":
+        # Umbral adaptativo RELATIVO (por desvío local): no falla si es oscura.
+        mean, std = _mika_np_local_stats(g, 8)
+        mask = _mika_norm_mask(np.clip(mean - g - 0.5 * std, 0.0, None))
+    elif preprocesador == "contraste":
+        # Contraste local normalizado: rescata líneas en zonas oscuras.
+        mean, std = _mika_np_local_stats(g, 8)
+        mask = _mika_norm_mask(np.clip((mean - g) / (std + 0.03), 0.0, None))
+    elif preprocesador == "contorno":
+        # Silueta del personaje + bordes internos a color (contorno marcado).
+        gate = _mika_np_subject_gate(rgb).astype(np.float32)
+        sil = _mika_norm_mask(np.abs(_mika_np_sobel(_mika_np_blur(gate, 1.5))))
+        inner = _mika_norm_mask(_mika_np_color_sobel(rgb)) * gate
+        mask = np.clip(np.maximum(sil, inner), 0.0, 1.0)
+    elif preprocesador == "lineas gruesas":
+        # Como "lineart limpio" pero engrosado (líneas bien definidas).
+        gate = _mika_np_subject_gate(rgb).astype(np.float32)
+        base = (_mika_norm_mask(_mika_np_color_sobel(rgb)) * gate) > 0.25
+        base = _mika_np_keep_big(base, 0.05)
+        mask = _mika_np_dilate(_mika_np_close(base.astype(np.float32), 1), 1)
+    else:  # "tinta"
+        mask = np.where(_mika_norm_mask(_mika_np_sobel(g)) > 0.2, 1.0, 0.0)
+
+    out = Image.fromarray((np.clip(mask, 0.0, 1.0) * 255.0).round().astype(np.uint8), "L")
+    if out.size != orig_size:
+        out = out.resize(orig_size, Image.LANCZOS)
+    return out
+
+
+# Ruta del servidor para el botón "⚡ Lineart" del canvas (no encola el grafo:
+# solo preprocesa la imagen que manda el navegador y la devuelve).
+if PromptServer is not None and PromptServer.instance is not None:
+    @PromptServer.instance.routes.post("/mika/lineart/preprocess")
+    async def _mika_lineart_preprocess(request):
+        from aiohttp import web
+        import asyncio
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "JSON inválido"}, status=400)
+
+        name = str(data.get("preprocessor") or "lineart")
+        b64 = data.get("image") or ""
+        if not b64:
+            return web.json_response({"error": "falta la imagen"}, status=400)
+
+        try:
+            raw = b64.split(",", 1)[1] if b64.startswith("data:") else b64
+            img = Image.open(BytesIO(base64.b64decode(raw)))
+            img.load()
+        except Exception as exc:
+            return web.json_response({"error": f"imagen inválida: {exc}"}, status=400)
+
+        try:
+            res = int(data.get("resolution")) if data.get("resolution") else None
+        except Exception:
+            res = None
+
+        loop = asyncio.get_running_loop()
+        try:
+            mask = await loop.run_in_executor(None, lambda: _mika_preprocess(img, name, res))
+        except ValueError:
+            return web.json_response({"error": "preprocesador desconocido"}, status=400)
+        except Exception as exc:
+            return web.json_response({"error": f"error al preprocesar: {exc}"}, status=500)
+
+        buf = BytesIO()
+        mask.save(buf, "PNG")
+        payload = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        return web.json_response({"image": payload})
 
 
 # ======================================================================
@@ -3469,7 +4122,7 @@ class AnimaLineartCanvasMika:
         resoluciones = AnimaResolutionsMika.RESOLUTIONS["1024"]
         return {
             "required": {
-                "resolucion": (resoluciones, {"default": resoluciones[0]}),
+                "resolucion": (resoluciones, {"default": "1024x1024 (1:1)"}),
                 "modo": (cls.MODOS, {"default": cls.MODOS[0]}),
                 "dibujo": ("STRING", {"default": "", "multiline": True}),
                 "calco": ("STRING", {"default": "", "multiline": True}),
@@ -3478,6 +4131,9 @@ class AnimaLineartCanvasMika:
                 # Nombre del último archivo cargado en el lienzo (lo escribe el
                 # frontend). Se expone como salida de texto.
                 "archivo": ("STRING", {"default": ""}),
+                # Preprocesador de lineart elegido en la barra del lienzo
+                # (solo persiste; el preprocesamiento lo corre la ruta).
+                "preprocesador": (_MIKA_PREPROCESSORS, {"default": "lineart"}),
             },
         }
 
@@ -3486,13 +4142,68 @@ class AnimaLineartCanvasMika:
     FUNCTION = "render"
     CATEGORY = "Mika Utilidades/image"
 
-    def render(self, resolucion, modo="lineart", dibujo="", calco="", archivo=""):
+    def render(self, resolucion, modo="lineart", dibujo="", calco="", archivo="", preprocesador="lineart"):
         dims = resolucion.split(" ")[0]
         width, height = (int(v) for v in dims.split("x"))
         bg = (0, 0, 0) if modo == "lineart" else (255, 255, 255)
         image = _mika_lineart_to_tensor(dibujo, width, height, bg)
         calco_img = _mika_lineart_to_tensor(calco, width, height, (255, 255, 255))
         return (image, width, height, archivo, calco_img)
+
+
+class AnimaInpaintCanvasMika:
+    """
+    Anima Inpaint Canvas-Mika: resoluciones de Anima Resolutions-Mika +
+    lienzo (web/anima_lineart_canvas_mika.js) para preparar el inpaint y la
+    edición de una imagen con Anima. El lienzo muestra la imagen de entrada
+    de fondo, deja pintar la máscara y dibujar la forma.
+
+    Salidas:
+      image -> fondo + imagen de entrada (encajada "contain"). Va al
+               ControlNet-LLLite de inpaint (junto con mask) y al VAE Encode.
+      mask  -> máscara de inpaint: 1 = zona a regenerar, 0 = conservar.
+      trazo -> el dibujo sobre el fondo del modo. Va al LLLite de forma
+               (anima-lllite-any-test-like-v2 / lineart / scribble).
+    """
+
+    MODOS = ["dibujo normal", "lineart"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        resoluciones = AnimaResolutionsMika.RESOLUTIONS["1024"]
+        return {
+            "required": {
+                "resolucion": (resoluciones, {"default": "1024x1024 (1:1)"}),
+                "modo": (cls.MODOS, {"default": cls.MODOS[0]}),
+                "dibujo": ("STRING", {"default": "", "multiline": True}),
+                "mascara": ("STRING", {"default": "", "multiline": True}),
+            },
+            "optional": {
+                # Nombre del último archivo cargado en el lienzo (lo escribe el
+                # frontend). Se expone como salida de texto.
+                "archivo": ("STRING", {"default": ""}),
+                # Imagen a editar: el nodo la compone en "image" y el lienzo la
+                # muestra de fondo.
+                "imagen": ("IMAGE",),
+                # Preprocesador de lineart elegido en la barra del lienzo
+                # (solo persiste; el preprocesamiento lo corre la ruta).
+                "preprocesador": (_MIKA_PREPROCESSORS, {"default": "lineart"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "INT", "STRING")
+    RETURN_NAMES = ("image", "mask", "trazo", "width", "height", "nombre_archivo")
+    FUNCTION = "render"
+    CATEGORY = "Mika Utilidades/image"
+
+    def render(self, resolucion, modo="dibujo normal", dibujo="", mascara="", archivo="", imagen=None, preprocesador="lineart"):
+        dims = resolucion.split(" ")[0]
+        width, height = (int(v) for v in dims.split("x"))
+        bg = (0, 0, 0) if modo == "lineart" else (255, 255, 255)
+        image = _mika_base_to_tensor(imagen, width, height, bg)
+        mask = _mika_mask_to_tensor(mascara, width, height)
+        trazo = _mika_lineart_to_tensor(dibujo, width, height, bg)
+        return (image, mask, trazo, width, height, archivo)
 
 
 class AnimaResolutionsMika:
@@ -3505,21 +4216,29 @@ class AnimaResolutionsMika:
     Con random=False, usa el ratio seleccionado manualmente.
     """
 
+    # Resoluciones de ~1 MP válidas para Anima (todas múltiplo de 16), ordenadas
+    # por ancho y, a igual ancho, por alto.
     RESOLUTIONS = {
         "1024": [
-            "1024x1024 (1:1)",
-            "1152x896 (9:7)",
-            "896x1152 (7:9)",
-            "1152x864 (4:3)",
-            "864x1152 (3:4)",
-            "1344x896 (3:2)",
-            "1248x832 (3:2)",
-            "896x1344 (2:3)",
-            "832x1248 (2:3)",
-            "1280x720 (16:9)",
-            "720x1280 (9:16)",
-            "1344x576 (21:9)",
             "576x1344 (9:21)",
+            "640x1536 (5:12)",
+            "720x1280 (9:16)",
+            "768x1344 (4:7)",
+            "832x1216 (13:19)",
+            "832x1248 (2:3)",
+            "864x1152 (3:4)",
+            "896x1152 (7:9)",
+            "896x1344 (2:3)",
+            "1024x1024 (1:1)",
+            "1152x864 (4:3)",
+            "1152x896 (9:7)",
+            "1216x832 (19:13)",
+            "1248x832 (3:2)",
+            "1280x720 (16:9)",
+            "1344x576 (21:9)",
+            "1344x768 (7:4)",
+            "1344x896 (3:2)",
+            "1536x640 (12:5)",
         ],
     }
 
@@ -3576,6 +4295,194 @@ class AnimaResolutionsMika:
             return float("nan")
 
         return ratio
+
+
+# ======================================================================
+# CUSTOM SAMPLER TANGENT (tangent afinado, autocontenido)
+# ----------------------------------------------------------------------
+# Reimplementación de la curva "tangent" de dos etapas (arctan) leída
+# por la curva model_sampling del modelo. Basada en la fórmula MIT de
+# was-node-suite-comfyui (modules/sampling/schedules.py, (c) WASasquatch);
+# se reimplementa acá para no depender de ese paquete.
+# ======================================================================
+
+def _mika_tangent_fractions(steps, start=1.0, middle=0.5, end=0.0,
+                            pivot_1=0.6, pivot_2=0.6, slope_1=0.2, slope_2=0.2):
+    """Curva de dos etapas arctan como fracciones del tiempo del modelo.
+
+    Devuelve `steps + 1` valores, de `start` a `end`.
+    """
+    import math
+
+    total = steps + 2
+    midpoint = int((total * pivot_1 + total * pivot_2) / 2)
+    first_pivot, second_pivot = int(total * pivot_1), int(total * pivot_2)
+    first_slope, second_slope = slope_1 / (total / 40), slope_2 / (total / 40)
+    second_count = total - midpoint
+    first_count = total - second_count
+
+    def stage(count, slope, pivot, top_value, bottom_value):
+        # Con una sola muestra (o ninguna) el tramo no tiene recorrido y la
+        # normalización dividiría por cero; el valor queda en el extremo final.
+        if count <= 1:
+            return [bottom_value] * count
+        top = ((2 / math.pi) * math.atan(-slope * (0 - pivot)) + 1) / 2
+        bottom = ((2 / math.pi) * math.atan(-slope * ((count - 1) - pivot)) + 1) / 2
+        span = top - bottom
+        scale = top_value - bottom_value
+        return [
+            ((((2 / math.pi) * math.atan(-slope * (x - pivot)) + 1) / 2) - bottom)
+            * (1 / span) * scale + bottom_value
+            for x in range(count)
+        ]
+
+    first = stage(first_count, first_slope, first_pivot, start, middle)[:-1]
+    return first + stage(second_count, second_slope, second_pivot - first_count, middle, end)
+
+
+def _mika_read_curve(curve, value):
+    """Un punto de la curva de sampling como float."""
+    try:
+        return float(curve(value))
+    except (TypeError, AttributeError, RuntimeError):
+        return float(curve(torch.tensor(value)))
+
+
+def _mika_tangent_sigmas(model_sampling, steps, denoise, start, middle, end,
+                         pivot_1, pivot_2, slope_1, slope_2):
+    """Sigmas del tangent leídas por la curva del modelo.
+
+    Devuelve `steps + 1` sigmas (la última en 0), o un tensor vacío si
+    `denoise <= 0` (nada que muestrear).
+    """
+    import comfy.model_sampling
+
+    if denoise <= 0.0:
+        return torch.FloatTensor([])
+    total = steps if denoise >= 1.0 else int(steps / denoise)
+    fractions = _mika_tangent_fractions(
+        total, start=start, middle=middle, end=end,
+        pivot_1=pivot_1, pivot_2=pivot_2, slope_1=slope_1, slope_2=slope_2)
+    sampling = model_sampling
+    if isinstance(sampling, comfy.model_sampling.CONST):
+        # Un modelo flow corre su tiempo de 0 a su timestep en sigma 1.
+        top = _mika_read_curve(sampling.timestep, 1.0)
+        sigmas = [_mika_read_curve(sampling.sigma, f * top) if f > 0 else 0.0
+                  for f in fractions]
+    else:
+        first = float(sampling.timestep(sampling.sigma_max))
+        last = float(sampling.timestep(sampling.sigma_min))
+        sigmas = [float(sampling.sigma(torch.tensor(last + f * (first - last))))
+                  for f in fractions]
+        if fractions[-1] <= 0:
+            sigmas[-1] = 0.0
+    return torch.FloatTensor(sigmas)[-(steps + 1):]
+
+
+class CustomSamplerTangentMika:
+    """Custom Sampler Tangent-Mika: el subgrafo "Custom Sampler Tangent"
+    como un solo nodo. Sampler + scheduler tangent afinado (con sus
+    ajustes avanzados plegables) + decode, con preview del latente como
+    el KSampler.
+
+    Entradas de conexión: model, positive, negative, latent_image, vae.
+    Salidas: image (IMAGE ya decodificada) y latent (LATENT).
+    """
+
+    CATEGORY = "Mika Utilidades/sampling"
+    FUNCTION = "sample"
+    RETURN_TYPES = ("IMAGE", "LATENT")
+    RETURN_NAMES = ("image", "latent")
+    DESCRIPTION = (
+        "Sampler con el scheduler tangent afinado (dos etapas) en un solo nodo: "
+        "genera el latente y lo decodifica. Los ajustes del tangent van plegados "
+        "en la barra de opciones avanzadas. Orden y preview del latente como el "
+        "KSampler."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        adv = {"advanced": True}
+        return {
+            "required": {
+                "model": ("MODEL", {"tooltip": "El modelo a muestrear."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
+                                 "control_after_generate": True,
+                                 "tooltip": "Semilla del ruido."}),
+                "steps": ("INT", {"default": 25, "min": 1, "max": 10000,
+                                  "tooltip": "Pasos de muestreo."}),
+                "cfg": ("FLOAT", {"default": 4.0, "min": 0.0, "max": 100.0, "step": 0.1,
+                                  "round": 0.01, "tooltip": "Escala de guidance (CFG)."}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,
+                                 {"default": "euler_ancestral",
+                                  "tooltip": "Algoritmo de muestreo."}),
+                "positive": ("CONDITIONING", {"tooltip": "Condicionamiento positivo."}),
+                "negative": ("CONDITIONING", {"tooltip": "Condicionamiento negativo."}),
+                "latent_image": ("LATENT", {"tooltip": "Latente a muestrear."}),
+                "vae": ("VAE", {"tooltip": "VAE para decodificar la imagen."}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                                      "tooltip": "Porción del schedule. 1 = desde ruido puro."}),
+                "add_noise": ("BOOLEAN", {"default": True,
+                                          "tooltip": "Agregar ruido antes de muestrear."}),
+                "start": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+                "middle": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+                "end": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+                "pivot_1": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+                "pivot_2": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+                "slope_1": ("FLOAT", {"default": 0.2, "min": 0.01, "max": 10.0, "step": 0.01, **adv}),
+                "slope_2": ("FLOAT", {"default": 0.5, "min": 0.01, "max": 10.0, "step": 0.01, **adv}),
+            }
+        }
+
+    def sample(self, model, seed, steps, cfg, sampler_name, positive, negative,
+               latent_image, vae, denoise=1.0, add_noise=True, start=1.0, middle=0.5,
+               end=0.0, pivot_1=0.6, pivot_2=0.6, slope_1=0.2, slope_2=0.2):
+        import latent_preview
+        import comfy.sample
+        import comfy.utils
+
+        latent = latent_image.copy()
+        samples_in = comfy.sample.fix_empty_latent_channels(
+            model, latent["samples"],
+            latent.get("downscale_ratio_spacial"), latent.get("downscale_ratio_temporal"))
+        latent["samples"] = samples_in
+
+        sigmas = _mika_tangent_sigmas(
+            model.get_model_object("model_sampling"), steps, denoise,
+            start, middle, end, pivot_1, pivot_2, slope_1, slope_2)
+
+        total_steps = int(sigmas.shape[-1]) - 1
+        if total_steps <= 0:
+            # denoise 0: no hay nada que muestrear, sale el latente tal cual.
+            denoised = samples_in
+        else:
+            if add_noise:
+                batch_inds = latent["batch_index"] if "batch_index" in latent else None
+                noise = comfy.sample.prepare_noise(samples_in, seed, batch_inds)
+            else:
+                noise = comfy.sample.prepare_empty_noise(samples_in)
+            noise_mask = latent.get("noise_mask")
+            sampler = comfy.samplers.sampler_object(sampler_name)
+            # Igual que el KSampler: preview del latente durante el muestreo.
+            callback = latent_preview.prepare_callback(model, total_steps)
+            disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+            denoised = comfy.sample.sample_custom(
+                model, noise, cfg, sampler, sigmas, positive, negative, samples_in,
+                noise_mask=noise_mask, callback=callback,
+                disable_pbar=disable_pbar, seed=seed)
+
+        out = latent.copy()
+        out.pop("downscale_ratio_spacial", None)
+        out.pop("downscale_ratio_temporal", None)
+        out["samples"] = denoised
+
+        image_latent = out["samples"]
+        if image_latent.is_nested:
+            image_latent = image_latent.unbind()[0]
+        images = vae.decode(image_latent)
+        if len(images.shape) == 5:  # combinar batch 5D
+            images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+        return (images, out)
 
 
 class SamplerSelectorMika:
@@ -4634,6 +5541,162 @@ class LoadImageNameMaskMika(LoadImageNameMika):
     copia la imagen al clipspace y abre el editor de máscaras nativo.
     Al guardar, el MaskEditor escribe el resultado en el widget "image".
     """
+
+
+def _mika_resolve_input_path(archivo):
+    """Resuelve el valor del widget de archivo (nombre simple, "foto.png
+    [input]" o ruta) a una ruta existente, o None (patrón de LoadImageNameMika)."""
+    name = archivo[0] if isinstance(archivo, (list, tuple)) and archivo else archivo
+    if not isinstance(name, str) or not name.strip():
+        return None
+    name = name.strip().strip('"').strip("'")
+
+    for resolve in (
+        lambda: folder_paths.get_annotated_filepath(name),
+        lambda: folder_paths.get_full_path("input", name),
+    ):
+        try:
+            path = resolve()
+            if path and os.path.isfile(path):
+                return path
+        except Exception:
+            pass
+
+    return _mika_resolve_local_path(name)
+
+
+def _mika_resolve_input_image(archivo):
+    """Igual que _mika_resolve_input_path pero devuelve una PIL, o None."""
+    path = _mika_resolve_input_path(archivo)
+    if not path:
+        return None
+    try:
+        return ImageOps.exif_transpose(Image.open(path))
+    except Exception:
+        return None
+
+
+class ImageRegionSelectMika:
+    """
+    Image Region Select-Mika: carga (o pega, o arrastra, o recibe cableadas) una o
+    varias imágenes y recorta varias zonas marcadas en el lienzo
+    (web/image_region_select_mika.js): rectángulo, círculo (elipse) o forma libre
+    (lazo). Cada zona recuerda su imagen (`img`); la lista de salida (tipo
+    MIKA_REGIONS) puede mezclar recortes de varias imágenes, a tamaño exacto; las
+    formas no rectangulares rellenan el resto con el color elegido.
+
+    Las imágenes van en el widget oculto "imagenes" (nombres de archivo; "wire"
+    para la entrada cableada) y las zonas en "zonas" (geometría normalizada 0..1).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                # STRING oculto (no un widget de subida): el de subida nativo
+                # agrega una vista previa duplicada dentro del nodo.
+                "archivo": ("STRING", {"default": "", "multiline": False}),
+                "relleno": (["transparente", "blanco", "negro"], {"default": "transparente"}),
+                "margen": ("INT", {"default": 0, "min": 0, "max": 256, "step": 1}),
+                "zonas": ("STRING", {"default": "[]", "multiline": True}),
+                "imagenes": ("STRING", {"default": "[]", "multiline": True}),
+            },
+            "optional": {
+                "imagen": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ("MIKA_REGIONS", "INT", "STRING")
+    RETURN_NAMES = ("regiones", "conteo", "nombres")
+    FUNCTION = "select"
+    CATEGORY = "Mika Utilidades/image"
+
+    @staticmethod
+    def _default_key(archivo, sources):
+        name = archivo[0] if isinstance(archivo, (list, tuple)) and archivo else archivo
+        if isinstance(name, str) and name.strip() and name in sources:
+            return name
+        return next(iter(sources), None)
+
+    def select(self, archivo="", relleno="transparente", margen=0, zonas="[]", imagenes="[]", imagen=None):
+        sources = _mika_resolve_sources(imagenes, archivo, imagen)
+        if not sources:
+            return ([], 0, "")
+
+        default_key = "wire" if "wire" in sources else self._default_key(archivo, sources)
+        crops = _mika_build_region_crops_multi(sources, zonas, relleno, margen, default_key)
+        names = _mika_valid_zone_names_multi(sources, zonas, margen, default_key)
+        return (crops, len(crops), ", ".join(names))
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        return True
+
+    @classmethod
+    def IS_CHANGED(cls, archivo="", relleno="transparente", margen=0, zonas="[]", imagenes="[]", imagen=None, **kwargs):
+        if imagen is not None:
+            return float("NaN")
+
+        names = []
+        if isinstance(imagenes, str):
+            try:
+                names = [n for n in json.loads(imagenes) if isinstance(n, str)]
+            except Exception:
+                names = []
+        elif isinstance(imagenes, list):
+            names = [n for n in imagenes if isinstance(n, str)]
+
+        archivo_name = archivo[0] if isinstance(archivo, (list, tuple)) and archivo else archivo
+        if isinstance(archivo_name, str) and archivo_name.strip() and archivo_name not in names:
+            names.append(archivo_name)
+
+        # Hash de CADA imagen (no solo `archivo`): cambiar un archivo de la
+        # galería en disco invalida la caché.
+        hashes = tuple((n, _mika_hash_file(_mika_resolve_input_path(n) or "")) for n in names)
+        return (hashes, str(zonas), str(imagenes), str(relleno), int(margen))
+
+
+class RegionUnpackMika:
+    """
+    Region Unpack-Mika: parte la lista MIKA_REGIONS del selector en N salidas
+    IMAGE sueltas (imagen_1 ... imagen_N), cada una a su tamaño exacto, para
+    conectar cada zona a otro nodo (p. ej. las entradas del SnapRef).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "regiones": ("MIKA_REGIONS", {"forceInput": True}),
+                "salidas": ("INT", {"default": 3, "min": 1, "max": MAX_UNPACK_SLOTS,
+                                    "step": 1, "display": "number"}),
+            }
+        }
+
+    RETURN_TYPES = tuple(["IMAGE"] * MAX_UNPACK_SLOTS)
+    RETURN_NAMES = tuple(f"imagen_{i}" for i in range(1, MAX_UNPACK_SLOTS + 1))
+    FUNCTION = "unpack"
+    CATEGORY = "Mika Utilidades/image"
+
+    def unpack(self, regiones, salidas=3):
+        try:
+            count = int(salidas)
+        except Exception:
+            count = 3
+        count = max(1, min(MAX_UNPACK_SLOTS, count))
+
+        items = list(regiones) if isinstance(regiones, (list, tuple)) else []
+
+        # Dentro de `salidas`: la zona si existe, si no una imagen negra 64x64
+        # ("vacío" que no rompe el grafo al conectarlo). Fuera de `salidas`: None.
+        def slot(i):
+            if i >= count:
+                return None
+            if i < len(items):
+                return items[i]
+            return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+
+        return tuple(slot(i) for i in range(MAX_UNPACK_SLOTS))
 
 
 class IfAnyMika:
@@ -8109,6 +9172,7 @@ NODE_CLASS_MAPPINGS = {
     "AnimaResolutionsMika": AnimaResolutionsMika,
     "SamplerSelectorMika": SamplerSelectorMika,
     "SchedulerSelectorMika": SchedulerSelectorMika,
+    "CustomSamplerTangentMika": CustomSamplerTangentMika,
     "ImageSaveAutoMika": ImageSaveAutoMika,
     "IndexIntMika": IndexIntMika,
     "IndexStepperMika": IndexStepperMika,
@@ -8142,6 +9206,9 @@ NODE_CLASS_MAPPINGS = {
     "ImageSaverLocalMika": ImageSaverLocalMika,
     "ImageSaverPcMika": ImageSaverPcMika,
     "AnimaLineartCanvasMika": AnimaLineartCanvasMika,
+    "AnimaInpaintCanvasMika": AnimaInpaintCanvasMika,
+    "ImageRegionSelectMika": ImageRegionSelectMika,
+    "RegionUnpackMika": RegionUnpackMika,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -8188,6 +9255,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaResolutionsMika": "Anima Resolutions-Mika",
     "SamplerSelectorMika": "Sampler Selector-Mika",
     "SchedulerSelectorMika": "Scheduler Selector-Mika",
+    "CustomSamplerTangentMika": "Custom Sampler Tangent-Mika",
     "ImageSaveAutoMika": "Image Save Auto-Mika",
     "IndexIntMika": "Index Int-Mika",
     "IndexStepperMika": "Index Stepper-Mika",
@@ -8221,4 +9289,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageSaverLocalMika": "Image Saver Local-Mika",
     "ImageSaverPcMika": "Image Saver PC-Mika",
     "AnimaLineartCanvasMika": "Anima Lineart Canvas-Mika",
+    "AnimaInpaintCanvasMika": "Anima Inpaint Canvas-Mika",
+    "ImageRegionSelectMika": "Image Region Select-Mika",
+    "RegionUnpackMika": "Region Unpack-Mika",
 }

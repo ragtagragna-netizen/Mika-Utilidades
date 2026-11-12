@@ -11,10 +11,16 @@ venv/
 # Listas de presets personales (se crean solas en runtime; no se publican)
 presets/
 
+# Workflows de ejemplo: se quedan locales (traen prompts y recetas propias)
+workflows/
+
 # Notas de diseño y tests: se quedan en la carpeta local pero no se publican
 # ni se sincronizan al actualizar con el Manager.
 docs/
 tests/
+
+# Workspace de ejecución de planes (scratch, no se publica)
+.superpowers/
 
 # Basura del sistema
 .DS_Store

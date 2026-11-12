@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 
 // -----------------------------------------------------------------------
 // Mika · Anima Lineart Canvas
@@ -28,6 +29,11 @@ const CALCO_CACHE = new Map();
 const calcoKey = (node) => `${node.graph?.id ?? app.graph?.id ?? "g"}:${node.id}`;
 
 const RES_RE = /(\d+)\s*x\s*(\d+)/;
+
+// Ancho del lienzo: todo el ancho del nodo, salvo en proporciones verticales,
+// donde se angosta para que su ALTO no supere el ancho del nodo (cuadrado).
+// Así cambiar de resolución cambia el área de dibujo, no el largo del nodo.
+const stageWidthFor = (cw, ch) => (cw >= ch ? "100%" : `calc(100% * ${cw / ch})`);
 const LIN = "lineart";
 const NORMAL = "dibujo normal";
 const ERASE_PREVIEW = "rgba(255, 0, 170, 0.55)"; // color que marca la zona a borrar
@@ -47,6 +53,24 @@ const CURSOR_ROTATE = cursorUrl(
 	'<path d="M16 10a6 6 0 1 1-1.8-4.3" stroke="#fff" stroke-width="1.2" fill="none"/>' +
 	'<path d="M14.9 3.4l1.9.4-.3 1.9z" fill="#fff"/>',
 ) + ", grab";
+
+// Ícono de pincel del botón del "pincel difuminado": usa currentColor para
+// adaptarse al tema y lleva un par de motas junto a la punta (el difuminado).
+const SOFT_BRUSH_ICON =
+	'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">' +
+	'<path d="M4.4 19.6 12 12" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>' +
+	'<path d="M12 12 14.6 9.4" fill="none" stroke="currentColor" stroke-width="4.6" stroke-linecap="round"/>' +
+	'<path d="M13.6 7.9c2.1-2.1 5.2-4.5 7.9-5.3-.9 2.9-3.1 6.1-5.1 7.9z" fill="currentColor"/>' +
+	'<circle cx="22.3" cy="3.4" r="0.9" fill="currentColor" opacity="0.5"/>' +
+	'<circle cx="20.5" cy="1.7" r="0.7" fill="currentColor" opacity="0.35"/>' +
+	"</svg>";
+
+// Ajustes de la barra que viajan dentro del workflow (widget oculto "pincel"):
+// herramienta, grosores, difuminado, grano, figura, fuente y color de trazo.
+const PINCEL_KEYS = [
+	"tool", "thickness", "eraseThickness", "softThickness", "softBlur", "softGrain",
+	"maskThickness", "calcoOpacity", "shape", "font", "fontSize", "userColor",
+];
 
 // Figuras del Paint ([id, etiqueta]).
 const SHAPES = [
@@ -269,7 +293,11 @@ app.registerExtension({
 	name: "Mika.AnimaLineartCanvas",
 
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
-		if (nodeData.name !== "AnimaLineartCanvasMika") return;
+		const INPAINT = "AnimaInpaintCanvasMika";
+		if (nodeData.name !== "AnimaLineartCanvasMika" && nodeData.name !== INPAINT) return;
+		// El mismo lienzo sirve a los dos nodos; el de inpaint suma la imagen
+		// de fondo, la mascara y sus salidas.
+		const isInpaint = nodeData.name === INPAINT;
 
 		const findWidget = (node, name) =>
 			node.widgets?.find((w) => String(w?.name ?? "") === name);
@@ -284,6 +312,21 @@ app.registerExtension({
 			if (!w) return;
 			w.value = name || "";
 			w.callback?.(w.value);
+		}
+
+		// Ajustes de la barra guardados dentro del workflow: van en
+		// node.properties (viaja en el archivo y lo restaura LiteGraph al cargar).
+		function readPincelState(node) {
+			const s = node.properties?.mikaPincel;
+			return s && typeof s === "object" ? s : null;
+		}
+
+		function writePincelState(node) {
+			const st = node._mikaLineart;
+			if (!st || !node.properties) return;
+			const state = {};
+			for (const k of PINCEL_KEYS) state[k] = st[k];
+			node.properties.mikaPincel = state;
 		}
 
 		const modo = (node) =>
@@ -305,6 +348,21 @@ app.registerExtension({
 			if (!w) return;
 			w.value = value;
 			w.callback?.(value);
+		}
+
+		// Imagen fuente del nodo de inpaint (fondo del modo + imagen de entrada),
+		// igual que su salida "image".
+		function composeBase(node) {
+			const st = node._mikaLineart;
+			const [w, h] = parseRes(resolucionWidget(node)?.value);
+			const tmp = document.createElement("canvas");
+			tmp.width = w;
+			tmp.height = h;
+			const ctx = tmp.getContext("2d");
+			ctx.fillStyle = modeBg(node);
+			ctx.fillRect(0, 0, w, h);
+			if (st.baseCanvas) ctx.drawImage(st.baseCanvas, 0, 0);
+			return tmp;
 		}
 
 		// Imagen final (fondo del modo + trazos), igual que la salida del nodo.
@@ -369,7 +427,16 @@ app.registerExtension({
 			img.src = "data:image/png;base64," + val;
 		}
 
-		function restore(node, dataUrl) {
+		// Estado deshacible: el trazo y (en el nodo de inpaint) la máscara.
+		function snapshot(node) {
+			const st = node._mikaLineart;
+			return {
+				paint: st.paint.toDataURL("image/png"),
+				mask: st.maskCanvas ? st.maskCanvas.toDataURL("image/png") : null,
+			};
+		}
+
+		function restore(node, snap) {
 			const st = node._mikaLineart;
 			const ctx = paintCtx(node);
 			const img = new Image();
@@ -381,12 +448,30 @@ app.registerExtension({
 				renderPreview(node);
 				write(node);
 			};
-			img.src = dataUrl;
+			img.src = snap.paint;
+			if (!st.maskCanvas) return;
+			const mctx = st.maskCanvas.getContext("2d");
+			mctx.setTransform(1, 0, 0, 1, 0, 0);
+			mctx.globalCompositeOperation = "source-over";
+			mctx.clearRect(0, 0, st.maskCanvas.width, st.maskCanvas.height);
+			if (!snap.mask) {
+				redrawMask(node);
+				writeMask(node);
+				return;
+			}
+			const mimg = new Image();
+			mimg.onload = () => {
+				mctx.clearRect(0, 0, st.maskCanvas.width, st.maskCanvas.height);
+				mctx.drawImage(mimg, 0, 0);
+				redrawMask(node);
+				writeMask(node);
+			};
+			mimg.src = snap.mask;
 		}
 
 		function pushUndo(node) {
 			const st = node._mikaLineart;
-			st.undo.push(st.paint.toDataURL("image/png"));
+			st.undo.push(snapshot(node));
 			if (st.undo.length > MAX_UNDO) st.undo.shift();
 			st.redo.length = 0;
 		}
@@ -406,6 +491,100 @@ app.registerExtension({
 			renderPreview(node);
 			st.dirty = false;
 			setWidget(node, "");
+		}
+
+		// --- Imagen de entrada (solo inpaint) ---
+		// El frontend no puede leer tensores, así que sacamos la imagen ya
+		// ejecutada del nodo aguas arriba (app.nodeOutputs / node.imgs), igual
+		// que hacen otros canvas. El nodo Python la compone en "image".
+		function upstreamImage(node) {
+			const slot = node.inputs?.findIndex((i) => i.name === "imagen") ?? -1;
+			if (slot < 0) return null;
+			const inp = node.inputs[slot];
+			if (inp.link == null) return null;
+			const up = (app.graph?._nodes || []).find(
+				(n) => (n.outputs || []).some((o) => (o.links || []).includes(inp.link)),
+			);
+			if (!up) return null;
+			const entry = app.nodeOutputs?.[up.id]?.images?.[0];
+			if (entry?.filename) {
+				const sub = entry.subfolder ? `&subfolder=${encodeURIComponent(entry.subfolder)}` : "";
+				const typ = entry.type ? `&type=${encodeURIComponent(entry.type)}` : "";
+				return {
+					key: `${entry.filename}|${entry.subfolder || ""}|${entry.type || ""}`,
+					url: `/api/view?filename=${encodeURIComponent(entry.filename)}${sub}${typ}`,
+				};
+			}
+			const src = up.imgs?.[0]?.src;
+			if (src) return { key: String(src).replace(/([?&])(rand|t)=[^&]*/g, "$1"), url: src };
+			return null;
+		}
+
+		// Rectángulo donde cae la imagen de entrada (contain, centrada): el
+		// mismo encaje que hace el nodo Python en "image".
+		function baseRectOf(st) {
+			if (!st?.baseCanvas || !st.baseImg) return null;
+			const s = Math.min(st.baseCanvas.width / st.baseImg.width, st.baseCanvas.height / st.baseImg.height);
+			const w = st.baseImg.width * s;
+			const h = st.baseImg.height * s;
+			return { x: (st.baseCanvas.width - w) / 2, y: (st.baseCanvas.height - h) / 2, w, h };
+		}
+
+		function copyCanvas(src) {
+			const c = document.createElement("canvas");
+			c.width = src.width;
+			c.height = src.height;
+			c.getContext("2d").drawImage(src, 0, 0);
+			return c;
+		}
+
+		function drawMapped(canvas, shot, f, dx, dy) {
+			const ctx = canvas.getContext("2d");
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.clearRect(0, 0, canvas.width, canvas.height);
+			ctx.setTransform(f, 0, 0, f, dx, dy);
+			ctx.drawImage(shot, 0, 0);
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+		}
+
+		// Fondo del lienzo: la imagen de entrada encajada "contain" y centrada.
+		function drawBase(node) {
+			const st = node._mikaLineart;
+			if (!st?.baseCanvas) return;
+			const ctx = st.baseCanvas.getContext("2d");
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.clearRect(0, 0, st.baseCanvas.width, st.baseCanvas.height);
+			const r = baseRectOf(st);
+			if (r) ctx.drawImage(st.baseImg, r.x, r.y, r.w, r.h);
+			const lctx = st.baseLayer.getContext("2d");
+			lctx.setTransform(1, 0, 0, 1, 0, 0);
+			lctx.clearRect(0, 0, st.baseLayer.width, st.baseLayer.height);
+			lctx.drawImage(st.baseCanvas, 0, 0);
+		}
+
+		function loadBaseFromInput(node) {
+			const st = node._mikaLineart;
+			if (!st?.baseCanvas) return;
+			const found = upstreamImage(node);
+			if (!found) {
+				if (st.baseSrc !== null) {
+					st.baseSrc = null;
+					st.baseImg = null;
+					drawBase(node);
+				}
+				return;
+			}
+			if (found.key === st.baseSrc) return;
+			const img = new Image();
+			img.onload = () => {
+				if (node._mikaLineart !== st) return;
+				st.baseSrc = found.key;
+				st.baseImg = img;
+				st.contentSize = { w: img.width, h: img.height };
+				drawBase(node);
+			};
+			img.onerror = () => { /* sin imagen usable: se ignora */ };
+			img.src = found.url;
 		}
 
 		// Dibuja el calco con su transformación (centro, escala, rotación).
@@ -497,10 +676,15 @@ app.registerExtension({
 			if (!st || (st.paint.width === nw && st.paint.height === nh)) return;
 			st.sel = null;
 			st.lasso = null;
+			st.softPts = null;
 			const shot = document.createElement("canvas");
 			shot.width = st.paint.width;
 			shot.height = st.paint.height;
 			if (st.paint.width && st.paint.height) shot.getContext("2d").drawImage(st.preview, 0, 0);
+			// La máscara acompaña a la imagen de entrada (si hay) o al lienzo, así
+			// queda alineada con lo que compone el nodo Python.
+			const maskShot = st.maskCanvas ? copyCanvas(st.maskCanvas) : null;
+			const baseRectBefore = baseRectOf(st);
 			// La caja a reencajar es la unión del trazo, el calco base y las
 			// capas, para que nada quede recortado.
 			let bounds = boundsOf(shot);
@@ -515,33 +699,65 @@ app.registerExtension({
 			st.underlay.height = nh;
 			st.calcoLayersCanvas.width = nw;
 			st.calcoLayersCanvas.height = nh;
+			if (st.baseCanvas) { st.baseCanvas.width = nw; st.baseCanvas.height = nh; }
+			if (st.maskCanvas) { st.maskCanvas.width = nw; st.maskCanvas.height = nh; }
+			st.softScratch.width = nw;
+			st.softScratch.height = nh;
 			st.overlay.width = nw;
 			st.overlay.height = nh;
 			st.handles.width = nw;
 			st.handles.height = nh;
 			st.stage.style.aspectRatio = `${nw} / ${nh}`;
+			st.stage.style.width = stageWidthFor(nw, nh);
+
+			// Un solo mapeo para todo: con imagen de entrada se sigue el paso del
+			// rectángulo de la imagen (viejo -> nuevo), así el trazo, la máscara
+			// y la base quedan alineados; sin imagen, el "contain" por caja.
+			const after = baseRectBefore ? baseRectOf(st) : null;
+			let f = 0;
+			let dx = 0;
+			let dy = 0;
+			let crop = null;
+			if (after) {
+				f = after.w / baseRectBefore.w;
+				dx = after.x - baseRectBefore.x * f;
+				dy = after.y - baseRectBefore.y * f;
+			} else if (bounds && bounds.w > 0 && bounds.h > 0) {
+				f = Math.min(nw / bounds.w, nh / bounds.h);
+				const destW = bounds.w * f;
+				const destH = bounds.h * f;
+				dx = (nw - destW) / 2 - bounds.x * f;
+				dy = (nh - destH) / 2 - bounds.y * f;
+				crop = { x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, destW, destH };
+			}
 
 			const ctx = paintCtx(node);
 			ctx.setTransform(1, 0, 0, 1, 0, 0);
 			ctx.globalCompositeOperation = "source-over";
 			ctx.clearRect(0, 0, nw, nh);
-			if (bounds && bounds.w > 0 && bounds.h > 0) {
-				const f = Math.min(nw / bounds.w, nh / bounds.h);
-				const destW = bounds.w * f;
-				const destH = bounds.h * f;
-				const dx = (nw - destW) / 2 - bounds.x * f;
-				const dy = (nh - destH) / 2 - bounds.y * f;
-				ctx.drawImage(shot, bounds.x, bounds.y, bounds.w, bounds.h, (nw - destW) / 2, (nh - destH) / 2, destW, destH);
-				st.paintTransform = null;
-				if (st.underlayTransform) {
-					const t = st.underlayTransform;
-					st.underlayTransform = { cx: dx + f * t.cx, cy: dy + f * t.cy, sx: t.sx * f, sy: t.sy * f, rot: t.rot };
+			if (f > 0) {
+				if (crop) {
+					ctx.drawImage(shot, crop.x, crop.y, crop.w, crop.h, (nw - crop.destW) / 2, (nh - crop.destH) / 2, crop.destW, crop.destH);
+				} else {
+					ctx.setTransform(f, 0, 0, f, dx, dy);
+					ctx.drawImage(shot, 0, 0);
+					ctx.setTransform(1, 0, 0, 1, 0, 0);
 				}
+				st.paintTransform = null;
 				const mapTf = (t) => ({ cx: dx + f * t.cx, cy: dy + f * t.cy, sx: t.sx * f, sy: t.sy * f, rot: t.rot });
+				if (st.underlayTransform) st.underlayTransform = mapTf(st.underlayTransform);
 				for (const l of st.calcoLayers) {
 					l.tf = mapTf(l.tf);
 					l.tf0 = mapTf(l.tf0);
 				}
+			}
+			// La base se redibuja "contain" en el tamaño nuevo y la máscara usa
+			// el mismo mapeo que el trazo.
+			drawBase(node);
+			if (maskShot) {
+				if (f > 0) drawMapped(st.maskCanvas, maskShot, f, dx, dy);
+				redrawMask(node);
+				writeMask(node);
 			}
 			drawUnderlay(node);
 			renderPreview(node);
@@ -586,6 +802,16 @@ app.registerExtension({
 			b.style.color = "var(--input-text, #eee)";
 			b.style.cursor = "pointer";
 			b.style.fontSize = "12px";
+			return b;
+		}
+
+		// Botón con un ícono SVG en lugar de texto.
+		function mkIconButton(icon, title) {
+			const b = mkButton("", title);
+			b.innerHTML = icon;
+			b.style.display = "inline-flex";
+			b.style.alignItems = "center";
+			b.style.justifyContent = "center";
 			return b;
 		}
 
@@ -869,10 +1095,14 @@ app.registerExtension({
 		// agrega como capa del CALCO (referencia tenue), no en la capa editable.
 		function handleDroppedData(node, dt) {
 			if (!dt) return false;
+			// En el nodo de inpaint lo que se arrastra es la imagen a editar (capa
+			// de trazo); en el de lineart, una referencia de calco.
+			const dropImage = (img, name) =>
+				(isInpaint ? loadContent(node, img, name) : addCalcoLayer(node, img, name));
 			const files = Array.from(dt.files || []);
 			const file = files.find((f) => (f.type || "").startsWith("image/")) || files[0];
 			if (file) {
-				withImageFile(file, (img, name) => addCalcoLayer(node, img, name));
+				withImageFile(file, dropImage);
 				return true;
 			}
 			const uri = firstUri(dt.getData ? dt.getData("text/uri-list") : "") ||
@@ -882,7 +1112,7 @@ app.registerExtension({
 				try { target = new URL(uri, location.href); } catch (e) { /* no-op */ }
 				// Solo mismo origen (arrastres desde el propio ComfyUI).
 				if (target && target.origin === location.origin) {
-					withImageUrl(target.href, (img, name) => addCalcoLayer(node, img, name));
+					withImageUrl(target.href, dropImage);
 					return true;
 				}
 			}
@@ -955,7 +1185,10 @@ app.registerExtension({
 		// --- Cursor circular con el tamaño de la herramienta activa ---
 		function toolSize(node) {
 			const st = node._mikaLineart;
-			return st.tool === "eraser" ? st.eraseThickness : st.thickness;
+			if (st.tool === "maskBrush" || st.tool === "maskErase") return st.maskThickness;
+			if (st.tool === "eraser") return st.eraseThickness;
+			if (st.tool === "soft") return st.softThickness;
+			return st.thickness;
 		}
 
 		function placeCursor(node, clientX, clientY) {
@@ -1204,6 +1437,99 @@ app.registerExtension({
 			persistCalcoCache(node);
 		}
 
+		// --- Máscara de inpaint (solo en el nodo de inpaint) ---
+		// Se pinta rojo opaco sobre transparente; el canal alfa ES la máscara
+		// (1 = zona a regenerar). El nodo Python la lee del widget "mascara".
+
+		function setMascaraWidget(node, value) {
+			const w = node.widgets?.find((x) => x.name === "mascara");
+			if (!w) return;
+			w.value = value;
+			w.callback?.(value);
+		}
+
+		function maskHasContent(node) {
+			const st = node._mikaLineart;
+			if (!st?.maskCanvas) return false;
+			const c = st.maskCanvas;
+			const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+			for (let i = 3; i < d.length; i += 4) if (d[i] > 8) return true;
+			return false;
+		}
+
+		// Capa visible: solo muestra la máscara, y se oculta si está vacía.
+		// `show` evita el barrido de píxeles mientras se dibuja (caro a 1024²).
+		function redrawMask(node, show = null) {
+			const st = node._mikaLineart;
+			if (!st?.maskCanvas || !st.maskLayer) return;
+			const ctx = st.maskLayer.getContext("2d");
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.clearRect(0, 0, st.maskLayer.width, st.maskLayer.height);
+			ctx.drawImage(st.maskCanvas, 0, 0);
+			const visible = show === null ? maskHasContent(node) : show;
+			st.maskLayer.style.display = visible ? "" : "none";
+		}
+
+		function writeMask(node) {
+			const st = node._mikaLineart;
+			if (!st?.maskCanvas) return;
+			setMascaraWidget(node, maskHasContent(node) ? st.maskCanvas.toDataURL("image/png").split(",")[1] : "");
+		}
+
+		function loadMask(node) {
+			const st = node._mikaLineart;
+			if (!st?.maskCanvas) return;
+			const ctx = st.maskCanvas.getContext("2d");
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.globalCompositeOperation = "source-over";
+			ctx.clearRect(0, 0, st.maskCanvas.width, st.maskCanvas.height);
+			const val = node.widgets?.find((x) => x.name === "mascara")?.value;
+			if (!(typeof val === "string" && val)) {
+				redrawMask(node);
+				return;
+			}
+			const img = new Image();
+			img.onload = () => {
+				ctx.clearRect(0, 0, st.maskCanvas.width, st.maskCanvas.height);
+				ctx.drawImage(img, 0, 0);
+				redrawMask(node);
+			};
+			img.src = "data:image/png;base64," + val;
+		}
+
+		function clearMask(node) {
+			const st = node._mikaLineart;
+			if (!st?.maskCanvas) return;
+			pushUndo(node);
+			const ctx = st.maskCanvas.getContext("2d");
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.globalCompositeOperation = "source-over";
+			ctx.clearRect(0, 0, st.maskCanvas.width, st.maskCanvas.height);
+			redrawMask(node);
+			writeMask(node);
+		}
+
+		// Invierte: lo pintado queda transparente y el resto rojo opaco.
+		function invertMask(node) {
+			const st = node._mikaLineart;
+			if (!st?.maskCanvas) return;
+			pushUndo(node);
+			const old = document.createElement("canvas");
+			old.width = st.maskCanvas.width;
+			old.height = st.maskCanvas.height;
+			old.getContext("2d").drawImage(st.maskCanvas, 0, 0);
+			const ctx = st.maskCanvas.getContext("2d");
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.globalCompositeOperation = "source-over";
+			ctx.fillStyle = "#ff3b3b";
+			ctx.fillRect(0, 0, st.maskCanvas.width, st.maskCanvas.height);
+			ctx.globalCompositeOperation = "destination-out";
+			ctx.drawImage(old, 0, 0);
+			ctx.globalCompositeOperation = "source-over";
+			redrawMask(node);
+			writeMask(node);
+		}
+
 		// --- Proyecto (importar/exportar) y guardado de imágenes ---
 
 		// Nombre base para los archivos exportados (del último archivo cargado).
@@ -1261,11 +1587,16 @@ app.registerExtension({
 			return out;
 		}
 
-		// Guarda el trazo (igual que la salida "image") o el calco como PNG.
+		// Guarda una de las salidas como PNG: la imagen fuente del nodo de inpaint
+		// (fondo + foto), el trazo, la máscara o el calco.
 		function saveImage(node, which) {
 			const st = node._mikaLineart;
 			if (!st) return;
-			const canvas = which === "calco" ? composeCalco(node) : composeOutput(node);
+			let canvas;
+			if (which === "calco") canvas = composeCalco(node);
+			else if (which === "mascara") canvas = st.maskCanvas;
+			else if (which === "imagen") canvas = composeBase(node);
+			else canvas = composeOutput(node);
 			downloadUrl(canvas.toDataURL("image/png"), `${exportBaseName(node)}_${which}.png`);
 		}
 
@@ -1289,6 +1620,8 @@ app.registerExtension({
 					})),
 				},
 			};
+			// La máscara solo existe en el nodo de inpaint.
+			if (st.maskCanvas) project.mascara = st.maskCanvas.toDataURL("image/png").split(",")[1];
 			const url = URL.createObjectURL(new Blob([JSON.stringify(project)], { type: "application/json" }));
 			downloadUrl(url, `${exportBaseName(node)}.mika.json`);
 			setTimeout(() => URL.revokeObjectURL(url), 10000);
@@ -1315,6 +1648,7 @@ app.registerExtension({
 				// incompleto no deja el nodo a medio importar.
 				const trazo = project.trazo ? await imageFromBase64(project.trazo) : null;
 				const base = project.calco?.base?.img ? await imageFromBase64(project.calco.base.img) : null;
+				const mascara = (project.mascara && st.maskCanvas) ? await imageFromBase64(project.mascara) : null;
 				const capas = [];
 				for (const c of (project.calco?.capas || [])) capas.push({ c, img: await imageFromBase64(c.img) });
 
@@ -1358,6 +1692,15 @@ app.registerExtension({
 				drawTransformUI(node);
 				renderLayerPanel(node);
 				writeCalco(node);
+				if (st.maskCanvas) {
+					const mctx = st.maskCanvas.getContext("2d");
+					mctx.setTransform(1, 0, 0, 1, 0, 0);
+					mctx.globalCompositeOperation = "source-over";
+					mctx.clearRect(0, 0, st.maskCanvas.width, st.maskCanvas.height);
+					if (mascara) mctx.drawImage(mascara, 0, 0);
+					redrawMask(node);
+					writeMask(node);
+				}
 				st.refit?.();
 			} catch (e) {
 				alert("No se pudo importar el proyecto: " + ((e && e.message) || e));
@@ -2176,6 +2519,11 @@ app.registerExtension({
 			if (aw) aw.hidden = true;
 			const cw = node.widgets?.find((w) => w.name === "calco");
 			if (cw) { cw.hidden = true; cw.serialize = false; }
+			// La máscara es del nodo de inpaint y va oculta (pero se serializa).
+			const mw = node.widgets?.find((w) => w.name === "mascara");
+			if (mw) mw.hidden = true;
+			const ppw = node.widgets?.find((w) => w.name === "preprocesador");
+			if (ppw) ppw.hidden = true;
 
 			const prev = node._mikaDomWidget;
 			if (prev) {
@@ -2207,13 +2555,33 @@ app.registerExtension({
 
 			const stage = document.createElement("div");
 			stage.style.position = "relative";
-			stage.style.width = "100%";
+			stage.style.width = stageWidthFor(rw, rh);
+			stage.style.margin = "0 auto";
 			stage.style.aspectRatio = `${rw} / ${rh}`;
 			stage.style.background = modeBg(node);
 			stage.style.border = "1px solid var(--border-color, #444)";
 			stage.style.borderRadius = "3px";
 			stage.style.overflow = "hidden";
 			stage.style.touchAction = "none";
+
+			// Fondo con la imagen de entrada (solo inpaint): la compone el nodo
+			// Python en "image"; acá se muestra para poder dibujar encima.
+			let baseCanvas = null;
+			let baseLayer = null;
+			if (isInpaint) {
+				baseCanvas = document.createElement("canvas");
+				baseCanvas.width = rw;
+				baseCanvas.height = rh;
+				baseCanvas.style.display = "none";
+				baseLayer = document.createElement("canvas");
+				baseLayer.width = rw;
+				baseLayer.height = rh;
+				baseLayer.style.position = "absolute";
+				baseLayer.style.inset = "0";
+				baseLayer.style.width = "100%";
+				baseLayer.style.height = "100%";
+				baseLayer.style.pointerEvents = "none";
+			}
 
 			const underlay = document.createElement("canvas");
 			underlay.width = rw;
@@ -2237,6 +2605,27 @@ app.registerExtension({
 			calcoLayersCanvas.style.opacity = "0.4";
 			calcoLayersCanvas.style.pointerEvents = "none";
 
+			// Máscara de inpaint (solo inpaint): rojo opaco sobre transparente,
+			// por encima del trazo para ver qué se está marcando.
+			let maskCanvas = null;
+			let maskLayer = null;
+			if (isInpaint) {
+				maskCanvas = document.createElement("canvas");
+				maskCanvas.width = rw;
+				maskCanvas.height = rh;
+				maskCanvas.style.display = "none";
+				maskLayer = document.createElement("canvas");
+				maskLayer.width = rw;
+				maskLayer.height = rh;
+				maskLayer.style.position = "absolute";
+				maskLayer.style.inset = "0";
+				maskLayer.style.width = "100%";
+				maskLayer.style.height = "100%";
+				maskLayer.style.opacity = "0.45";
+				maskLayer.style.pointerEvents = "none";
+				maskLayer.style.display = "none";
+			}
+
 			// Fuente (offscreen) del contenido editable: imagen + trazos, en
 			// coordenadas de lienzo. Se muestra a través de "preview", que le
 			// aplica la transformación de la capa (paintTransform).
@@ -2244,6 +2633,13 @@ app.registerExtension({
 			paint.width = rw;
 			paint.height = rh;
 			paint.style.display = "none";
+
+			// Lienzo de trabajo del pincel difuminado: ahí se arma el trazo
+			// (desenfoque + grano) y recién al soltar se hornea en "paint".
+			const softScratch = document.createElement("canvas");
+			softScratch.width = rw;
+			softScratch.height = rh;
+			softScratch.style.display = "none";
 
 			// Capa visible del contenido editable (render de paint con su
 			// transformación) y superficie que recibe el dibujo.
@@ -2291,9 +2687,11 @@ app.registerExtension({
 			brushCursor.style.display = "none";
 			brushCursor.style.zIndex = "5";
 
+			if (baseLayer) stage.appendChild(baseLayer);
 			stage.appendChild(underlay);
 			stage.appendChild(calcoLayersCanvas);
 			stage.appendChild(preview);
+			if (maskLayer) stage.appendChild(maskLayer);
 			stage.appendChild(overlay);
 			stage.appendChild(handles);
 			stage.appendChild(brushCursor);
@@ -2310,9 +2708,14 @@ app.registerExtension({
 
 			node._mikaLineart = {
 				stage, paint, preview, underlay, calcoLayersCanvas, overlay, handles, brushCursor, underlayImg: null,
+				baseCanvas, baseLayer, baseImg: null, baseSrc: null,
+				maskCanvas, maskLayer, maskThickness: 30,
 				calcoLayers: [], selection: [], layerSeq: 0, calcoNameSeq: 0, layerPanel,
 				undo: [], redo: [],
-				tool: "brush", shape: "rect", font: "Arial", fontSize: 48, text: "", thickness: 1, eraseThickness: 40,
+				// El pincel difuminado es la herramienta por defecto.
+				tool: "soft", shape: "rect", font: "Arial", fontSize: 48, text: "", thickness: 1, eraseThickness: 40,
+				softScratch, softThickness: 2, softBlur: 1, softGrain: 80, softPts: null, grainTile: null, grainRand: null, _grainFor: null, _grainPat: null,
+				calcoOpacity: 40,
 				userColor: "#000",
 				color: modeStroke(node), dirty: false, erasePoints: null,
 				cursorPos: null,
@@ -2323,8 +2726,15 @@ app.registerExtension({
 			};
 			const st = node._mikaLineart;
 
+			// Estado guardado en el workflow (widget oculto "pincel"). Lo de la
+			// sesión (prevState) se aplica después y pisa esto si existe.
+			const savedState = readPincelState(node);
+			if (savedState) {
+				for (const k of PINCEL_KEYS) if (savedState[k] !== undefined) st[k] = savedState[k];
+			}
+
 			if (prevState) {
-				for (const k of ["underlayImg", "underlayTransform", "transformMode", "freeResize", "tool", "shape", "font", "fontSize", "thickness", "eraseThickness", "userColor", "contentSize", "calcoLayers", "selection", "layerSeq", "calcoNameSeq"]) {
+				for (const k of ["underlayImg", "underlayTransform", "transformMode", "freeResize", "tool", "shape", "font", "fontSize", "thickness", "eraseThickness", "softThickness", "softBlur", "softGrain", "calcoOpacity", "userColor", "contentSize", "calcoLayers", "selection", "layerSeq", "calcoNameSeq", "baseImg", "baseSrc", "maskThickness"]) {
 					if (prevState[k] !== undefined) st[k] = prevState[k];
 				}
 				const ow = prevState.paint?.width;
@@ -2364,31 +2774,45 @@ app.registerExtension({
 			// --- Herramientas: pincel / borrador / forma / texto ---
 			const brushBtn = mkButton("✏️", "Pincel");
 			const eraserBtn = mkButton("🧽", "Borrador");
+			const softBtn = mkIconButton(SOFT_BRUSH_ICON, "Pincel difuminado: borde suave y/o grano tipo lápiz");
 			const shapeBtn = mkButton("▭", "Forma (elegí la figura en la lista)");
 			const textBtn = mkButton("🅣", "Texto (escribí y hacé clic en el lienzo)");
 			const selectBtn = mkButton("▚", "Seleccionar a mano alzada (lazo) un área del trazo/calco para editarla");
-			const toolBtns = { brush: brushBtn, eraser: eraserBtn, shape: shapeBtn, text: textBtn, select: selectBtn };
+			const toolBtns = { brush: brushBtn, eraser: eraserBtn, soft: softBtn, shape: shapeBtn, text: textBtn, select: selectBtn };
+			// Herramientas de máscara: solo en el nodo de inpaint.
+			let maskBrushBtn = null;
+			let maskEraseBtn = null;
+			if (isInpaint) {
+				maskBrushBtn = mkButton("🖌️", "Pincel de máscara (zona a regenerar)");
+				maskEraseBtn = mkButton("🧼", "Borrador de máscara");
+				toolBtns.maskBrush = maskBrushBtn;
+				toolBtns.maskErase = maskEraseBtn;
+			}
 			let updateToolExtras = () => {};
 			const refreshTools = () => {
 				for (const [id, b] of Object.entries(toolBtns)) {
 					b.style.outline = st.tool === id ? "1px solid #4a9" : "none";
 				}
 				updateToolExtras();
+				writePincelState(node);
 			};
 			for (const [id, b] of Object.entries(toolBtns)) {
 				b.onclick = () => { st.tool = id; refreshTools(); refreshCursor(node); };
 			}
 			refreshTools();
 
-			const mkSlider = (max, value, title, onInput) => {
+			const mkSlider = (max, value, title, onInput, min = 1) => {
 				const s = document.createElement("input");
 				s.type = "range";
-				s.min = "1";
+				s.min = String(min);
 				s.max = String(max);
 				s.value = String(value);
 				s.title = title;
 				s.style.width = "70px";
-				s.addEventListener("input", () => onInput(parseInt(s.value, 10) || 1));
+				s.addEventListener("input", () => {
+					onInput(parseInt(s.value, 10) || min);
+					writePincelState(node);
+				});
 				return s;
 			};
 
@@ -2404,6 +2828,43 @@ app.registerExtension({
 				eraseVal.textContent = String(v);
 				refreshCursor(node);
 			});
+			// Pincel difuminado: sliders propios (aparecen con esa herramienta).
+			// "Grosor" y "Difuminado" son suyos; "Grano" da textura de lápiz.
+			const softThickVal = mkValueLabel(st.softThickness);
+			const softThick = mkSlider(128, st.softThickness, "Grosor pincel difuminado", (v) => {
+				st.softThickness = v;
+				softThickVal.textContent = String(v);
+				refreshCursor(node);
+			});
+			const softVal = mkValueLabel(st.softBlur);
+			const softBlur = mkSlider(40, st.softBlur, "Difuminado: suaviza el borde del trazo", (v) => {
+				st.softBlur = v;
+				softVal.textContent = String(v);
+			});
+			const grainVal = mkValueLabel(st.softGrain);
+			const grain = mkSlider(100, st.softGrain, "Grano: textura tipo lápiz / carboncillo", (v) => {
+				st.softGrain = v;
+				grainVal.textContent = String(v);
+			}, 0);
+			const softGroup = mkGroup(softThick, softThickVal, softBlur, softVal, grain, grainVal);
+			// Grupos de grosor: cada herramienta muestra el suyo (el de lápiz
+			// también con las formas, que usan el mismo grosor).
+			const thickGroup = mkGroup(thick, thickVal);
+			const eraseGroup = mkGroup(eraseThick, eraseVal);
+			let maskThickGroup = null;
+			if (isInpaint) {
+				const maskVal = mkValueLabel(st.maskThickness);
+				const maskThick = mkSlider(128, st.maskThickness, "Grosor máscara", (v) => {
+					st.maskThickness = v;
+					maskVal.textContent = String(v);
+					refreshCursor(node);
+				});
+				maskThickGroup = mkGroup(maskThick, maskVal);
+			}
+			const maskClearBtn = isInpaint ? mkButton("🧹", "Limpiar la máscara") : null;
+			if (maskClearBtn) maskClearBtn.onclick = () => clearMask(node);
+			const maskInvertBtn = isInpaint ? mkButton("⇆", "Invertir la máscara") : null;
+			if (maskInvertBtn) maskInvertBtn.onclick = () => invertMask(node);
 
 			st.colorInput = document.createElement("input");
 			st.colorInput.type = "color";
@@ -2415,6 +2876,7 @@ app.registerExtension({
 			st.colorInput.addEventListener("input", () => {
 				st.userColor = st.colorInput.value;
 				if (!isLineart(node)) st.color = st.userColor;
+				writePincelState(node);
 			});
 
 			// --- Formas ---
@@ -2427,10 +2889,10 @@ app.registerExtension({
 			}
 			shapeSel.value = st.shape;
 			shapeSel.title = "Figura";
-			shapeSel.onchange = () => { st.shape = shapeSel.value; };
+			shapeSel.onchange = () => { st.shape = shapeSel.value; writePincelState(node); };
 
 			// --- Texto: fuentes del Paint + fuentes de cómic (con vista previa) ---
-			const fontSel = mkFontPicker(() => st.font, (f) => { st.font = f; }, fontGroups);
+			const fontSel = mkFontPicker(() => st.font, (f) => { st.font = f; writePincelState(node); }, fontGroups);
 			const fontAdd = mkFontAddMenu(() => fontSel.refreshList?.());
 			const fontSizeInput = styleInput(document.createElement("input"));
 			fontSizeInput.type = "number";
@@ -2439,7 +2901,7 @@ app.registerExtension({
 			fontSizeInput.value = String(st.fontSize);
 			fontSizeInput.title = "Tamaño de fuente";
 			fontSizeInput.style.width = "54px";
-			fontSizeInput.oninput = () => { st.fontSize = parseInt(fontSizeInput.value, 10) || 48; };
+			fontSizeInput.oninput = () => { st.fontSize = parseInt(fontSizeInput.value, 10) || 48; writePincelState(node); };
 			const textInput = styleInput(document.createElement("input"));
 			textInput.type = "text";
 			textInput.placeholder = "texto…";
@@ -2451,8 +2913,16 @@ app.registerExtension({
 			const shapeGroup = mkGroup(shapeSel);
 			const fontGroup = mkGroup(fontSel, fontAdd, fontSizeInput, textInput);
 			updateToolExtras = () => {
-				shapeGroup.style.display = st.tool === "shape" ? "inline-flex" : "none";
-				fontGroup.style.display = st.tool === "text" ? "inline-flex" : "none";
+				const t = st.tool;
+				shapeGroup.style.display = t === "shape" ? "inline-flex" : "none";
+				fontGroup.style.display = t === "text" ? "inline-flex" : "none";
+				thickGroup.style.display = t === "brush" || t === "shape" ? "inline-flex" : "none";
+				eraseGroup.style.display = t === "eraser" ? "inline-flex" : "none";
+				softGroup.style.display = t === "soft" ? "inline-flex" : "none";
+				if (maskThickGroup) {
+					const maskTool = t === "maskBrush" || t === "maskErase";
+					maskThickGroup.style.display = maskTool ? "inline-flex" : "none";
+				}
 			};
 			updateToolExtras();
 
@@ -2462,12 +2932,12 @@ app.registerExtension({
 			const clearBtn = mkButton("🗑️", "Limpiar");
 			undoBtn.onclick = () => {
 				if (!st.undo.length) return;
-				st.redo.push(paint.toDataURL("image/png"));
+				st.redo.push(snapshot(node));
 				restore(node, st.undo.pop());
 			};
 			redoBtn.onclick = () => {
 				if (!st.redo.length) return;
-				st.undo.push(paint.toDataURL("image/png"));
+				st.undo.push(snapshot(node));
 				restore(node, st.redo.pop());
 			};
 			clearBtn.onclick = () => { pushUndo(node); clearPaint(node); };
@@ -2489,6 +2959,124 @@ app.registerExtension({
 			);
 			const pasteTraceBtn = mkButton("📋🖼️", "Pegar imagen del portapapeles como capa del calco");
 			pasteTraceBtn.onclick = () => pasteFromClipboard((img) => addCalcoLayer(node, img));
+
+			// --- Lineart propio desde el calco seleccionado (NO encola el grafo) ---
+			function paintMaskIntoPaint(node, dataUrl) {
+				return new Promise((resolve) => {
+					const st = node._mikaLineart;
+					const m = new Image();
+					m.onload = () => {
+						const W = st.paint.width;
+						const H = st.paint.height;
+						const s = Math.min(W / m.naturalWidth, H / m.naturalHeight);
+						const dw = Math.max(1, Math.round(m.naturalWidth * s));
+						const dh = Math.max(1, Math.round(m.naturalHeight * s));
+						const dx = Math.round((W - dw) / 2);
+						const dy = Math.round((H - dh) / 2);
+						const color = modeStroke(node);
+
+						const tmp = document.createElement("canvas");
+						tmp.width = dw;
+						tmp.height = dh;
+						const tctx = tmp.getContext("2d");
+						tctx.drawImage(m, 0, 0, dw, dh);
+						const id = tctx.getImageData(0, 0, dw, dh);
+						const d = id.data;
+						let cr = 0, cg = 0, cb = 0;
+						if (color[0] === "#") {
+							let hex = color.slice(1);
+							if (hex.length === 3) hex = hex.split("").map((c) => c + c).join("");
+							cr = parseInt(hex.slice(0, 2), 16) || 0;
+							cg = parseInt(hex.slice(2, 4), 16) || 0;
+							cb = parseInt(hex.slice(4, 6), 16) || 0;
+						}
+						// El gris de la máscara pasa a ser el alfa; el color, el del trazo.
+						for (let i = 0; i < d.length; i += 4) {
+							const a = d[i];
+							d[i] = cr; d[i + 1] = cg; d[i + 2] = cb; d[i + 3] = a;
+						}
+						tctx.putImageData(id, 0, 0);
+
+						pushUndo(node);
+						const ctx = paintCtx(node);
+						ctx.globalCompositeOperation = "source-over";
+						ctx.clearRect(0, 0, W, H);
+						ctx.drawImage(tmp, dx, dy);
+						st.dirty = true;
+						renderPreview(node);
+						write(node);
+						resolve();
+					};
+					m.onerror = () => resolve();
+					m.src = dataUrl;
+				});
+			}
+
+			// Una capa de calco guarda un canvas O una imagen (según la operación):
+			// normalizamos a canvas para poder exportarla.
+			function drawableToCanvas(d) {
+				const w = d.naturalWidth || d.width || 1;
+				const h = d.naturalHeight || d.height || 1;
+				const c = document.createElement("canvas");
+				c.width = Math.max(1, w);
+				c.height = Math.max(1, h);
+				c.getContext("2d").drawImage(d, 0, 0, c.width, c.height);
+				return c;
+			}
+
+			async function runLineartFromCalco() {
+				const st = node._mikaLineart;
+				// Solo cuentan el calco base o las capas de calco (no el trazo).
+				const keys = (st.selection || []).filter((k) => k === "underlay" || String(k).startsWith("L:"));
+				const key = keys.find((k) => layerGeom(node, k)) || keys[0];
+				if (!key) { alert("[Mika] Seleccioná una capa de calco para pasarla a lineart."); return; }
+
+				const drawable = key === "underlay" ? st.underlayImg : (layerByKey(node, key) || {}).src;
+				if (!drawable) { alert("[Mika] No se encontró la imagen del calco seleccionado."); return; }
+				const srcCanvas = drawableToCanvas(drawable);
+
+				const preproc = String(findWidget(node, "preprocesador")?.value || "lineart");
+				const resolution = Math.max(256, Math.min(2048, Math.max(srcCanvas.width, srcCanvas.height)));
+
+				const old = lineartBtn.textContent;
+				lineartBtn.textContent = "⚡ …";
+				try {
+					const payload = srcCanvas.toDataURL("image/png");
+					const r = await api.fetchApi("/mika/lineart/preprocess", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ preprocessor: preproc, image: payload, resolution }),
+					});
+					const j = await r.json();
+					if (!r.ok || !j.image) throw new Error(j.error || `HTTP ${r.status}`);
+					await paintMaskIntoPaint(node, j.image);
+				} catch (e) {
+					alert("[Mika] No se pudo generar el lineart: " + ((e && e.message) || e));
+				} finally {
+					lineartBtn.textContent = old;
+				}
+			}
+
+			const preprocSel = document.createElement("select");
+			preprocSel.title = "Preprocesador de lineart propio";
+			preprocSel.style.cssText =
+				"font:12px sans-serif;height:22px;padding:0 4px;border:1px solid var(--border-color,#444);" +
+				"border-radius:3px;background:var(--comfy-input-bg,#222);color:var(--input-text,#eee);";
+			const preprocW = findWidget(node, "preprocesador");
+			for (const opt of (preprocW?.options?.values || ["lineart"])) {
+				const o = document.createElement("option");
+				o.value = opt;
+				o.textContent = opt;
+				preprocSel.appendChild(o);
+			}
+			preprocSel.value = String(preprocW?.value || "lineart");
+			preprocSel.onchange = () => {
+				if (!preprocW) return;
+				preprocW.value = preprocSel.value;
+				try { preprocW.callback?.(preprocSel.value); } catch (e) { /* no-op */ }
+			};
+			const lineartBtn = mkButton("⚡", "Crear un lineart desde la capa de calco seleccionada (no ejecuta el workflow)");
+			lineartBtn.onclick = () => { runLineartFromCalco(); };
 			const fitResBtn = mkButton("📐", "Ajustar la resolución al tamaño del calco o de la imagen cargada");
 			fitResBtn.onclick = () => adaptResolution(node);
 			const transformBtn = mkButton("✥", "Mover / escalar / rotar las capas seleccionadas");
@@ -2565,13 +3153,19 @@ app.registerExtension({
 			opacity.type = "range";
 			opacity.min = "0";
 			opacity.max = "100";
-			opacity.value = "40";
+			opacity.value = String(st.calcoOpacity);
 			opacity.title = "Opacidad del calco";
 			opacity.style.width = "60px";
-			opacity.addEventListener("input", () => {
-				const v = String((parseInt(opacity.value, 10) || 0) / 100);
+			const applyCalcoOpacity = () => {
+				const v = String((st.calcoOpacity || 0) / 100);
 				underlay.style.opacity = v;
 				calcoLayersCanvas.style.opacity = v;
+			};
+			applyCalcoOpacity();
+			opacity.addEventListener("input", () => {
+				st.calcoOpacity = parseInt(opacity.value, 10) || 0;
+				applyCalcoOpacity();
+				writePincelState(node);
 			});
 
 			const mergeBtn = mkButton("⤓", "Unir las capas seleccionadas al calco");
@@ -2579,11 +3173,18 @@ app.registerExtension({
 
 			toolbar.appendChild(brushBtn);
 			toolbar.appendChild(eraserBtn);
+			toolbar.appendChild(softBtn);
 			toolbar.appendChild(shapeBtn);
 			toolbar.appendChild(textBtn);
 			toolbar.appendChild(selectBtn);
-			toolbar.appendChild(mkGroup(thick, thickVal));
-			toolbar.appendChild(mkGroup(eraseThick, eraseVal));
+			if (maskBrushBtn) toolbar.appendChild(maskBrushBtn);
+			if (maskEraseBtn) toolbar.appendChild(maskEraseBtn);
+			toolbar.appendChild(thickGroup);
+			toolbar.appendChild(eraseGroup);
+			if (maskThickGroup) toolbar.appendChild(maskThickGroup);
+			toolbar.appendChild(softGroup);
+			if (maskClearBtn) toolbar.appendChild(maskClearBtn);
+			if (maskInvertBtn) toolbar.appendChild(maskInvertBtn);
 			toolbar.appendChild(st.colorInput);
 			toolbar.appendChild(shapeGroup);
 			toolbar.appendChild(fontGroup);
@@ -2594,6 +3195,8 @@ app.registerExtension({
 			toolbar.appendChild(pasteEditBtn);
 			toolbar.appendChild(traceBtn);
 			toolbar.appendChild(pasteTraceBtn);
+			toolbar.appendChild(preprocSel);
+			toolbar.appendChild(lineartBtn);
 			toolbar.appendChild(fitResBtn);
 			toolbar.appendChild(transformBtn);
 			toolbar.appendChild(freeBtn);
@@ -2648,11 +3251,110 @@ app.registerExtension({
 				}
 			};
 
+			// Máscara: el mismo trazo, pero sobre el canvas de máscara y en
+			// coordenadas del lienzo (no lleva la transformación del trazo).
+			const maskSeg = (x, y) => {
+				seg(
+					st.maskCanvas.getContext("2d"), x, y, st.maskThickness,
+					st.tool === "maskErase" ? "destination-out" : "source-over", "#ff3b3b",
+				);
+				redrawMask(node, true);
+				last = [x, y];
+			};
+
 			// Lápiz: dibuja en la fuente y en la capa visible (transformada).
 			const strokeTo = (x, y) => {
 				seg(paintCtx(node), x, y, st.thickness, "source-over", st.color);
 				withTf(node, preview.getContext("2d"), (ctx) => seg(ctx, x, y, st.thickness, "source-over", st.color));
 				last = [x, y];
+			};
+
+			// --- Pincel difuminado (borde suave + grano tipo lápiz) ---
+			// El trazo en curso se compone en "softScratch": se dibuja la
+			// polilínea con desenfoque y, si hay grano, se recorta su alfa con
+			// una máscara de ruido. Recién al soltar se hornea en "paint".
+			// Mientras se dibuja se previsualiza en "overlay" (encima de todo).
+
+			// Máscara de ruido para el grano. El ruido es fijo; al mover el
+			// slider solo cambia cuánto se aplica (misma textura, no "tiembla").
+			const grainPattern = () => {
+				const N = 256;
+				if (!st.grainRand) {
+					st.grainRand = new Float32Array(N * N);
+					for (let i = 0; i < st.grainRand.length; i++) st.grainRand[i] = Math.random();
+				}
+				if (!st.grainTile) {
+					st.grainTile = document.createElement("canvas");
+					st.grainTile.width = N;
+					st.grainTile.height = N;
+				}
+				if (st._grainFor === st.softGrain && st._grainPat) return st._grainPat;
+				const tctx = st.grainTile.getContext("2d");
+				const img = tctx.createImageData(N, N);
+				const g = Math.min(1, Math.max(0, st.softGrain / 100));
+				for (let i = 0; i < st.grainRand.length; i++) {
+					img.data[i * 4 + 3] = Math.round(255 * (1 - g * (1 - st.grainRand[i])));
+				}
+				tctx.putImageData(img, 0, 0);
+				st._grainFor = st.softGrain;
+				st._grainPat = tctx.createPattern(st.grainTile, "repeat");
+				return st._grainPat;
+			};
+
+			const buildSoft = () => {
+				const s = st.softScratch;
+				const ctx = s.getContext("2d");
+				ctx.setTransform(1, 0, 0, 1, 0, 0);
+				ctx.globalCompositeOperation = "source-over";
+				ctx.filter = "none";
+				ctx.clearRect(0, 0, s.width, s.height);
+				const pts = st.softPts;
+				if (!pts || !pts.length) return;
+				ctx.strokeStyle = st.color;
+				ctx.fillStyle = st.color;
+				ctx.lineWidth = st.softThickness;
+				ctx.lineCap = "round";
+				ctx.lineJoin = "round";
+				const paint = () => {
+					ctx.beginPath();
+					if (pts.length === 1) {
+						ctx.arc(pts[0][0], pts[0][1], st.softThickness / 2, 0, Math.PI * 2);
+						ctx.fill();
+					} else {
+						ctx.moveTo(pts[0][0], pts[0][1]);
+						for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+						ctx.stroke();
+					}
+				};
+				// Halo difuminado y, encima, el núcleo nítido: el slider suaviza
+				// el borde sin que la línea desaparezca.
+				if (st.softBlur > 0) {
+					ctx.save();
+					ctx.filter = `blur(${st.softBlur}px)`;
+					paint();
+					ctx.restore();
+				}
+				paint();
+				if (st.softGrain > 0) {
+					ctx.globalCompositeOperation = "destination-in";
+					ctx.fillStyle = grainPattern();
+					ctx.fillRect(0, 0, s.width, s.height);
+					ctx.globalCompositeOperation = "source-over";
+				}
+			};
+
+			const softLive = () => {
+				buildSoft();
+				clearOverlay(node);
+				withTf(node, st.overlay.getContext("2d"), (ctx) => ctx.drawImage(st.softScratch, 0, 0));
+			};
+
+			const commitSoft = () => {
+				buildSoft();
+				paintCtx(node).drawImage(st.softScratch, 0, 0);
+				clearOverlay(node);
+				st.softPts = null;
+				renderPreview(node);
 			};
 
 			// Borrador: marca la zona a borrar en el overlay (color propio);
@@ -2810,6 +3512,24 @@ app.registerExtension({
 					return;
 				}
 
+				if (st.tool === "maskBrush" || st.tool === "maskErase") {
+					pushUndo(node);
+					drawing = true;
+					last = null;
+					const [mx, my] = posCanvas(e);
+					maskSeg(mx, my);
+					return;
+				}
+
+				if (st.tool === "soft") {
+					pushUndo(node);
+					drawing = true;
+					last = null;
+					st.softPts = [pos(e)];
+					softLive();
+					return;
+				}
+
 				pushUndo(node);
 				drawing = true;
 				last = null;
@@ -2848,8 +3568,19 @@ app.registerExtension({
 				updatePointerCursor(node, e.clientX, e.clientY);
 				if (st.transformMode) { hideCursor(node); return; }
 				if (!drawing) { placeCursor(node, e.clientX, e.clientY); return; }
+				if (st.tool === "maskBrush" || st.tool === "maskErase") {
+					const [mx, my] = posCanvas(e);
+					maskSeg(mx, my);
+					return;
+				}
 				const [x, y] = pos(e);
-				if (st.tool === "shape") shapePreviewTo(x, y);
+				if (st.tool === "soft") {
+					const p = st.softPts[st.softPts.length - 1];
+					if (Math.hypot(x - p[0], y - p[1]) >= 1) {
+						st.softPts.push([x, y]);
+						softLive();
+					}
+				} else if (st.tool === "shape") shapePreviewTo(x, y);
 				else if (st.tool === "eraser") erasePreviewTo(x, y);
 				else strokeTo(x, y);
 			});
@@ -2871,13 +3602,16 @@ app.registerExtension({
 				}
 				if (!drawing) return;
 				drawing = false;
+				const wasMaskStroke = st.tool === "maskBrush" || st.tool === "maskErase";
 				if (st.tool === "shape") commitShape();
 				else if (st.tool === "eraser") { commitErase(); renderPreview(node); }
+				else if (st.tool === "soft") commitSoft();
 				st.erasePoints = null;
 				st.shapeStart = null;
 				st.shapeEnd = null;
 				last = null;
-				write(node);
+				if (wasMaskStroke) writeMask(node);
+				else write(node);
 			};
 			preview.addEventListener("pointerup", (e) => {
 				endStroke();
@@ -2894,7 +3628,9 @@ app.registerExtension({
 				const inner = Math.max(32, w - PAD);
 				const tb = (st && st._toolbarH) || TOOLBAR_H * 4;
 				const lp = (st?.layerPanel && st.layerPanel.style.display !== "none") ? (st.layerPanel.offsetHeight || 44) : 0;
-				return [w, tb + 12 + inner * ch / cw + lp];
+				// El alto del lienzo se limita al ancho (cuadrado): en verticales
+				// no crece más allá de eso.
+				return [w, tb + 12 + inner / Math.max(1, cw / ch) + lp];
 			};
 			node._mikaDomWidget = domWidget;
 
@@ -2946,6 +3682,14 @@ app.registerExtension({
 
 			applyMode(node);
 			load(node);
+			if (isInpaint) {
+				loadBaseFromInput(node);
+				loadMask(node);
+				// Si ComfyUI reconstruyó el nodo, la imagen ya cargada sigue en
+				// memoria pero el canvas nuevo está vacío: hay que redibujarla
+				// (loadBaseFromInput no lo hace si la clave no cambió).
+				drawBase(node);
+			}
 			drawUnderlay(node);
 			drawTransformUI(node);
 
@@ -2963,6 +3707,17 @@ app.registerExtension({
 			st.refit = refit;
 			requestAnimationFrame(refit);
 			setTimeout(refit, 400);
+
+			// La imagen de entrada llega recién cuando el nodo aguas arriba se
+			// ejecutó: reintentamos al conectar y al terminar cada corrida.
+			if (isInpaint) {
+				node.onConnectionsChange = () => loadBaseFromInput(node);
+				if (node._mikaExecHandler) app.api?.removeEventListener?.("execution_success", node._mikaExecHandler);
+				node._mikaExecHandler = () => {
+					if (node._mikaLineart === st) loadBaseFromInput(node);
+				};
+				app.api?.addEventListener?.("execution_success", node._mikaExecHandler);
+			}
 		}
 
 		const onNodeCreated = nodeType.prototype.onNodeCreated;
@@ -2986,13 +3741,24 @@ app.registerExtension({
 			const r = onGetExtraMenuOptions ? onGetExtraMenuOptions.apply(this, arguments) : undefined;
 			const node = this;
 			if (Array.isArray(options) && node._mikaLineart) {
-				options.push(
-					null,
-					{ content: "Importar proyecto…", callback: () => node._mikaProjectInput?.click() },
-					{ content: "Exportar proyecto (trazo + calco)", callback: () => exportProject(node) },
-					{ content: "Guardar trazo como imagen", callback: () => saveImage(node, "trazo") },
-					{ content: "Guardar calco como imagen", callback: () => saveImage(node, "calco") },
-				);
+				if (node._mikaLineart.maskCanvas) {
+					options.push(
+						null,
+						{ content: "Importar proyecto…", callback: () => node._mikaProjectInput?.click() },
+						{ content: "Exportar proyecto (trazo + calco + máscara)", callback: () => exportProject(node) },
+						{ content: "Guardar imagen fuente", callback: () => saveImage(node, "imagen") },
+						{ content: "Guardar trazo (forma)", callback: () => saveImage(node, "trazo") },
+						{ content: "Guardar máscara", callback: () => saveImage(node, "mascara") },
+					);
+				} else {
+					options.push(
+						null,
+						{ content: "Importar proyecto…", callback: () => node._mikaProjectInput?.click() },
+						{ content: "Exportar proyecto (trazo + calco)", callback: () => exportProject(node) },
+						{ content: "Guardar trazo como imagen", callback: () => saveImage(node, "trazo") },
+						{ content: "Guardar calco como imagen", callback: () => saveImage(node, "calco") },
+					);
+				}
 			}
 			return r;
 		};
@@ -3007,6 +3773,10 @@ app.registerExtension({
 			if (this._mikaKeyHandler) {
 				document.removeEventListener("keydown", this._mikaKeyHandler, true);
 				this._mikaKeyHandler = null;
+			}
+			if (this._mikaExecHandler) {
+				app.api?.removeEventListener?.("execution_success", this._mikaExecHandler);
+				this._mikaExecHandler = null;
 			}
 			this._mikaLineart = null;
 			return onRemoved ? onRemoved.apply(this, arguments) : undefined;
