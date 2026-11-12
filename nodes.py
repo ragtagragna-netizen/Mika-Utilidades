@@ -4379,6 +4379,30 @@ def _mika_tangent_sigmas(model_sampling, steps, denoise, start, middle, end,
     return torch.FloatTensor(sigmas)[-(steps + 1):]
 
 
+#: Ajustes con los que el scheduler "shifted_tangent" del menú arma la curva.
+#: Son los del nodo original de was-node-suite, para que un KSampler que ya
+#: venía usando ese scheduler obtenga exactamente la misma curva.
+_MIKA_TANGENT_MENU_DEFAULTS = {
+    "start": 1.0, "middle": 0.5, "end": 0.0,
+    "pivot_1": 0.6, "pivot_2": 0.6, "slope_1": 0.2, "slope_2": 0.2,
+}
+
+
+def _mika_tangent_schedule(model_sampling, steps):
+    """Handler del scheduler "shifted_tangent" para el menú de ComfyUI.
+
+    El core lo llama como `handler(model_sampling, steps)` (use_ms = True) y
+    arma la curva con los ajustes por defecto del tangent; el recorte por
+    `denoise` lo hace el propio KSampler.
+    """
+    defaults = _MIKA_TANGENT_MENU_DEFAULTS
+    return _mika_tangent_sigmas(
+        model_sampling, steps, 1.0,
+        defaults["start"], defaults["middle"], defaults["end"],
+        defaults["pivot_1"], defaults["pivot_2"],
+        defaults["slope_1"], defaults["slope_2"])
+
+
 class CustomSamplerTangentMika:
     """Custom Sampler Tangent-Mika: el subgrafo "Custom Sampler Tangent"
     como un solo nodo. Sampler + scheduler tangent afinado (con sus
