@@ -2960,7 +2960,7 @@ app.registerExtension({
 			const pasteTraceBtn = mkButton("📋🖼️", "Pegar imagen del portapapeles como capa del calco");
 			pasteTraceBtn.onclick = () => pasteFromClipboard((img) => addCalcoLayer(node, img));
 
-			// --- Lineart propio desde el calco seleccionado (NO encola el grafo) ---
+			// --- Lineart desde el calco seleccionado (NO encola el grafo) ---
 			function paintMaskIntoPaint(node, dataUrl) {
 				return new Promise((resolve) => {
 					const st = node._mikaLineart;

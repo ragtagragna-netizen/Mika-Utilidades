@@ -22,6 +22,9 @@ tests/
 # Workspace de ejecución de planes (scratch, no se publica)
 .superpowers/
 
+# Pesos de los preprocesadores de lineart (se descargan solos; no se publican)
+models/
+
 # Basura del sistema
 .DS_Store
 Thumbs.db
