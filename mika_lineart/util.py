@@ -102,3 +102,15 @@ def safe_step(x, step=2):
     y = x.astype(np.float32) * float(step + 1)
     y = y.astype(np.int32).astype(np.float32) / float(step)
     return y
+
+
+def download_hf(repo_id, filename, subfolder=""):
+    """Ruta local del peso, bajándolo de HuggingFace si falta."""
+    local_dir = os.path.join(models_dir, *repo_id.split("/"))
+    path = os.path.join(local_dir, *([p for p in subfolder.split("/") if p] + [filename]))
+    if not os.path.exists(path):
+        from huggingface_hub import hf_hub_download
+        os.makedirs(local_dir, exist_ok=True)
+        print(f"[mika_lineart] bajando {repo_id}/{subfolder}/{filename} ...")
+        path = hf_hub_download(repo_id=repo_id, filename=filename, subfolder=subfolder, local_dir=local_dir)
+    return path

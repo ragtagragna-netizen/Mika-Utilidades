@@ -9,7 +9,7 @@ import warnings
 import numpy as np
 from PIL import Image
 
-from . import canny, pyracanny, lineart_standard
+from . import canny, pyracanny, lineart_standard, lineart
 
 # Los 7 del workflow LINEARTS.json, en su orden.
 PREPROCESSORS = [
@@ -31,6 +31,9 @@ _SPECS = {
     },
     "LineartStandardPreprocessor": {
         "build": lambda: lineart_standard.LineartStandardDetector(), "kwargs": {}, "invert": False,
+    },
+    "LineArtPreprocessor": {
+        "build": lambda: lineart.LineartDetector.from_pretrained(), "kwargs": {}, "invert": False,
     },
 }
 
