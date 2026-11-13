@@ -9,7 +9,7 @@ import warnings
 import numpy as np
 from PIL import Image
 
-from . import canny, pyracanny, lineart_standard, lineart
+from . import canny, pyracanny, lineart_standard, lineart, lineart_anime, manga_line
 
 # Los 7 del workflow LINEARTS.json, en su orden.
 PREPROCESSORS = [
@@ -34,6 +34,12 @@ _SPECS = {
     },
     "LineArtPreprocessor": {
         "build": lambda: lineart.LineartDetector.from_pretrained(), "kwargs": {}, "invert": False,
+    },
+    "AnimeLineArtPreprocessor": {
+        "build": lambda: lineart_anime.LineartAnimeDetector.from_pretrained(), "kwargs": {}, "invert": False,
+    },
+    "Manga2Anime_LineArt_Preprocessor": {
+        "build": lambda: manga_line.LineartMangaDetector.from_pretrained(), "kwargs": {}, "invert": False,
     },
 }
 
