@@ -3035,8 +3035,9 @@ app.registerExtension({
 				if (!drawable) { alert("[Mika] No se encontró la imagen del calco seleccionado."); return; }
 				const srcCanvas = drawableToCanvas(drawable);
 
-				const preproc = String(findWidget(node, "preprocesador")?.value || "lineart");
-				const resolution = Math.max(256, Math.min(2048, Math.max(srcCanvas.width, srcCanvas.height)));
+				const preproc = String(findWidget(node, "preprocesador")?.value || "LineArtPreprocessor");
+				// Misma resolución de trabajo que el workflow del AIO.
+				const resolution = 512;
 
 				const old = lineartBtn.textContent;
 				lineartBtn.textContent = "⚡ …";
@@ -3058,18 +3059,30 @@ app.registerExtension({
 			}
 
 			const preprocSel = document.createElement("select");
-			preprocSel.title = "Preprocesador de lineart propio";
+			preprocSel.title = "Preprocesador de lineart";
 			preprocSel.style.cssText =
 				"font:12px sans-serif;height:22px;padding:0 4px;border:1px solid var(--border-color,#444);" +
 				"border-radius:3px;background:var(--comfy-input-bg,#222);color:var(--input-text,#eee);";
 			const preprocW = findWidget(node, "preprocesador");
-			for (const opt of (preprocW?.options?.values || ["lineart"])) {
+			const preprocOpts = (preprocW?.options?.values || []).slice();
+			for (const opt of (preprocOpts.length ? preprocOpts : ["LineArtPreprocessor"])) {
 				const o = document.createElement("option");
 				o.value = opt;
 				o.textContent = opt;
 				preprocSel.appendChild(o);
 			}
-			preprocSel.value = String(preprocW?.value || "lineart");
+			// Un workflow viejo puede traer un valor que ya no existe (p. ej. "lineart"):
+			// caer al primero (el default) y dejarlo escrito en el widget.
+			const fallbackPp = preprocOpts[0] || "LineArtPreprocessor";
+			let curPp = String(preprocW?.value || "");
+			if (!preprocOpts.includes(curPp)) {
+				curPp = fallbackPp;
+				if (preprocW) {
+					preprocW.value = curPp;
+					try { preprocW.callback?.(curPp); } catch (e) { /* no-op */ }
+				}
+			}
+			preprocSel.value = curPp;
 			preprocSel.onchange = () => {
 				if (!preprocW) return;
 				preprocW.value = preprocSel.value;
