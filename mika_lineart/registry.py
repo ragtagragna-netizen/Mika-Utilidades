@@ -4,6 +4,7 @@
 canvas del nodo, que usa el canal rojo como alfa) y con el lado menor = `resolution`.
 """
 
+import threading
 import warnings
 
 import numpy as np
@@ -50,11 +51,29 @@ _SPECS = {
 }
 
 
+# Los detectores se construyen una vez y se reutilizan (evita recargar los pesos
+# en cada ↯). La ruta corre en un hilo, así que se protege con un lock.
+_CACHE = {}
+_LOCK = threading.Lock()
+
+
+def _get_detector(name):
+    spec = _SPECS.get(name)
+    if spec is None:
+        raise ValueError(f"preprocesador desconocido: {name}")
+    with _LOCK:
+        det = _CACHE.get(name)
+        if det is None:
+            det = spec["build"]()
+            _CACHE[name] = det
+        return det
+
+
 def run(name, image_pil, resolution=512):
     spec = _SPECS.get(name)
     if spec is None:
         raise ValueError(f"preprocesador desconocido: {name}")
-    det = spec["build"]()
+    det = _get_detector(name)
     # En imágenes planas los detectores dividen por percentiles degenerados:
     # numpy avisa (división inválida) pero la salida igual queda en ~0.
     with warnings.catch_warnings(), np.errstate(all="ignore"):

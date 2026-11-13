@@ -638,14 +638,13 @@ except ImportError:  # tests: nodes.py cargado como módulo suelto
     from mika_lineart import run as _mika_lineart_run
 
 
-def _mika_preprocess(image_pil, preprocesador="LineArtPreprocessor", resolution=512):
+# Preprocesador con el que abre el selector (y al que se cae con un valor viejo).
+_MIKA_DEFAULT_PREPROCESSOR = "LineArtPreprocessor"
+
+
+def _mika_preprocess(image_pil, preprocesador=_MIKA_DEFAULT_PREPROCESSOR, resolution=512):
     """Mapa de lineart (PIL RGB, 255 = línea) del preprocesador elegido."""
     return _mika_lineart_run(preprocesador, image_pil, resolution)
-
-
-def _mika_validate_preprocesador(value):
-    # Un workflow viejo puede traer un valor ya inexistente (p. ej. "lineart"): caer al default.
-    return value if value in _MIKA_PREPROCESSORS else "LineArtPreprocessor"
 
 # Ruta del servidor para el botón "⚡ Lineart" del canvas (no encola el grafo:
 # solo preprocesa la imagen que manda el navegador y la devuelve).
@@ -660,7 +659,7 @@ if PromptServer is not None and PromptServer.instance is not None:
         except Exception:
             return web.json_response({"error": "JSON inválido"}, status=400)
 
-        name = str(data.get("preprocessor") or "lineart")
+        name = str(data.get("preprocessor") or _MIKA_DEFAULT_PREPROCESSOR)
         b64 = data.get("image") or ""
         if not b64:
             return web.json_response({"error": "falta la imagen"}, status=400)
@@ -3835,7 +3834,7 @@ class AnimaLineartCanvasMika:
                 "archivo": ("STRING", {"default": ""}),
                 # Preprocesador de lineart elegido en la barra del lienzo
                 # (solo persiste; el preprocesamiento lo corre la ruta).
-                "preprocesador": (_MIKA_PREPROCESSORS, {"default": "LineArtPreprocessor", "validate": _mika_validate_preprocesador}),
+                "preprocesador": (_MIKA_PREPROCESSORS, {"default": _MIKA_DEFAULT_PREPROCESSOR}),
             },
         }
 
@@ -3889,7 +3888,7 @@ class AnimaInpaintCanvasMika:
                 "imagen": ("IMAGE",),
                 # Preprocesador de lineart elegido en la barra del lienzo
                 # (solo persiste; el preprocesamiento lo corre la ruta).
-                "preprocesador": (_MIKA_PREPROCESSORS, {"default": "LineArtPreprocessor", "validate": _mika_validate_preprocesador}),
+                "preprocesador": (_MIKA_PREPROCESSORS, {"default": _MIKA_DEFAULT_PREPROCESSOR}),
             },
         }
 
