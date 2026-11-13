@@ -1931,6 +1931,87 @@ class TextConcatenateDynamic:
         return (result,)
 
 
+MAX_SLOT_PARTS = 30
+DEFAULT_SLOT_PARTS = 3
+
+
+class TextSlotMika:
+    """
+    Text Slot-Mika: arma texto para el prompt por partes. Cada parte tiene un
+    `texto_i` editable (con las comillas `""` donde va el valor) y un `valor_i`
+    que es caja editable y socket: escribís o linkeás. Si la parte tiene valor,
+    sale con el valor metido entre las comillas; si no, la parte no aporta nada.
+    `part_count` expande/colapsa las partes (el JS muestra/oculta).
+    """
+
+    @staticmethod
+    def _scalar(value, default=None):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else default
+        return value if value is not None else default
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+        for i in range(1, MAX_SLOT_PARTS + 1):
+            optional[f"texto_{i}"] = ("STRING", {"default": ""})
+            optional[f"valor_{i}"] = ("STRING", {"default": ""})
+        optional["separator"] = ("STRING", {"default": ", "})
+        optional["trailing_comma"] = ("BOOLEAN", {"default": False})
+        optional["part_count"] = ("INT", {
+            "default": DEFAULT_SLOT_PARTS, "min": 1, "max": MAX_SLOT_PARTS,
+            "step": 1, "display": "number",
+        })
+        return {"required": {}, "optional": optional}
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "doit"
+    CATEGORY = "Mika Utilidades/string"
+
+    def doit(self, separator=", ", trailing_comma=False,
+             part_count=DEFAULT_SLOT_PARTS, **kwargs):
+        separator = self._scalar(separator, ", ")
+        trailing_comma = _mika_coerce_bool(self._scalar(trailing_comma, False))
+
+        try:
+            count = int(self._scalar(part_count, DEFAULT_SLOT_PARTS))
+        except Exception:
+            count = DEFAULT_SLOT_PARTS
+        count = max(1, min(MAX_SLOT_PARTS, count))
+
+        sep = _mika_decode_separator(separator)
+        parts = []
+
+        for i in range(1, count + 1):
+            valor = self._scalar(kwargs.get(f"valor_{i}"), None)
+            if valor is None:
+                continue
+            valor = str(valor)
+            if valor.strip() == "":
+                continue
+
+            texto = self._scalar(kwargs.get(f"texto_{i}"), "")
+            if not isinstance(texto, str):
+                texto = str(texto)
+
+            quoted = '"' + valor + '"'
+            if '""' in texto:
+                texto = texto.replace('""', quoted)
+            else:
+                texto = texto + quoted
+
+            parts.append(texto)
+
+        if not parts:
+            return ("",)
+
+        result = sep.join(parts)
+        if trailing_comma:
+            result = result + sep
+        return (result,)
+
+
 class LoadImageMika:
     """
     Load Image Path-Mika: carga una imagen solo desde ruta local o URL,
@@ -8875,6 +8956,7 @@ NODE_CLASS_MAPPINGS = {
     "TagFilter": TagFilter,
     "TextReplaceDynamic": TextReplaceDynamic,
     "TextConcatenateDynamic": TextConcatenateDynamic,
+    "TextSlotMika": TextSlotMika,
     "LoadImageMika": LoadImageMika,
     "SmartTagFilterMika": SmartTagFilterMika,
     "TagIfMika": TagIfMika,
@@ -8958,6 +9040,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TagFilter": "Tag Filter-Mika",
     "TextReplaceDynamic": "Text Replace Dynamic-Mika",
     "TextConcatenateDynamic": "Text Concatenate-Mika",
+    "TextSlotMika": "Text Slot-Mika",
     "LoadImageMika": "Load Image Path-Mika",
     "SmartTagFilterMika": "Smart Tag Filter-Mika",
     "TagIfMika": "Tag If-Mika",

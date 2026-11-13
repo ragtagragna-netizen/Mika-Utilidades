@@ -56,6 +56,7 @@ primera vez que usás los nodos de presets. Poné ahí tus listas
 | **Text Affix-Mika** | Añade texto al inicio/final o reemplaza, en modo párrafo o por línea (lista). |
 | **Text Replace Dynamic-Mika** | Pares find/replace dinámicos, regex opcional. |
 | **Text Concatenate-Mika** | Concatena varios textos con separador. |
+| **Text Slot-Mika** | Arma texto por partes: cada parte tiene un `texto` editable (con las comillas `""` donde va el valor) y un slot `valor` que es caja editable *y* socket (escribís o linkeás). Si el slot tiene valor (`aguila`), la parte sale `floating text "aguila"`; si está vacío, la parte no aporta nada. `part_count` expande/colapsa las partes; `separator` (coma por defecto) une las que salen y `trailing_comma` agrega o no la coma final. |
 | **Prompt Preset Selector-Mika** | Clon del Prompt Preset Selector. Lee presets (.txt/.yaml/.yml) desde la carpeta dedicada `presets/` o desde una carpeta externa escrita en `absolute_path` (el dropdown `preset_file` se rellena con sus archivos; recursivo). |
 | **Prompt Preset Stepper-Mika** | Prompt Preset Selector-Mika con el motor escalonado del Index Stepper: selecciona bloques de `steps` presets (salida `text` como lista) y auto-avanza. |
 | **Text Line Selector-Mika** | Rango de líneas como LISTA. |
