@@ -9,7 +9,7 @@ import warnings
 import numpy as np
 from PIL import Image
 
-from . import canny, pyracanny, lineart_standard, lineart, lineart_anime, manga_line
+from . import canny, pyracanny, lineart_standard, lineart, lineart_anime, manga_line, anyline
 
 # Los 7 del workflow LINEARTS.json, en su orden.
 PREPROCESSORS = [
@@ -41,6 +41,12 @@ _SPECS = {
     "Manga2Anime_LineArt_Preprocessor": {
         "build": lambda: manga_line.LineartMangaDetector.from_pretrained(), "kwargs": {}, "invert": False,
     },
+    # AnyLine (TED + merge) deja un piso gris ~0.5 en las zonas planas (el sigmoid
+    # del detector + safe_step). Se baja a 0 para que el canvas no pinte un velo.
+    "AnyLineArtPreprocessor_aux": {
+        "build": lambda: anyline.AnyLinePreprocessor.from_pretrained(), "kwargs": {},
+        "invert": False, "floor": 0.5,
+    },
 }
 
 
@@ -59,6 +65,10 @@ def run(name, image_pil, resolution=512):
     if x.ndim == 2:
         x = np.stack([x, x, x], axis=2)
     x = x[:, :, :3]
+    floor = float(spec.get("floor") or 0.0)
+    if floor > 0.0:
+        xf = x.astype(np.float32) / 255.0
+        x = (((xf - floor) / max(1e-6, 1.0 - floor)) * 255.0).clip(0, 255).astype(np.uint8)
     if spec["invert"]:
         x = 255 - x
     return Image.fromarray(np.ascontiguousarray(x), "RGB")
