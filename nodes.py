@@ -624,326 +624,28 @@ def _mika_valid_zone_names_multi(sources, zonas_json, margen=0, default_key=None
 
 
 # ----------------------------------------------------------------------
-# LINEART PROPIO (Anima Lineart Canvas-Mika)
+# LINEART (Anima Lineart Canvas-Mika): preprocesadores vendorizados
 # ----------------------------------------------------------------------
-# Preprocesadores de lineart/bordes sin modelos ni red: solo PIL + numpy.
-# Cada uno devuelve una máscara "L" de INTENSIDAD de línea (255 = línea).
-
-_MIKA_PREPROCESSORS = [
-    "lineart", "lineart suave", "lineart xdog", "lineart sujeto", "lineart limpio",
-    "bordes", "canny", "umbral", "contraste", "tinta", "contorno", "lineas gruesas",
-]
-
-
-def _mika_np_gray(img):
-    """PIL (RGB/RGBA/L) -> numpy float32 HxW en 0..1 (luminancia)."""
-    if img.mode != "L":
-        img = img.convert("L")
-    return np.asarray(img).astype(np.float32) / 255.0
+# Los detectores viven en mika_lineart/ (ver mika_lineart/ATTRIBUTION.md).
+# _mika_preprocess devuelve PIL RGB con 255 = línea (lo que espera el canvas).
+try:  # dentro del paquete ComfyUI (import relativo)
+    from .mika_lineart import PREPROCESSORS as _MIKA_PREPROCESSORS
+    from .mika_lineart import run as _mika_lineart_run
+except ImportError:  # tests: nodes.py cargado como módulo suelto
+    import os as _os, sys as _sys
+    _sys.path.append(_os.path.dirname(_os.path.abspath(__file__)))
+    from mika_lineart import PREPROCESSORS as _MIKA_PREPROCESSORS
+    from mika_lineart import run as _mika_lineart_run
 
 
-def _mika_np_blur(gray, radius):
-    """Gaussiano sobre un array float 0..1 (vía PIL)."""
-    if radius <= 0:
-        return gray
-    lum = (np.clip(gray, 0.0, 1.0) * 255.0).round().astype(np.uint8)
-    lum = Image.fromarray(lum, "L").filter(ImageFilter.GaussianBlur(radius))
-    return np.asarray(lum).astype(np.float32) / 255.0
+def _mika_preprocess(image_pil, preprocesador="LineArtPreprocessor", resolution=512):
+    """Mapa de lineart (PIL RGB, 255 = línea) del preprocesador elegido."""
+    return _mika_lineart_run(preprocesador, image_pil, resolution)
 
 
-def _mika_np_box_mean(gray, radius):
-    """Media local (blur de caja) vía PIL BoxBlur."""
-    lum = (np.clip(gray, 0.0, 1.0) * 255.0).round().astype(np.uint8)
-    lum = Image.fromarray(lum, "L").filter(ImageFilter.BoxBlur(radius))
-    return np.asarray(lum).astype(np.float32) / 255.0
-
-
-def _mika_np_sobel(gray):
-    """Magnitud de Sobel (sin normalizar)."""
-    p = np.pad(gray, 1, mode="edge")
-    gx = (p[:-2, 2:] + 2.0 * p[1:-1, 2:] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[1:-1, :-2] + p[2:, :-2])
-    gy = (p[2:, :-2] + 2.0 * p[2:, 1:-1] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[:-2, 1:-1] + p[:-2, 2:])
-    return np.sqrt(gx * gx + gy * gy)
-
-
-def _mika_np_autolevel(gray, lo=1.0, hi=99.0):
-    """Estira el contraste entre los percentiles (ayuda en imágenes oscuras)."""
-    a = float(np.percentile(gray, lo))
-    b = float(np.percentile(gray, hi))
-    if b - a < 1e-6:
-        return gray
-    return np.clip((gray - a) / (b - a), 0.0, 1.0)
-
-
-def _mika_np_local_stats(gray, radius):
-    """Media y desvío locales (ventana de caja)."""
-    mean = _mika_np_box_mean(gray, radius)
-    sq = _mika_np_box_mean(gray * gray, radius)
-    var = np.clip(sq - mean * mean, 0.0, None)
-    return mean, np.sqrt(var)
-
-
-def _mika_np_xdog(gray, sigma=1.2, k=1.6, delta=0.01):
-    """Banda XDoG: marca lo que es MÁS OSCURO que su entorno (líneas de un
-    dibujo/foto). En zonas planas da exactamente 0 (sin offset constante)."""
-    d = _mika_np_blur(gray, sigma) - _mika_np_blur(gray, sigma * k)
-    return np.clip(-d - delta, 0.0, None)
-
-
-def _mika_np_canny(gray, low=0.08, high=0.2, iters=6):
-    """Canny: Sobel + supresión de no-máximos + histéresis (0/1)."""
-    g = _mika_np_autolevel(gray)
-    p = np.pad(g, 1, mode="edge")
-    gx = (p[:-2, 2:] + 2.0 * p[1:-1, 2:] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[1:-1, :-2] + p[2:, :-2])
-    gy = (p[2:, :-2] + 2.0 * p[2:, 1:-1] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[:-2, 1:-1] + p[:-2, 2:])
-    mag = np.sqrt(gx * gx + gy * gy)
-    peak = float(mag.max()) if mag.size else 0.0
-    if peak < 1e-6:
-        return np.zeros_like(mag)
-    mag = mag / peak
-    ang = (np.arctan2(gy, gx) * 180.0 / np.pi) % 180.0
-
-    n1 = np.zeros_like(mag)
-    n2 = np.zeros_like(mag)
-    m0 = (ang < 22.5) | (ang >= 157.5)
-    m45 = (ang >= 22.5) & (ang < 67.5)
-    m90 = (ang >= 67.5) & (ang < 112.5)
-    m135 = (ang >= 112.5) & (ang < 157.5)
-    n1[m0] = np.roll(mag, 1, 1)[m0]
-    n2[m0] = np.roll(mag, -1, 1)[m0]
-    n1[m45] = np.roll(np.roll(mag, 1, 0), -1, 1)[m45]
-    n2[m45] = np.roll(np.roll(mag, -1, 0), 1, 1)[m45]
-    n1[m90] = np.roll(mag, 1, 0)[m90]
-    n2[m90] = np.roll(mag, -1, 0)[m90]
-    n1[m135] = np.roll(np.roll(mag, 1, 0), 1, 1)[m135]
-    n2[m135] = np.roll(np.roll(mag, -1, 0), -1, 1)[m135]
-    edges = np.where((mag >= n1) & (mag >= n2), mag, 0.0)
-
-    out = (edges >= high).copy()
-    weak = edges >= low
-    for _ in range(int(iters)):
-        grow = out | (weak & (np.roll(out, 1, 0) | np.roll(out, -1, 0) |
-                              np.roll(out, 1, 1) | np.roll(out, -1, 1)))
-        if not np.any(grow & ~out):
-            break
-        out = grow
-    return out.astype(np.float32)
-
-
-def _mika_np_color_sobel(rgb):
-    """Sobel sobre cada canal y máximo: agarra bordes de color (ropa vs piel)."""
-    m = None
-    for c in range(rgb.shape[2]):
-        s = _mika_np_sobel(rgb[:, :, c])
-        m = s if m is None else np.maximum(m, s)
-    return m
-
-
-def _mika_np_dilate(m, iters=1):
-    out = m
-    for _ in range(int(iters)):
-        out = np.maximum.reduce([out, np.roll(out, 1, 0), np.roll(out, -1, 0), np.roll(out, 1, 1), np.roll(out, -1, 1)])
-    return out
-
-
-def _mika_np_erode(m, iters=1):
-    out = m
-    for _ in range(int(iters)):
-        out = np.minimum.reduce([out, np.roll(out, 1, 0), np.roll(out, -1, 0), np.roll(out, 1, 1), np.roll(out, -1, 1)])
-    return out
-
-
-def _mika_np_close(m, iters=1):
-    return _mika_np_erode(_mika_np_dilate(m, iters), iters)
-
-
-def _mika_np_bool_small(mask, max_side):
-    """Baja una máscara booleana (para analizar componentes rápido)."""
-    h, w = mask.shape
-    s = min(1.0, float(max_side) / max(h, w))
-    if s >= 1.0:
-        return mask, (w, h)
-    tw, th = max(8, int(round(w * s))), max(8, int(round(h * s)))
-    im = Image.fromarray((mask.astype(np.uint8) * 255), "L").resize((tw, th), Image.NEAREST)
-    return np.asarray(im) > 127, (w, h)
-
-
-def _mika_np_label(mask):
-    """Componentes conexas (4-vecinos) por BFS. Devuelve (labels, sizes)."""
-    from collections import deque
-
-    h, w = mask.shape
-    labels = np.zeros((h, w), dtype=np.int32)
-    sizes = {}
-    cur = 0
-    ys, xs = np.nonzero(mask)
-    for y0, x0 in zip(ys.tolist(), xs.tolist()):
-        if labels[y0, x0] != 0:
-            continue
-        cur += 1
-        labels[y0, x0] = cur
-        q = deque([(y0, x0)])
-        n = 0
-        while q:
-            y, x = q.popleft()
-            n += 1
-            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
-                if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and labels[ny, nx] == 0:
-                    labels[ny, nx] = cur
-                    q.append((ny, nx))
-        sizes[cur] = n
-    return labels, sizes
-
-
-def _mika_np_keep_big(mask_bool, min_frac=0.05, max_side=256):
-    """Quita componentes chicos (texto, motas): deja las islas grandes."""
-    if not mask_bool.any():
-        return mask_bool
-    small, (w, h) = _mika_np_bool_small(mask_bool, max_side)
-    labels, sizes = _mika_np_label(small)
-    if not sizes:
-        return mask_bool
-    big = max(sizes.values())
-    keep = np.zeros_like(small)
-    for lbl, size in sizes.items():
-        if size >= max(3.0, big * min_frac):
-            keep |= labels == lbl
-    if (small.shape[1], small.shape[0]) != (w, h):
-        im = Image.fromarray((keep.astype(np.uint8) * 255), "L").resize((w, h), Image.NEAREST)
-        keep = np.asarray(im) > 127
-    return keep
-
-
-def _mika_np_subject_gate(rgb, tol=0.18, max_side=256):
-    """Máscara del 'sujeto' (el personaje): quita el fondo plano conectado al
-    borde y se queda con la isla más grande. Devuelve un bool HxW (True =
-    personaje). Si no encuentra nada razonable, devuelve todo True (sin filtro)."""
-    h, w = rgb.shape[:2]
-    s = min(1.0, float(max_side) / max(h, w))
-    tw, th = max(8, int(round(w * s))), max(8, int(round(h * s)))
-    small = rgb
-    if (tw, th) != (w, h):
-        im = Image.fromarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8), "RGB").resize((tw, th), Image.BILINEAR)
-        small = np.asarray(im).astype(np.float32) / 255.0
-
-    frame = np.concatenate([small[0], small[-1], small[:, 0], small[:, -1]], axis=0)
-    bg = np.median(frame, axis=0)
-    dist = np.max(np.abs(small - bg), axis=2)
-    bg_like = dist < tol
-
-    seed = np.zeros((th, tw), dtype=bool)
-    seed[0, :] = bg_like[0, :]
-    seed[-1, :] = bg_like[-1, :]
-    seed[:, 0] = bg_like[:, 0]
-    seed[:, -1] = bg_like[:, -1]
-    bg_mask = seed.copy()
-    for _ in range(160):
-        grow = bg_mask | (bg_like & (np.roll(bg_mask, 1, 0) | np.roll(bg_mask, -1, 0) |
-                                     np.roll(bg_mask, 1, 1) | np.roll(bg_mask, -1, 1)))
-        if not (grow & ~bg_mask).any():
-            break
-        bg_mask = grow
-
-    subject = ~bg_mask
-    if subject.any():
-        labels, sizes = _mika_np_label(subject)
-        if sizes:
-            big = max(sizes, key=sizes.get)
-            subject = labels == big
-
-    # Si el "sujeto" es casi vacío o casi todo, no filtrar (evita salidas en blanco).
-    frac = float(subject.mean())
-    if frac < 0.02 or frac > 0.98:
-        gate_small = np.ones((th, tw), dtype=bool)
-    else:
-        gate_small = subject
-
-    if (tw, th) == (w, h):
-        return gate_small
-    im = Image.fromarray((gate_small.astype(np.uint8) * 255), "L").resize((w, h), Image.NEAREST)
-    return np.asarray(im) > 127
-
-
-def _mika_norm_mask(m, floor=0.006):
-    """Normaliza a 0..1 sin amplificar el ruido de una imagen plana."""
-    m = np.clip(m - floor, 0.0, None)
-    peak = float(m.max()) if m.size else 0.0
-    if peak < 1e-6:
-        return np.zeros_like(m)
-    return np.clip(m / peak, 0.0, 1.0)
-
-
-def _mika_preprocess(image_pil, preprocesador="lineart", resolution=None):
-    """Máscara de lineart "L" (255 = línea) al tamaño de `image_pil`.
-    Con `resolution`, se calcula acotado a ese lado mayor y se devuelve al
-    tamaño original. Nombre desconocido -> ValueError."""
-    if preprocesador not in _MIKA_PREPROCESSORS:
-        raise ValueError(f"preprocesador desconocido: {preprocesador}")
-
-    img = image_pil.convert("RGB")
-    orig_size = img.size
-
-    if resolution:
-        long_side = max(orig_size)
-        if long_side > int(resolution) > 0:
-            s = int(resolution) / long_side
-            img = img.resize(
-                (max(1, round(orig_size[0] * s)), max(1, round(orig_size[1] * s))),
-                Image.LANCZOS,
-            )
-
-    rgb = np.asarray(img).astype(np.float32) / 255.0
-    g = _mika_np_gray(img)
-
-    if preprocesador == "lineart":
-        mask = _mika_norm_mask(np.abs(_mika_np_blur(g, 1.0) - _mika_np_blur(g, 3.0)))
-    elif preprocesador == "lineart suave":
-        mask = _mika_norm_mask(np.abs(_mika_np_blur(g, 2.0) - _mika_np_blur(g, 6.0)))
-    elif preprocesador == "lineart xdog":
-        # XDoG con auto-niveles: anda bien en realistas/3D y en imágenes oscuras.
-        mask = _mika_norm_mask(np.clip(_mika_np_xdog(_mika_np_autolevel(g)), 0.0, None))
-    elif preprocesador == "lineart sujeto":
-        # Bordes a COLOR limitados al personaje (afuera, fondo en 0).
-        base = _mika_norm_mask(_mika_np_color_sobel(rgb))
-        mask = base * _mika_np_subject_gate(rgb).astype(np.float32)
-    elif preprocesador == "lineart limpio":
-        # A color, limitado al personaje y sin texto/motas (componentes chicos).
-        gate = _mika_np_subject_gate(rgb).astype(np.float32)
-        base = (_mika_norm_mask(_mika_np_color_sobel(rgb)) * gate) > 0.25
-        base = _mika_np_keep_big(base, 0.05)
-        mask = _mika_np_close(base.astype(np.float32), 1)
-    elif preprocesador == "bordes":
-        mask = _mika_norm_mask(_mika_np_sobel(g))
-    elif preprocesador == "canny":
-        mask = _mika_np_canny(g)
-    elif preprocesador == "umbral":
-        # Umbral adaptativo RELATIVO (por desvío local): no falla si es oscura.
-        mean, std = _mika_np_local_stats(g, 8)
-        mask = _mika_norm_mask(np.clip(mean - g - 0.5 * std, 0.0, None))
-    elif preprocesador == "contraste":
-        # Contraste local normalizado: rescata líneas en zonas oscuras.
-        mean, std = _mika_np_local_stats(g, 8)
-        mask = _mika_norm_mask(np.clip((mean - g) / (std + 0.03), 0.0, None))
-    elif preprocesador == "contorno":
-        # Silueta del personaje + bordes internos a color (contorno marcado).
-        gate = _mika_np_subject_gate(rgb).astype(np.float32)
-        sil = _mika_norm_mask(np.abs(_mika_np_sobel(_mika_np_blur(gate, 1.5))))
-        inner = _mika_norm_mask(_mika_np_color_sobel(rgb)) * gate
-        mask = np.clip(np.maximum(sil, inner), 0.0, 1.0)
-    elif preprocesador == "lineas gruesas":
-        # Como "lineart limpio" pero engrosado (líneas bien definidas).
-        gate = _mika_np_subject_gate(rgb).astype(np.float32)
-        base = (_mika_norm_mask(_mika_np_color_sobel(rgb)) * gate) > 0.25
-        base = _mika_np_keep_big(base, 0.05)
-        mask = _mika_np_dilate(_mika_np_close(base.astype(np.float32), 1), 1)
-    else:  # "tinta"
-        mask = np.where(_mika_norm_mask(_mika_np_sobel(g)) > 0.2, 1.0, 0.0)
-
-    out = Image.fromarray((np.clip(mask, 0.0, 1.0) * 255.0).round().astype(np.uint8), "L")
-    if out.size != orig_size:
-        out = out.resize(orig_size, Image.LANCZOS)
-    return out
-
+def _mika_validate_preprocesador(value):
+    # Un workflow viejo puede traer un valor ya inexistente (p. ej. "lineart"): caer al default.
+    return value if value in _MIKA_PREPROCESSORS else "LineArtPreprocessor"
 
 # Ruta del servidor para el botón "⚡ Lineart" del canvas (no encola el grafo:
 # solo preprocesa la imagen que manda el navegador y la devuelve).
@@ -971,9 +673,9 @@ if PromptServer is not None and PromptServer.instance is not None:
             return web.json_response({"error": f"imagen inválida: {exc}"}, status=400)
 
         try:
-            res = int(data.get("resolution")) if data.get("resolution") else None
+            res = int(data.get("resolution")) if data.get("resolution") else 512
         except Exception:
-            res = None
+            res = 512
 
         loop = asyncio.get_running_loop()
         try:
@@ -4133,7 +3835,7 @@ class AnimaLineartCanvasMika:
                 "archivo": ("STRING", {"default": ""}),
                 # Preprocesador de lineart elegido en la barra del lienzo
                 # (solo persiste; el preprocesamiento lo corre la ruta).
-                "preprocesador": (_MIKA_PREPROCESSORS, {"default": "lineart"}),
+                "preprocesador": (_MIKA_PREPROCESSORS, {"default": "LineArtPreprocessor", "validate": _mika_validate_preprocesador}),
             },
         }
 
@@ -4187,7 +3889,7 @@ class AnimaInpaintCanvasMika:
                 "imagen": ("IMAGE",),
                 # Preprocesador de lineart elegido en la barra del lienzo
                 # (solo persiste; el preprocesamiento lo corre la ruta).
-                "preprocesador": (_MIKA_PREPROCESSORS, {"default": "lineart"}),
+                "preprocesador": (_MIKA_PREPROCESSORS, {"default": "LineArtPreprocessor", "validate": _mika_validate_preprocesador}),
             },
         }
 
