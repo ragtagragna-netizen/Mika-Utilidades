@@ -1395,6 +1395,57 @@ def _mika_pose_gallery_webp_to_png(data):
     return buf.getvalue()
 
 
+# El CDN de WaveSpeed rechaza clientes sin User-Agent de navegador.
+_MIKA_POSE_GALLERY_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+    ),
+}
+
+
+def _mika_pose_gallery_blank_tensor():
+    """Imagen neutra 64x64 gris (sin selección, pose inexistente o sin red)."""
+    return torch.full((1, 64, 64, 3), 0.5)
+
+
+def _mika_pose_gallery_ensure(name):
+    """Ruta del .webp cacheado; lo baja del CDN y lo guarda si falta."""
+    if not _mika_pose_gallery_valid_file(name):
+        return None
+    path = _mika_pose_gallery_path(name)
+    if os.path.isfile(path):
+        return path
+
+    base = _mika_pose_gallery_load_manifest().get("image_base") or ""
+    if not base:
+        return None
+    try:
+        os.makedirs(_MIKA_POSE_GALLERY_DIR, exist_ok=True)
+        resp = requests.get(
+            base + name, headers=_MIKA_POSE_GALLERY_HEADERS, timeout=30)
+        resp.raise_for_status()
+        tmp = path + ".part"
+        with open(tmp, "wb") as f:
+            f.write(resp.content)
+        os.replace(tmp, path)
+        return path
+    except Exception:
+        return None
+
+
+def _mika_pose_gallery_read_bytes(name):
+    """Bytes de la imagen cacheada (bajándola si falta), o None."""
+    path = _mika_pose_gallery_ensure(name)
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
 MAX_SCORES = 50
 
 
@@ -4109,6 +4160,49 @@ class AnimaInpaintCanvasMika:
         mask = _mika_mask_to_tensor(mascara, width, height)
         trazo = _mika_lineart_to_tensor(dibujo, width, height, bg)
         return (image, mask, trazo, width, height, archivo)
+
+
+class PoseGalleryMika:
+    """
+    Pose Gallery-Mika: galería de las 491 poses de WaveSpeed AI (buscador,
+    categoría, estilo line/3d y ángulo Front/3/4/Side). La ventana
+    (web/pose_gallery_mika.js) guarda la pose elegida como JSON en el widget
+    oculto "seleccion"; este nodo la resuelve a su imagen cacheada y la
+    entrega como IMAGE, más el nombre y la descripción de la pose.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                # JSON {"id","estilo","angulo"}; lo escribe el frontend.
+                "seleccion": ("STRING", {"default": "", "multiline": False}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "nombre", "descripcion")
+    FUNCTION = "render"
+    CATEGORY = "Mika Utilidades/image"
+
+    def render(self, seleccion=""):
+        sel = _mika_pose_gallery_parse_seleccion(seleccion)
+        index = _mika_pose_gallery_index(_mika_pose_gallery_load_manifest())
+        pose = index.get(sel["id"]) if sel["id"] else None
+        if not pose:
+            return (_mika_pose_gallery_blank_tensor(), "", "")
+
+        name = _mika_pose_gallery_resolve(
+            index, sel["id"], sel["estilo"], sel["angulo"])
+        data = _mika_pose_gallery_read_bytes(name) if name else None
+        if data is None:
+            img = _mika_pose_gallery_blank_tensor()
+        else:
+            try:
+                img = _mika_pose_gallery_to_tensor(data)
+            except Exception:
+                img = _mika_pose_gallery_blank_tensor()
+        return (img, pose.get("name", ""), pose.get("desc", ""))
 
 
 class AnimaResolutionsMika:
@@ -9137,6 +9231,7 @@ NODE_CLASS_MAPPINGS = {
     "ImageSaverPcMika": ImageSaverPcMika,
     "AnimaLineartCanvasMika": AnimaLineartCanvasMika,
     "AnimaInpaintCanvasMika": AnimaInpaintCanvasMika,
+    "PoseGalleryMika": PoseGalleryMika,
     "ImageRegionSelectMika": ImageRegionSelectMika,
     "RegionUnpackMika": RegionUnpackMika,
 }
@@ -9221,6 +9316,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageSaverPcMika": "Image Saver PC-Mika",
     "AnimaLineartCanvasMika": "Anima Lineart Canvas-Mika",
     "AnimaInpaintCanvasMika": "Anima Inpaint Canvas-Mika",
+    "PoseGalleryMika": "Pose Gallery-Mika",
     "ImageRegionSelectMika": "Image Region Select-Mika",
     "RegionUnpackMika": "Region Unpack-Mika",
 }
