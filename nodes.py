@@ -1271,6 +1271,81 @@ if PromptServer is not None and PromptServer.instance is not None:
         return _web.FileResponse(
             cache_path, headers={"Cache-Control": "no-cache"})
 
+    @PromptServer.instance.routes.get("/mika/pose_gallery/list")
+    async def _mika_pose_gallery_list(request):
+        from aiohttp import web as _web
+        return _web.json_response(_mika_pose_gallery_load_manifest())
+
+    @PromptServer.instance.routes.get("/mika/pose_gallery/image")
+    async def _mika_pose_gallery_image(request):
+        from aiohttp import web as _web
+        import asyncio
+
+        name = request.query.get("file", "")
+        if not _mika_pose_gallery_valid_file(name):
+            return _web.Response(status=404)
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(
+            None, _mika_pose_gallery_read_bytes, name)
+        if data is None:
+            return _web.Response(status=404)
+        # format=png: para el portapapeles (ClipboardItem solo acepta PNG).
+        if request.query.get("format") == "png":
+            png = await loop.run_in_executor(
+                None, _mika_pose_gallery_webp_to_png, data)
+            return _web.Response(body=png, content_type="image/png")
+        return _web.Response(
+            body=data, content_type="image/webp",
+            headers={"Cache-Control": "no-cache"})
+
+    @PromptServer.instance.routes.get("/mika/pose_gallery/thumb")
+    async def _mika_pose_gallery_thumb(request):
+        from aiohttp import web as _web
+        import asyncio
+
+        name = request.query.get("file", "")
+        try:
+            size = int(request.query.get("size", "240"))
+        except ValueError:
+            size = 240
+        if not _mika_pose_gallery_valid_file(name):
+            return _web.Response(status=404)
+        path = await asyncio.get_event_loop().run_in_executor(
+            None, _mika_pose_gallery_ensure_thumb, name, size)
+        if not path:
+            return _web.Response(status=404)
+        return _web.FileResponse(
+            path, headers={"Cache-Control": "no-cache"})
+
+    @PromptServer.instance.routes.get("/mika/pose_gallery/cache")
+    async def _mika_pose_gallery_cache(request):
+        from aiohttp import web as _web
+        import threading
+
+        scope = "all" if request.query.get("scope") == "all" else "line"
+        job = _MIKA_POSE_GALLERY_CACHE_JOB
+        if job.get("running"):
+            return _web.json_response(
+                {"started": False, "running": True, "scope": scope})
+
+        total = 0
+        for pose in _mika_pose_gallery_load_manifest().get("poses", []):
+            img = pose.get("img") or {}
+            total += len(img.get("line") or [])
+            if scope == "all":
+                total += len(img.get("3d") or [])
+        job.update({"done": 0, "total": total, "running": True})
+        threading.Thread(
+            target=_mika_pose_gallery_run_cache, args=(scope,),
+            daemon=True).start()
+        return _web.json_response(
+            {"started": True, "running": True, "scope": scope})
+
+    @PromptServer.instance.routes.get("/mika/pose_gallery/cache_status")
+    async def _mika_pose_gallery_cache_status(request):
+        from aiohttp import web as _web
+        return _web.json_response(_MIKA_POSE_GALLERY_CACHE_JOB)
+
 
 # ======================================================================
 # POSE GALLERY (Pose Gallery-Mika): datos, caché y conversión de las poses.
@@ -1444,6 +1519,54 @@ def _mika_pose_gallery_read_bytes(name):
             return f.read()
     except Exception:
         return None
+
+
+def _mika_pose_gallery_ensure_thumb(name, size):
+    """Ruta de la miniatura cacheada; la genera del original si falta."""
+    if not _mika_pose_gallery_valid_file(name):
+        return None
+    try:
+        size = max(64, min(int(size), 512))
+    except Exception:
+        size = 240
+
+    path = _mika_pose_gallery_thumb_path(name, size)
+    if os.path.isfile(path):
+        return path
+
+    data = _mika_pose_gallery_read_bytes(name)
+    if data is None:
+        return None
+    try:
+        os.makedirs(_MIKA_POSE_GALLERY_THUMBS, exist_ok=True)
+        img = Image.open(BytesIO(data)).convert("RGB")
+        img.thumbnail((size, size))
+        tmp = path + ".part"
+        img.save(tmp, "WEBP")
+        os.replace(tmp, path)
+        return path
+    except Exception:
+        return None
+
+
+# Progreso de la descarga masiva: {done, total, running}.
+_MIKA_POSE_GALLERY_CACHE_JOB = {"done": 0, "total": 0, "running": False}
+
+
+def _mika_pose_gallery_run_cache(scope):
+    """Baja y cachea las imágenes (line; con scope='all' también 3d)."""
+    job = _MIKA_POSE_GALLERY_CACHE_JOB
+    try:
+        for pose in _mika_pose_gallery_load_manifest().get("poses", []):
+            img = pose.get("img") or {}
+            files = list(img.get("line") or [])
+            if scope == "all":
+                files += list(img.get("3d") or [])
+            for name in files:
+                _mika_pose_gallery_ensure(name)
+                job["done"] += 1
+    finally:
+        job["running"] = False
 
 
 MAX_SCORES = 50
