@@ -1272,6 +1272,129 @@ if PromptServer is not None and PromptServer.instance is not None:
             cache_path, headers={"Cache-Control": "no-cache"})
 
 
+# ======================================================================
+# POSE GALLERY (Pose Gallery-Mika): datos, caché y conversión de las poses.
+# El listado va empaquetado en data/poses.json; las imágenes se bajan del CDN
+# de WaveSpeed y se cachean en user/mika_pose_gallery/ (fuera del paquete).
+# ======================================================================
+
+_MIKA_POSE_GALLERY_DIR = os.path.join(
+    folder_paths.base_path, "user", "mika_pose_gallery")
+_MIKA_POSE_GALLERY_THUMBS = os.path.join(_MIKA_POSE_GALLERY_DIR, "thumbs")
+_MIKA_POSE_GALLERY_JSON = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "poses.json")
+
+# Los archivos son UUID + .webp; cualquier separador de ruta se rechaza.
+_MIKA_POSE_GALLERY_FILE_RE = re.compile(r"^[0-9a-fA-F\-]+\.webp$")
+_MIKA_POSE_GALLERY_ESTILOS = ("line", "3d")
+_MIKA_POSE_GALLERY_ANGLES_MAX = 2  # Front / 3/4 / Side
+_MIKA_POSE_GALLERY_MANIFEST = None
+
+
+def _mika_pose_gallery_load_manifest():
+    """Manifiesto data/poses.json, leído una vez y cacheado en memoria."""
+    global _MIKA_POSE_GALLERY_MANIFEST
+    if _MIKA_POSE_GALLERY_MANIFEST is None:
+        try:
+            with open(_MIKA_POSE_GALLERY_JSON, "r", encoding="utf-8") as f:
+                _MIKA_POSE_GALLERY_MANIFEST = json.load(f)
+        except Exception:
+            _MIKA_POSE_GALLERY_MANIFEST = {
+                "poses": [], "total": 0, "image_base": "", "categories": []}
+    return _MIKA_POSE_GALLERY_MANIFEST
+
+
+def _mika_pose_gallery_index(manifest):
+    """{id: pose} a partir del manifiesto."""
+    return {
+        p.get("id"): p
+        for p in (manifest or {}).get("poses", [])
+        if p.get("id")
+    }
+
+
+def _mika_pose_gallery_parse_seleccion(seleccion):
+    """JSON del widget oculto -> {id, estilo, angulo} normalizado y seguro."""
+    out = {"id": "", "estilo": "line", "angulo": 0}
+    if isinstance(seleccion, (list, tuple)):
+        seleccion = seleccion[0] if seleccion else ""
+
+    data = None
+    if isinstance(seleccion, str) and seleccion.strip():
+        try:
+            data = json.loads(seleccion)
+        except Exception:
+            data = None
+
+    if isinstance(data, dict):
+        out["id"] = str(data.get("id") or "")
+        estilo = str(data.get("estilo") or "line")
+        out["estilo"] = estilo if estilo in _MIKA_POSE_GALLERY_ESTILOS else "line"
+        try:
+            angulo = int(data.get("angulo", 0))
+        except Exception:
+            angulo = 0
+        # Fuera de rango (o basura) vuelve a Front; nunca rompe el índice.
+        out["angulo"] = angulo if 0 <= angulo <= _MIKA_POSE_GALLERY_ANGLES_MAX else 0
+
+    return out
+
+
+def _mika_pose_gallery_resolve(index, pose_id, estilo, angulo):
+    """Nombre del .webp de la pose elegida, o None si no existe la pose."""
+    pose = (index or {}).get(pose_id)
+    if not pose:
+        return None
+
+    img = pose.get("img") or {}
+    estilo = estilo if estilo in _MIKA_POSE_GALLERY_ESTILOS else "line"
+    files = img.get(estilo)
+    if not isinstance(files, list) or not files:
+        files = img.get("line") or []
+    if not files:
+        return None
+
+    try:
+        i = int(angulo)
+    except Exception:
+        i = 0
+    if not (0 <= i <= _MIKA_POSE_GALLERY_ANGLES_MAX) or i >= len(files):
+        i = 0
+    return files[i]
+
+
+def _mika_pose_gallery_valid_file(name):
+    """True solo para <uuid>.webp (sin rutas ni separadores)."""
+    return bool(isinstance(name, str) and _MIKA_POSE_GALLERY_FILE_RE.match(name))
+
+
+def _mika_pose_gallery_path(name):
+    return os.path.join(_MIKA_POSE_GALLERY_DIR, name)
+
+
+def _mika_pose_gallery_thumb_path(name, size):
+    try:
+        size = max(64, min(int(size), 512))
+    except Exception:
+        size = 240
+    return os.path.join(_MIKA_POSE_GALLERY_THUMBS, f"{name}.{size}.webp")
+
+
+def _mika_pose_gallery_to_tensor(data):
+    """Bytes de imagen (webp/png) -> tensor IMAGE [1,H,W,3] en 0..1."""
+    img = Image.open(BytesIO(data)).convert("RGB")
+    arr = np.asarray(img).astype(np.float32) / 255.0
+    return torch.from_numpy(arr)[None, ...]
+
+
+def _mika_pose_gallery_webp_to_png(data):
+    """Bytes de imagen -> PNG (para el portapapeles: solo acepta image/png)."""
+    img = Image.open(BytesIO(data)).convert("RGB")
+    buf = BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
 MAX_SCORES = 50
 
 
