@@ -17,6 +17,7 @@ import re
 import json
 import folder_paths
 import time
+import threading
 import random as random_module
 import comfy.samplers
 from comfy_api.latest import io as grid_io
@@ -1292,7 +1293,9 @@ if PromptServer is not None and PromptServer.instance is not None:
         # format=png: para el portapapeles (ClipboardItem solo acepta PNG).
         if request.query.get("format") == "png":
             png = await loop.run_in_executor(
-                None, _mika_pose_gallery_webp_to_png, data)
+                None, _mika_pose_gallery_png_or_none, data)
+            if png is None:
+                return _web.Response(status=404)
             return _web.Response(body=png, content_type="image/png")
         return _web.Response(
             body=data, content_type="image/webp",
@@ -1334,7 +1337,7 @@ if PromptServer is not None and PromptServer.instance is not None:
             total += len(img.get("line") or [])
             if scope == "all":
                 total += len(img.get("3d") or [])
-        job.update({"done": 0, "total": total, "running": True})
+        job.update({"done": 0, "total": total, "failed": 0, "running": True})
         threading.Thread(
             target=_mika_pose_gallery_run_cache, args=(scope,),
             daemon=True).start()
@@ -1367,15 +1370,23 @@ _MIKA_POSE_GALLERY_MANIFEST = None
 
 
 def _mika_pose_gallery_load_manifest():
-    """Manifiesto data/poses.json, leído una vez y cacheado en memoria."""
+    """Manifiesto data/poses.json, cacheado. Reintenta mientras esté vacío
+    (por si falló una lectura transitoria) y avisa con 'error' si no está."""
     global _MIKA_POSE_GALLERY_MANIFEST
-    if _MIKA_POSE_GALLERY_MANIFEST is None:
-        try:
-            with open(_MIKA_POSE_GALLERY_JSON, "r", encoding="utf-8") as f:
-                _MIKA_POSE_GALLERY_MANIFEST = json.load(f)
-        except Exception:
-            _MIKA_POSE_GALLERY_MANIFEST = {
-                "poses": [], "total": 0, "image_base": "", "categories": []}
+    cached = _MIKA_POSE_GALLERY_MANIFEST
+    if cached and cached.get("poses"):
+        return cached
+
+    try:
+        with open(_MIKA_POSE_GALLERY_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data.setdefault("poses", [])
+        _MIKA_POSE_GALLERY_MANIFEST = data
+    except Exception as exc:
+        _MIKA_POSE_GALLERY_MANIFEST = {
+            "poses": [], "total": 0, "image_base": "", "categories": [],
+            "error": str(exc),
+        }
     return _MIKA_POSE_GALLERY_MANIFEST
 
 
@@ -1484,6 +1495,21 @@ def _mika_pose_gallery_blank_tensor():
     return torch.full((1, 64, 64, 3), 0.5)
 
 
+# Un lock por archivo: dos hilos (grilla, preview, descarga masiva) no deben
+# escribir el mismo .part a la vez.
+_MIKA_POSE_GALLERY_LOCKS = {}
+_MIKA_POSE_GALLERY_LOCKS_GUARD = threading.Lock()
+
+
+def _mika_pose_gallery_lock(key):
+    with _MIKA_POSE_GALLERY_LOCKS_GUARD:
+        lock = _MIKA_POSE_GALLERY_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _MIKA_POSE_GALLERY_LOCKS[key] = lock
+        return lock
+
+
 def _mika_pose_gallery_ensure(name):
     """Ruta del .webp cacheado; lo baja del CDN y lo guarda si falta."""
     if not _mika_pose_gallery_valid_file(name):
@@ -1495,18 +1521,23 @@ def _mika_pose_gallery_ensure(name):
     base = _mika_pose_gallery_load_manifest().get("image_base") or ""
     if not base:
         return None
-    try:
-        os.makedirs(_MIKA_POSE_GALLERY_DIR, exist_ok=True)
-        resp = requests.get(
-            base + name, headers=_MIKA_POSE_GALLERY_HEADERS, timeout=30)
-        resp.raise_for_status()
-        tmp = path + ".part"
-        with open(tmp, "wb") as f:
-            f.write(resp.content)
-        os.replace(tmp, path)
-        return path
-    except Exception:
-        return None
+
+    with _mika_pose_gallery_lock(name):
+        if os.path.isfile(path):   # otro hilo ya lo bajó mientras esperábamos
+            return path
+        try:
+            os.makedirs(_MIKA_POSE_GALLERY_DIR, exist_ok=True)
+            resp = requests.get(
+                base + name, headers=_MIKA_POSE_GALLERY_HEADERS,
+                timeout=(10, 30))
+            resp.raise_for_status()
+            tmp = path + ".part"
+            with open(tmp, "wb") as f:
+                f.write(resp.content)
+            os.replace(tmp, path)
+            return path
+        except Exception:
+            return None
 
 
 def _mika_pose_gallery_read_bytes(name):
@@ -1534,28 +1565,46 @@ def _mika_pose_gallery_ensure_thumb(name, size):
     if os.path.isfile(path):
         return path
 
-    data = _mika_pose_gallery_read_bytes(name)
-    if data is None:
-        return None
+    with _mika_pose_gallery_lock(f"{name}.{size}.thumb"):
+        if os.path.isfile(path):
+            return path
+        data = _mika_pose_gallery_read_bytes(name)
+        if data is None:
+            return None
+        try:
+            os.makedirs(_MIKA_POSE_GALLERY_THUMBS, exist_ok=True)
+            img = Image.open(BytesIO(data)).convert("RGB")
+            img.thumbnail((size, size))
+            tmp = path + ".part"
+            img.save(tmp, "WEBP")
+            os.replace(tmp, path)
+            return path
+        except Exception:
+            return None
+
+
+def _mika_pose_gallery_png_or_none(data):
+    """PNG de la imagen, o None si no se puede convertir (para no dar 500)."""
     try:
-        os.makedirs(_MIKA_POSE_GALLERY_THUMBS, exist_ok=True)
-        img = Image.open(BytesIO(data)).convert("RGB")
-        img.thumbnail((size, size))
-        tmp = path + ".part"
-        img.save(tmp, "WEBP")
-        os.replace(tmp, path)
-        return path
+        return _mika_pose_gallery_webp_to_png(data)
     except Exception:
         return None
 
 
-# Progreso de la descarga masiva: {done, total, running}.
-_MIKA_POSE_GALLERY_CACHE_JOB = {"done": 0, "total": 0, "running": False}
+# Progreso de la descarga masiva: {done, total, failed, running}.
+_MIKA_POSE_GALLERY_CACHE_JOB = {"done": 0, "total": 0, "failed": 0, "running": False}
+# Fallos seguidos antes de cortar: sin red no tiene sentido seguir intentando.
+_MIKA_POSE_GALLERY_CACHE_FAIL_LIMIT = 5
 
 
 def _mika_pose_gallery_run_cache(scope):
-    """Baja y cachea las imágenes (line; con scope='all' también 3d)."""
+    """Baja y cachea las imágenes (line; con scope='all' también 3d).
+
+    Si falla varias veces seguidas (típico sin internet) corta temprano, así el
+    trabajo no queda 'running' durante horas ni bloquea nuevos pedidos.
+    """
     job = _MIKA_POSE_GALLERY_CACHE_JOB
+    consecutive_fail = 0
     try:
         for pose in _mika_pose_gallery_load_manifest().get("poses", []):
             img = pose.get("img") or {}
@@ -1563,8 +1612,15 @@ def _mika_pose_gallery_run_cache(scope):
             if scope == "all":
                 files += list(img.get("3d") or [])
             for name in files:
-                _mika_pose_gallery_ensure(name)
+                ok = _mika_pose_gallery_ensure(name) is not None
                 job["done"] += 1
+                if ok:
+                    consecutive_fail = 0
+                else:
+                    job["failed"] = job.get("failed", 0) + 1
+                    consecutive_fail += 1
+                    if consecutive_fail >= _MIKA_POSE_GALLERY_CACHE_FAIL_LIMIT:
+                        return
     finally:
         job["running"] = False
 

@@ -73,25 +73,33 @@ function chooseScope(onPick) {
 	document.body.appendChild(ov);
 }
 
-// Arranca la descarga masiva en el servidor y sigue el progreso.
-async function startBulkDownload(scope, setLabel) {
-	let poll = 0;
-	try {
-		const job = fetch(`/mika/pose_gallery/cache?scope=${scope}`);
-		poll = setInterval(async () => {
-			try {
-				const s = await (await fetch("/mika/pose_gallery/cache_status")).json();
+// Arranca la descarga masiva en el servidor y sigue el progreso. El endpoint
+// devuelve enseguida (lanza un hilo), así que hay que esperar a que
+// cache_status diga que terminó; resolver al final mantiene el botón ocupado.
+function startBulkDownload(scope, setLabel) {
+	return new Promise((resolve) => {
+		let poll = 0;
+		const stop = (label) => {
+			if (poll) { clearInterval(poll); poll = 0; }
+			setLabel(label);
+			resolve();
+		};
+		fetch(`/mika/pose_gallery/cache?scope=${scope}`).then(() => {
+			poll = setInterval(async () => {
+				let s = null;
+				try {
+					s = await (await fetch("/mika/pose_gallery/cache_status")).json();
+				} catch (e) {
+					return; // reintenta en el próximo tick
+				}
 				if (s.total > 0) setLabel(`⬇ Descargando ${s.done}/${s.total}...`);
-				if (!s.running && poll) { clearInterval(poll); poll = 0; }
-			} catch (e) { /* reintenta */ }
-		}, 500);
-		await job;
-	} catch (err) {
-		console.error("PoseGalleryMika:", err);
-	} finally {
-		if (poll) clearInterval(poll);
-		setLabel("⬇ Descargar todas");
-	}
+				if (!s.running) stop("⬇ Descargar todas");
+			}, 500);
+		}).catch((err) => {
+			console.error("PoseGalleryMika:", err);
+			stop("⬇ Descargar todas (error)");
+		});
+	});
 }
 
 app.registerExtension({
