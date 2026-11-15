@@ -294,6 +294,12 @@ function shapePath(ctx, id, x0, y0, x1, y1) {
 let activeEditor = null;
 let editorZ = 10020;
 
+// Geometría de la ventana flotante (preferencia de UI, no del workflow).
+const EDITOR_GEOM_KEY = "mikaLineart.editorWindow";
+const EDITOR_MIN_W = 900;
+const EDITOR_MIN_H = 600;
+const EDITOR_EDGE = 8;
+
 app.registerExtension({
 	name: "Mika.AnimaLineartCanvas",
 
@@ -1750,6 +1756,67 @@ app.registerExtension({
 			else openEditor(node);
 		}
 
+		// 90vw × 85vh centrada, como el diálogo del editor de máscaras.
+		function defaultEditorGeom() {
+			const vw = window.innerWidth;
+			const vh = window.innerHeight;
+			const w = Math.max(EDITOR_MIN_W, Math.round(vw * 0.9));
+			const h = Math.max(EDITOR_MIN_H, Math.round(vh * 0.85));
+			return { w, h, x: Math.round((vw - w) / 2), y: Math.round((vh - h) / 2) };
+		}
+
+		// Deja la ventana dentro de la pantalla actual: mínimo 900×600 y al menos
+		// 80 px de encabezado visibles (nunca se pierde el arrastre).
+		function clampEditorGeom(g) {
+			const vw = window.innerWidth;
+			const vh = window.innerHeight;
+			const d = defaultEditorGeom();
+			const num = (v, fallback) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : fallback);
+			const w = Math.max(EDITOR_MIN_W, Math.min(num(g?.w, d.w), Math.max(EDITOR_MIN_W, vw - EDITOR_EDGE * 2)));
+			const h = Math.max(EDITOR_MIN_H, Math.min(num(g?.h, d.h), Math.max(EDITOR_MIN_H, vh - EDITOR_EDGE * 2)));
+			const x = Math.min(Math.max(num(g?.x, d.x), 80 - w), Math.max(0, vw - 80));
+			const y = Math.min(Math.max(num(g?.y, d.y), 0), Math.max(0, vh - 40));
+			return { w, h, x, y };
+		}
+
+		function readEditorGeom() {
+			try {
+				const raw = window.localStorage?.getItem(EDITOR_GEOM_KEY);
+				if (!raw) return null;
+				const g = JSON.parse(raw);
+				if (!g || ![g.w, g.h, g.x, g.y].every((n) => Number.isFinite(Number(n)))) return null;
+				return g;
+			} catch (e) {
+				return null;
+			}
+		}
+
+		function writeEditorGeom(g) {
+			try {
+				const c = clampEditorGeom(g);
+				window.localStorage?.setItem(EDITOR_GEOM_KEY, JSON.stringify(c));
+				return c;
+			} catch (e) {
+				return null;
+			}
+		}
+
+		function applyEditorGeom(root, g) {
+			root.style.left = g.x + "px";
+			root.style.top = g.y + "px";
+			root.style.width = g.w + "px";
+			root.style.height = g.h + "px";
+		}
+
+		// Guarda la geometría actual, clampeada a la pantalla.
+		function saveEditorGeom(node) {
+			const st = node._mikaLineart;
+			const root = st?.editorRoot;
+			if (!root) return;
+			const r = root.getBoundingClientRect();
+			return writeEditorGeom({ w: r.width, h: r.height, x: r.left, y: r.top });
+		}
+
 		function openEditor(node) {
 			const st = node._mikaLineart;
 			if (!st || typeof node.addDOMWidget !== "function") return;
@@ -1759,14 +1826,10 @@ app.registerExtension({
 			root.dataset.mika = "editor-root";
 			root.tabIndex = -1;
 			root.style.position = "fixed";
-			root.style.left = "50%";
-			root.style.top = "50%";
-			root.style.transform = "translate(-50%, -50%)";
-			root.style.width = "min(1180px, 94vw)";
-			root.style.height = "min(780px, 90vh)";
-			root.style.minWidth = "900px";
-			root.style.minHeight = "600px";
+			root.style.boxSizing = "border-box";
 			root.style.resize = "both";
+			root.style.minWidth = EDITOR_MIN_W + "px";
+			root.style.minHeight = EDITOR_MIN_H + "px";
 			root.style.overflow = "hidden";
 			root.style.zIndex = String(++editorZ);
 			root.style.display = "flex";
@@ -1775,9 +1838,12 @@ app.registerExtension({
 			root.style.background = "var(--comfy-menu-bg, #1e1e1e)";
 			root.style.color = "var(--input-text, #eee)";
 			root.style.border = "1px solid var(--border-color, #444)";
-			root.style.borderRadius = "6px";
+			root.style.borderRadius = "0";
 			root.style.boxShadow = "0 10px 40px rgba(0, 0, 0, 0.5)";
 			root.style.outline = "none";
+			// Tamaño/posición recordados (o 90vw × 85vh centrada), saneados.
+			const geom = clampEditorGeom(readEditorGeom() || defaultEditorGeom());
+			applyEditorGeom(root, geom);
 
 			// Encabezado: título + cerrar, y arrastre de la ventana.
 			const header = document.createElement("div");
@@ -1791,10 +1857,10 @@ app.registerExtension({
 
 			let drag = null;
 			header.addEventListener("pointerdown", (e) => {
-				if (e.target === closeBtn) return;
+				// Los botones del encabezado (historial, cerrar) no arrastran.
+				if (e.target.closest?.("button")) return;
 				const r = root.getBoundingClientRect();
 				drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
-				root.style.transform = "none";
 				root.style.left = r.left + "px";
 				root.style.top = r.top + "px";
 				try { header.setPointerCapture(e.pointerId); } catch (err) { /* no-op */ }
@@ -1802,12 +1868,29 @@ app.registerExtension({
 			});
 			header.addEventListener("pointermove", (e) => {
 				if (!drag) return;
-				root.style.left = Math.max(0, e.clientX - drag.dx) + "px";
-				root.style.top = Math.max(0, e.clientY - drag.dy) + "px";
+				// El arrastre deja al menos un trozo de encabezado a la vista.
+				const r = root.getBoundingClientRect();
+				const x = Math.min(Math.max(e.clientX - drag.dx, 80 - r.width), window.innerWidth - 80);
+				const y = Math.min(Math.max(e.clientY - drag.dy, 0), Math.max(0, window.innerHeight - 40));
+				root.style.left = x + "px";
+				root.style.top = y + "px";
 			});
-			const endDrag = () => { drag = null; };
+			const endDrag = () => {
+				if (!drag) return;
+				drag = null;
+				// Se guarda clampeada: una ventana que quedó fuera de pantalla
+				// reabre adentro (en la sesión actual no se mueve sola).
+				saveEditorGeom(node);
+			};
 			header.addEventListener("pointerup", endDrag);
 			header.addEventListener("pointercancel", endDrag);
+
+			// Doble clic en el título = volver al tamaño por defecto centrado.
+			title.addEventListener("dblclick", () => {
+				drag = null;
+				const g = writeEditorGeom(defaultEditorGeom()) || defaultEditorGeom();
+				applyEditorGeom(root, g);
+			});
 
 			// Cuerpo: riel de herramientas | centro (opciones + lienzo) | panel.
 			const body = document.createElement("div");
@@ -1924,6 +2007,14 @@ app.registerExtension({
 			surface.resizeObserver.observe(host);
 			requestAnimationFrame(() => fitStageToHost(node, surface));
 
+			// El resize nativo (esquina) no emite pointerup: se observa el root.
+			st.editorGeomObserver = new ResizeObserver(() => {
+				if (!st.editorRoot) return;
+				clearTimeout(st.editorGeomTimer);
+				st.editorGeomTimer = setTimeout(() => saveEditorGeom(node), 250);
+			});
+			st.editorGeomObserver.observe(root);
+
 			renderLayerPanel(node);
 			renderPreview(node);
 			drawUnderlay(node);
@@ -1941,6 +2032,10 @@ app.registerExtension({
 			const root = st.editorRoot;
 			const surface = st.editorSurface;
 			try { surface?.resizeObserver?.disconnect(); } catch (e) { /* no-op */ }
+			try { st.editorGeomObserver?.disconnect(); } catch (e) { /* no-op */ }
+			clearTimeout(st.editorGeomTimer);
+			st.editorGeomObserver = null;
+			st.editorGeomTimer = null;
 			st.surfaces = (st.surfaces || []).filter((s) => s !== surface);
 			if (st.layerPanels) st.layerPanels = st.layerPanels.filter((p) => p.mode !== "list");
 			st.editorRoot = null;
