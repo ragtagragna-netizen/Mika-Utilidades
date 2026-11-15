@@ -864,6 +864,48 @@ app.registerExtension({
 			return g;
 		}
 
+		// Agranda los controles de la ventana al lenguaje del editor de
+		// máscaras. Se aplica solo a las instancias `scope === "window"`: el
+		// nodo conserva sus 22 px.
+		function skinWindowControl(el) {
+			if (!el || !el.style) return;
+			const tag = el.tagName;
+			if (tag === "BUTTON" || tag === "INPUT" || tag === "SELECT" || tag === "LABEL") {
+				el.style.boxSizing = "border-box";
+			}
+			if (tag === "BUTTON" || tag === "LABEL") {
+				el.style.height = "26px";
+				el.style.minWidth = "32px";
+				el.style.padding = "0 8px";
+				el.style.fontSize = "13px";
+			} else if (tag === "INPUT" && el.type === "range") {
+				el.style.width = "140px";
+			} else if (tag === "INPUT" && el.type === "color") {
+				el.style.width = "36px";
+				el.style.height = "26px";
+			} else if (tag === "INPUT") {
+				el.style.height = "26px";
+				el.style.fontSize = "13px";
+				el.style.width = "120px";
+			} else if (tag === "SELECT") {
+				el.style.height = "28px";
+				el.style.fontSize = "13px";
+				el.style.maxWidth = "100%";
+			} else if (tag === "SPAN") {
+				el.style.fontSize = "12px";
+				el.style.minWidth = "22px";
+			}
+		}
+
+		function skinWindowParts(parts) {
+			for (const p of parts || []) {
+				skinWindowControl(p);
+				for (const el of p.querySelectorAll?.("button, select, input, span") || []) {
+					skinWindowControl(el);
+				}
+			}
+		}
+
 		function styleInput(el) {
 			el.style.height = "22px";
 			el.style.background = "var(--comfy-input-bg, #222)";
@@ -1246,8 +1288,10 @@ app.registerExtension({
 		}
 
 		// Botones de herramienta (pincel/borrador/difuminado/forma/texto/lazo y,
-		// en inpaint, las de máscara) con su outline activo.
-		function createToolsGroup(node) {
+		// en inpaint, las de máscara) con su marca de activa. En la ventana la
+		// marca es la barra izquierda del editor de máscaras; en el nodo, el
+		// outline de siempre.
+		function createToolsGroup(node, variant = "node") {
 			const st = node._mikaLineart;
 			const brushBtn = mkButton("✏️", "Pincel");
 			const eraserBtn = mkButton("🧽", "Borrador");
@@ -1274,8 +1318,21 @@ app.registerExtension({
 				};
 			}
 			const refresh = () => {
+				const isWindow = variant === "window";
 				for (const [id, b] of Object.entries(toolBtns)) {
-					b.style.outline = st.tool === id ? "1px solid #4a9" : "none";
+					const on = st.tool === id;
+					if (isWindow) {
+						// Editor de máscaras: barra izquierda + fondo tenue.
+						b.style.outline = "none";
+						b.style.boxShadow = on ? "inset 3px 0 0 #4a9" : "none";
+						b.style.background = on
+							? "rgba(68, 170, 153, 0.16)"
+							: "var(--comfy-input-bg, #222)";
+					} else {
+						b.style.boxShadow = "none";
+						b.style.background = "var(--comfy-input-bg, #222)";
+						b.style.outline = on ? "1px solid #4a9" : "none";
+					}
 				}
 			};
 			refresh();
@@ -1845,12 +1902,12 @@ app.registerExtension({
 			const geom = clampEditorGeom(readEditorGeom() || defaultEditorGeom());
 			applyEditorGeom(root, geom);
 
-			// Encabezado: título + cerrar, y arrastre de la ventana.
+			// Encabezado: título + historial + cerrar, y arrastre de la ventana.
 			const header = document.createElement("div");
-			header.style.cssText = "display:flex;align-items:center;gap:8px;height:28px;padding:0 8px;" +
+			header.style.cssText = "display:flex;align-items:center;gap:6px;height:34px;padding:0 10px;" +
 				"border-bottom:1px solid var(--border-color,#444);flex:0 0 auto;cursor:move;user-select:none;";
 			const title = document.createElement("div");
-			title.style.cssText = "flex:1;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+			title.style.cssText = "flex:1;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
 			const closeBtn = mkButton("✕", "Cerrar el editor");
 			closeBtn.onclick = () => closeEditor(node);
 			header.append(title, closeBtn);
@@ -1892,29 +1949,23 @@ app.registerExtension({
 				applyEditorGeom(root, g);
 			});
 
-			// Cuerpo: riel de herramientas | centro (opciones + lienzo) | panel.
+			// Cuerpo: riel de herramientas | lienzo | panel, como el editor de
+			// máscaras (riel 64 px, panel 220 px).
 			const body = document.createElement("div");
-			body.style.cssText = "flex:1;display:grid;grid-template-columns:44px minmax(0,1fr) 220px;min-height:0;";
+			body.style.cssText = "flex:1;display:grid;grid-template-columns:64px minmax(0,1fr) 220px;min-height:0;";
 			const rail = document.createElement("div");
 			rail.dataset.mika = "editor-rail";
-			rail.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:4px;" +
-				"padding:6px 4px;border-right:1px solid var(--border-color,#444);overflow-y:auto;";
-			const center = document.createElement("div");
-			center.style.cssText = "display:grid;grid-template-rows:auto minmax(0,1fr);min-width:0;min-height:0;";
-			const optionsRow = document.createElement("div");
-			optionsRow.dataset.mika = "editor-options";
-			optionsRow.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:6px;" +
-				"border-bottom:1px solid var(--border-color,#444);";
+			rail.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:6px;" +
+				"padding:8px 4px;border-right:1px solid var(--border-color,#444);overflow-y:auto;";
 			const host = document.createElement("div");
 			host.dataset.mika = "editor-stage-host";
 			host.style.cssText = "position:relative;overflow:hidden;display:flex;align-items:center;" +
-				"justify-content:center;min-height:0;box-sizing:border-box;";
+				"justify-content:center;min-width:0;min-height:0;box-sizing:border-box;";
 			const panel = document.createElement("div");
 			panel.dataset.mika = "editor-panel";
-			panel.style.cssText = "overflow-y:auto;display:flex;flex-direction:column;gap:8px;" +
-				"padding:6px;border-left:1px solid var(--border-color,#444);";
-			center.append(optionsRow, host);
-			body.append(rail, center, panel);
+			panel.style.cssText = "overflow-y:auto;display:flex;flex-direction:column;" +
+				"padding:10px;border-left:1px solid var(--border-color,#444);";
+			body.append(rail, host, panel);
 			root.append(header, body);
 
 			// Sumidero de foco: ComfyUI ignora sus atajos cuando el foco está
@@ -1935,58 +1986,80 @@ app.registerExtension({
 			st.editorTitle = title;
 			st.uiWindow = { sets: [] };
 
-			// Herramientas e historial en el riel; opciones sobre el lienzo.
-			const toolsSet = registerUISet(node, createToolsGroup(node), "window");
+			// Herramientas en el riel (56×56, íconos de 26 px) e historial en
+			// el encabezado, como el editor de máscaras.
+			const toolsSet = registerUISet(node, createToolsGroup(node, "window"), "window");
 			for (const b of toolsSet.buttons) {
-				b.style.width = "28px";
-				b.style.height = "26px";
+				b.style.width = "56px";
+				b.style.height = "56px";
+				b.style.boxSizing = "border-box";
+				b.style.fontSize = "26px";
+				b.style.lineHeight = "1";
+				b.style.padding = "0";
+				b.style.borderRadius = "4px";
 				rail.appendChild(b);
 			}
-			const sep = document.createElement("div");
-			sep.style.cssText = "width:24px;height:1px;background:var(--border-color,#444);margin:2px 0;";
-			rail.appendChild(sep);
 			const historySet = registerUISet(node, createHistoryGroup(node), "window");
-			for (const b of historySet.parts) rail.appendChild(b);
-			const optsSet = registerUISet(node, createToolOptionsGroup(node), "window");
-			for (const p of optsSet.parts) optionsRow.appendChild(p);
+			skinWindowParts(historySet.parts);
+			for (const b of historySet.parts) header.insertBefore(b, closeBtn);
 
-			// Panel derecho, por secciones.
-			const section = (label, parts) => {
-				const sec = document.createElement("div");
+			// Panel derecho: secciones con título centrado y separador, como el
+			// editor de máscaras. La herramienta activa va primero.
+			const sectionTitle = (label) => {
 				const cap = document.createElement("div");
 				cap.textContent = label;
-				cap.style.cssText = "font-size:11px;opacity:.7;text-transform:uppercase;margin-bottom:2px;";
+				cap.style.cssText = "font-size:11px;font-weight:600;letter-spacing:.06em;" +
+					"text-transform:uppercase;opacity:.75;text-align:center;";
+				return cap;
+			};
+			const section = (label, parts) => {
+				const sec = document.createElement("div");
+				sec.style.cssText = "display:flex;flex-direction:column;gap:6px;padding:8px 0;" +
+					"border-top:1px solid var(--border-color,#333);";
 				const holder = document.createElement("div");
-				holder.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;align-items:center;";
+				holder.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:center;";
+				skinWindowParts(parts);
 				for (const p of parts) holder.appendChild(p);
-				sec.append(cap, holder);
+				sec.append(sectionTitle(label), holder);
+				return sec;
+			};
+			const addSection = (label, set) => {
+				const sec = section(label, set.parts);
+				panel.appendChild(sec);
 				return sec;
 			};
 
-			panel.appendChild(section("Archivo", registerUISet(node, createFilesGroup(node), "window").parts));
+			const toolSec = addSection("Herramienta", registerUISet(node, createToolOptionsGroup(node), "window"));
+			toolSec.dataset.mika = "editor-options";
+
+			addSection("Archivo", registerUISet(node, createFilesGroup(node), "window"));
 
 			// Capas: lista vertical con preview + opacidad debajo.
 			const layersSec = document.createElement("div");
-			const layersCap = document.createElement("div");
-			layersCap.textContent = "Capas";
-			layersCap.style.cssText = "font-size:11px;opacity:.7;text-transform:uppercase;margin-bottom:2px;";
+			layersSec.style.cssText = "display:flex;flex-direction:column;gap:6px;padding:8px 0;" +
+				"border-top:1px solid var(--border-color,#333);";
 			const listEl = document.createElement("div");
 			listEl.dataset.mika = "editor-layers";
-			listEl.style.cssText = "display:flex;flex-direction:column;gap:3px;";
-			layersSec.append(layersCap, listEl);
+			listEl.style.cssText = "display:flex;flex-direction:column;gap:4px;";
+			layersSec.append(sectionTitle("Capas"), listEl);
 			panel.appendChild(layersSec);
 			st.layerPanels.push({ el: listEl, mode: "list" });
 
-			panel.appendChild(section("Opacidad del calco", registerUISet(node, createOpacityGroup(node), "window").parts));
-			panel.appendChild(section("Lineart", registerUISet(node, createLineartGroup(node), "window").parts));
-			panel.appendChild(section("Transformar", [
-				...registerUISet(node, createTransformGroup(node), "window").parts,
-				...registerUISet(node, createMergeGroup(node), "window").parts,
-			]));
-			panel.appendChild(section("Salida", [
-				...registerUISet(node, createCopyGroup(node), "window").parts,
-				...registerUISet(node, createProjectGroup(node), "window").parts,
-			]));
+			addSection("Opacidad del calco", registerUISet(node, createOpacityGroup(node), "window"));
+			addSection("Lineart", registerUISet(node, createLineartGroup(node), "window"));
+
+			const transformSec = addSection("Transformar", registerUISet(node, createTransformGroup(node), "window"));
+			const mergeSet = registerUISet(node, createMergeGroup(node), "window");
+			skinWindowParts(mergeSet.parts);
+			for (const p of mergeSet.parts) transformSec.lastElementChild.appendChild(p);
+
+			const outSec = addSection("Salida", registerUISet(node, createCopyGroup(node), "window"));
+			const projectSet = registerUISet(node, createProjectGroup(node), "window");
+			skinWindowParts(projectSet.parts);
+			for (const p of projectSet.parts) outSec.lastElementChild.appendChild(p);
+
+			// La primera sección no lleva separador arriba.
+			panel.firstElementChild.style.borderTop = "none";
 
 			// Superficie propia de la ventana, compartiendo los datos del nodo.
 			const surface = makeSurface(node, { id: "window", rw: st.paint.width, rh: st.paint.height, host });
@@ -2740,10 +2813,11 @@ app.registerExtension({
 					item.style.cursor = "pointer";
 					item.style.border = sel ? "1px solid #4a9" : "1px solid transparent";
 					item.style.background = sel ? "rgba(68, 170, 153, 0.12)" : "transparent";
-					th.style.width = "56px";
-					th.style.height = "42px";
+					th.style.width = "64px";
+					th.style.height = "48px";
 					th.style.border = "1px solid var(--border-color, #444)";
 					name.style.flex = "1";
+					name.style.fontSize = "12px";
 					name.style.whiteSpace = "nowrap";
 					name.style.overflow = "hidden";
 					name.style.textOverflow = "ellipsis";
