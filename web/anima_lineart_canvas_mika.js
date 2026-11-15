@@ -289,6 +289,11 @@ function shapePath(ctx, id, x0, y0, x1, y1) {
 	}
 }
 
+// Ventana de edición activa (la última enfocada): recibe Escape y el z-index
+// más alto. Compartida por las dos variantes del nodo.
+let activeEditor = null;
+let editorZ = 10020;
+
 app.registerExtension({
 	name: "Mika.AnimaLineartCanvas",
 
@@ -777,6 +782,8 @@ app.registerExtension({
 			drawUnderlay(node);
 			renderPreview(node);
 			drawTransformUI(node);
+			forEachSurface(node, (s) => { if (s.host) fitStageToHost(node, s); });
+			refreshWindowChrome(node);
 			refreshCursor(node);
 			if (st.dirty) write(node);
 			if (st.underlayImg || st.calcoLayers.length) writeCalco(node);
@@ -791,6 +798,7 @@ app.registerExtension({
 			st.color = modeStroke(node);
 			clearOverlay(node);
 			refreshUI(node);
+			refreshWindowChrome(node);
 		}
 
 		function hookWidget(node, widget, fn) {
@@ -1720,6 +1728,178 @@ app.registerExtension({
 				st.lineartBusy = false;
 				refreshUI(node);
 			}
+		}
+
+		// --- Ventana de edición flotante ---
+		// No modal: comparte los datos del nodo (paint, calco, máscara, undo) y
+		// tiene su propia superficie y sus propios controles.
+		function refreshWindowChrome(node) {
+			const st = node._mikaLineart;
+			if (!st?.editorTitle) return;
+			const [w, h] = parseRes(resolucionWidget(node)?.value);
+			st.editorTitle.textContent = `Editor de lineart — ${w} × ${h} · ${isLineart(node) ? "lineart" : "dibujo"}`;
+		}
+
+		function focusEditor(node) {
+			const st = node._mikaLineart;
+			if (!st?.editorRoot) return;
+			activeEditor = node;
+			st.editorRoot.style.zIndex = String(++editorZ);
+		}
+
+		function toggleEditor(node) {
+			const st = node._mikaLineart;
+			if (!st) return;
+			if (st.editorRoot) closeEditor(node);
+			else openEditor(node);
+		}
+
+		function openEditor(node) {
+			const st = node._mikaLineart;
+			if (!st || typeof node.addDOMWidget !== "function") return;
+			if (st.editorRoot) { focusEditor(node); return; }
+
+			const root = document.createElement("div");
+			root.dataset.mika = "editor-root";
+			root.tabIndex = -1;
+			root.style.position = "fixed";
+			root.style.left = "50%";
+			root.style.top = "50%";
+			root.style.transform = "translate(-50%, -50%)";
+			root.style.width = "min(1180px, 94vw)";
+			root.style.height = "min(780px, 90vh)";
+			root.style.minWidth = "900px";
+			root.style.minHeight = "600px";
+			root.style.resize = "both";
+			root.style.overflow = "hidden";
+			root.style.zIndex = String(++editorZ);
+			root.style.display = "flex";
+			root.style.flexDirection = "column";
+			root.style.fontFamily = "sans-serif";
+			root.style.background = "var(--comfy-menu-bg, #1e1e1e)";
+			root.style.color = "var(--input-text, #eee)";
+			root.style.border = "1px solid var(--border-color, #444)";
+			root.style.borderRadius = "6px";
+			root.style.boxShadow = "0 10px 40px rgba(0, 0, 0, 0.5)";
+			root.style.outline = "none";
+
+			// Encabezado: título + cerrar, y arrastre de la ventana.
+			const header = document.createElement("div");
+			header.style.cssText = "display:flex;align-items:center;gap:8px;height:28px;padding:0 8px;" +
+				"border-bottom:1px solid var(--border-color,#444);flex:0 0 auto;cursor:move;user-select:none;";
+			const title = document.createElement("div");
+			title.style.cssText = "flex:1;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+			const closeBtn = mkButton("✕", "Cerrar el editor");
+			closeBtn.onclick = () => closeEditor(node);
+			header.append(title, closeBtn);
+
+			let drag = null;
+			header.addEventListener("pointerdown", (e) => {
+				if (e.target === closeBtn) return;
+				const r = root.getBoundingClientRect();
+				drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+				root.style.transform = "none";
+				root.style.left = r.left + "px";
+				root.style.top = r.top + "px";
+				try { header.setPointerCapture(e.pointerId); } catch (err) { /* no-op */ }
+				e.preventDefault();
+			});
+			header.addEventListener("pointermove", (e) => {
+				if (!drag) return;
+				root.style.left = Math.max(0, e.clientX - drag.dx) + "px";
+				root.style.top = Math.max(0, e.clientY - drag.dy) + "px";
+			});
+			const endDrag = () => { drag = null; };
+			header.addEventListener("pointerup", endDrag);
+			header.addEventListener("pointercancel", endDrag);
+
+			// Cuerpo: riel de herramientas | centro (opciones + lienzo) | panel.
+			const body = document.createElement("div");
+			body.style.cssText = "flex:1;display:grid;grid-template-columns:44px minmax(0,1fr) 220px;min-height:0;";
+			const rail = document.createElement("div");
+			rail.dataset.mika = "editor-rail";
+			rail.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:4px;" +
+				"padding:6px 4px;border-right:1px solid var(--border-color,#444);overflow-y:auto;";
+			const center = document.createElement("div");
+			center.style.cssText = "display:grid;grid-template-rows:auto minmax(0,1fr);min-width:0;min-height:0;";
+			const optionsRow = document.createElement("div");
+			optionsRow.dataset.mika = "editor-options";
+			optionsRow.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:6px;" +
+				"border-bottom:1px solid var(--border-color,#444);";
+			const host = document.createElement("div");
+			host.dataset.mika = "editor-stage-host";
+			host.style.cssText = "position:relative;overflow:hidden;display:flex;align-items:center;" +
+				"justify-content:center;min-height:0;box-sizing:border-box;";
+			const panel = document.createElement("div");
+			panel.dataset.mika = "editor-panel";
+			panel.style.cssText = "overflow-y:auto;display:flex;flex-direction:column;gap:8px;" +
+				"padding:6px;border-left:1px solid var(--border-color,#444);";
+			center.append(optionsRow, host);
+			body.append(rail, center, panel);
+			root.append(header, body);
+			if (st.editorChip) st.editorChip.textContent = "Cerrar editor";
+
+			st.editorRoot = root;
+			st.editorTitle = title;
+			st.uiWindow = { sets: [] };
+
+			// Herramientas e historial en el riel; opciones sobre el lienzo.
+			const toolsSet = registerUISet(node, createToolsGroup(node), "window");
+			for (const b of toolsSet.buttons) {
+				b.style.width = "28px";
+				b.style.height = "26px";
+				rail.appendChild(b);
+			}
+			const sep = document.createElement("div");
+			sep.style.cssText = "width:24px;height:1px;background:var(--border-color,#444);margin:2px 0;";
+			rail.appendChild(sep);
+			const historySet = registerUISet(node, createHistoryGroup(node), "window");
+			for (const b of historySet.parts) rail.appendChild(b);
+			const optsSet = registerUISet(node, createToolOptionsGroup(node), "window");
+			for (const p of optsSet.parts) optionsRow.appendChild(p);
+
+			// Superficie propia de la ventana, compartiendo los datos del nodo.
+			const surface = makeSurface(node, { id: "window", rw: st.paint.width, rh: st.paint.height, host });
+			st.surfaces.push(surface);
+			st.editorSurface = surface;
+			st.wireSurface(surface);
+
+			document.body.appendChild(root);
+			root.addEventListener("pointerdown", () => { root.focus(); focusEditor(node); });
+
+			wireDomDrop(node, host);
+
+			// Encaje del lienzo al host, y reencaje al redimensionar.
+			surface.resizeObserver = new ResizeObserver(() => fitStageToHost(node, surface));
+			surface.resizeObserver.observe(host);
+			requestAnimationFrame(() => fitStageToHost(node, surface));
+
+			renderPreview(node);
+			drawUnderlay(node);
+			drawBase(node);
+			redrawMask(node);
+			drawTransformUI(node);
+			refreshWindowChrome(node);
+			focusEditor(node);
+		}
+
+		function closeEditor(node) {
+			const st = node._mikaLineart;
+			if (!st?.editorRoot) return;
+			const root = st.editorRoot;
+			const surface = st.editorSurface;
+			try { surface?.resizeObserver?.disconnect(); } catch (e) { /* no-op */ }
+			st.surfaces = (st.surfaces || []).filter((s) => s !== surface);
+			if (st.layerPanels) st.layerPanels = st.layerPanels.filter((p) => p.mode !== "list");
+			st.editorRoot = null;
+			st.editorSurface = null;
+			st.editorTitle = null;
+			st.uiWindow = null;
+			root.remove();
+			if (st.editorChip) st.editorChip.textContent = "Abrir editor";
+			if (activeEditor === node) activeEditor = null;
+			renderPreview(node);
+			drawTransformUI(node);
 		}
 
 		// --- Cursor circular con el tamaño de la herramienta activa ---
@@ -3195,6 +3375,11 @@ app.registerExtension({
 			const ppw = node.widgets?.find((w) => w.name === "preprocesador");
 			if (ppw) ppw.hidden = true;
 
+			// Si ComfyUI reconstruye el nodo (cambio de pestaña, onConfigure,
+			// deshacer del grafo) la ventana vieja quedaría huérfana: cerrarla
+			// antes de rearmar la superficie.
+			if (node._mikaLineart?.editorRoot) closeEditor(node);
+
 			const prev = node._mikaDomWidget;
 			if (prev) {
 				try { prev.element?.remove(); } catch (e) { /* no-op */ }
@@ -3274,6 +3459,18 @@ app.registerExtension({
 			root.appendChild(layerPanel);
 			root.appendChild(nodeSurface.stage);
 
+			// Chip "Abrir editor" superpuesto al lienzo: no agrega filas ni
+			// cambia el alto del nodo.
+			const editorChip = mkButton("Abrir editor", "Abrir o cerrar el editor flotante");
+			editorChip.dataset.mika = "editor-chip";
+			editorChip.style.position = "absolute";
+			editorChip.style.top = "6px";
+			editorChip.style.right = "6px";
+			editorChip.style.zIndex = "6";
+			editorChip.style.opacity = "0.8";
+			editorChip.onclick = (e) => { e.stopPropagation(); toggleEditor(node); };
+			nodeSurface.stage.appendChild(editorChip);
+
 			node._mikaLineart = {
 				surfaces: [nodeSurface], surfaceNode: nodeSurface, underlayVisible: true,
 				stage: nodeSurface.stage, paint,
@@ -3285,6 +3482,7 @@ app.registerExtension({
 				maskCanvas, maskLayer: nodeSurface.maskLayer, maskThickness: 30,
 				calcoLayers: [], selection: [], layerSeq: 0, calcoNameSeq: 0, layerPanel,
 				layerPanels: [{ el: layerPanel, mode: "strip", refit: true }],
+				editorChip, editorRoot: null, editorSurface: null, editorTitle: null, uiWindow: null,
 				undo: [], redo: [], lineartBusy: false,
 				// El pincel difuminado es la herramienta por defecto.
 				tool: "soft", shape: "rect", font: "Arial", fontSize: 48, text: "", thickness: 1, eraseThickness: 40,
@@ -3827,6 +4025,18 @@ app.registerExtension({
 				} else if (e.key === "Escape") {
 					if (st.sel) { e.preventDefault(); cancelSel(node); }
 					else if (st.textObj) { e.preventDefault(); cancelTextObj(node); }
+					else if (st.editorRoot && activeEditor === node) { e.preventDefault(); closeEditor(node); }
+					return;
+				}
+				// Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y dentro de la ventana deshacen
+				// el lienzo, sin tocar el deshacer del grafo.
+				const inEditor = st.editorRoot && st.editorRoot.contains(e.target);
+				if (inEditor && (e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
+					e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+					if (e.shiftKey) redoOnce(node); else undoOnce(node);
+				} else if (inEditor && (e.ctrlKey || e.metaKey) && (e.key === "y" || e.key === "Y")) {
+					e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+					redoOnce(node);
 				}
 			};
 			node._mikaKeyHandler = onKey;
@@ -3936,6 +4146,7 @@ app.registerExtension({
 
 		const onRemoved = nodeType.prototype.onRemoved;
 		nodeType.prototype.onRemoved = function () {
+			if (this._mikaLineart?.editorRoot) closeEditor(this);
 			const prev = this._mikaDomWidget;
 			if (prev) {
 				try { prev.element?.remove(); } catch (e) { /* no-op */ }
