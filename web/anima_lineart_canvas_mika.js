@@ -1858,6 +1858,44 @@ app.registerExtension({
 			const optsSet = registerUISet(node, createToolOptionsGroup(node), "window");
 			for (const p of optsSet.parts) optionsRow.appendChild(p);
 
+			// Panel derecho, por secciones.
+			const section = (label, parts) => {
+				const sec = document.createElement("div");
+				const cap = document.createElement("div");
+				cap.textContent = label;
+				cap.style.cssText = "font-size:11px;opacity:.7;text-transform:uppercase;margin-bottom:2px;";
+				const holder = document.createElement("div");
+				holder.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;align-items:center;";
+				for (const p of parts) holder.appendChild(p);
+				sec.append(cap, holder);
+				return sec;
+			};
+
+			panel.appendChild(section("Archivo", registerUISet(node, createFilesGroup(node), "window").parts));
+
+			// Capas: lista vertical con preview + opacidad debajo.
+			const layersSec = document.createElement("div");
+			const layersCap = document.createElement("div");
+			layersCap.textContent = "Capas";
+			layersCap.style.cssText = "font-size:11px;opacity:.7;text-transform:uppercase;margin-bottom:2px;";
+			const listEl = document.createElement("div");
+			listEl.dataset.mika = "editor-layers";
+			listEl.style.cssText = "display:flex;flex-direction:column;gap:3px;";
+			layersSec.append(layersCap, listEl);
+			panel.appendChild(layersSec);
+			st.layerPanels.push({ el: listEl, mode: "list" });
+
+			panel.appendChild(section("Opacidad del calco", registerUISet(node, createOpacityGroup(node), "window").parts));
+			panel.appendChild(section("Lineart", registerUISet(node, createLineartGroup(node), "window").parts));
+			panel.appendChild(section("Transformar", [
+				...registerUISet(node, createTransformGroup(node), "window").parts,
+				...registerUISet(node, createMergeGroup(node), "window").parts,
+			]));
+			panel.appendChild(section("Salida", [
+				...registerUISet(node, createCopyGroup(node), "window").parts,
+				...registerUISet(node, createProjectGroup(node), "window").parts,
+			]));
+
 			// Superficie propia de la ventana, compartiendo los datos del nodo.
 			const surface = makeSurface(node, { id: "window", rw: st.paint.width, rh: st.paint.height, host });
 			st.surfaces.push(surface);
@@ -1874,6 +1912,7 @@ app.registerExtension({
 			surface.resizeObserver.observe(host);
 			requestAnimationFrame(() => fitStageToHost(node, surface));
 
+			renderLayerPanel(node);
 			renderPreview(node);
 			drawUnderlay(node);
 			drawBase(node);
@@ -2529,13 +2568,20 @@ app.registerExtension({
 				if (!el) continue;
 				el.replaceChildren();
 				el.style.display = "flex";
+				el.style.flexDirection = panel.mode === "list" ? "column" : "row";
+				el.style.flexWrap = panel.mode === "list" ? "nowrap" : "wrap";
+				el.style.gap = panel.mode === "list" ? "3px" : "4px";
 				fillLayerPanel(node, panel);
 				if (panel.refit) st.refit?.();
 			}
 		}
 
+		// Dibuja las capas en una tira horizontal (nodo) o en una lista
+		// vertical con preview (ventana). En ambos casos los controles llevan
+		// data-act/data-key para poder accionarlos desde los tests.
 		function fillLayerPanel(node, panel) {
 			const st = node._mikaLineart;
+			const list = panel.mode === "list";
 
 			const mkItemBtn = (label, title, fn) => {
 				const b = document.createElement("button");
@@ -2549,33 +2595,58 @@ app.registerExtension({
 				return b;
 			};
 
+			const pick = (key, e) => {
+				if (e.ctrlKey || e.metaKey) toggleSelection(node, key);
+				else if (isSelected(node, key) && st.selection.length === 1) clearSelection(node);
+				else setSelection(node, [key]);
+			};
+
 			const addItem = (key, label, thumbSrc, opts) => {
 				const item = document.createElement("div");
-				item.style.display = "inline-flex";
-				item.style.flexDirection = "column";
-				item.style.alignItems = "center";
 				const th = document.createElement("img");
 				th.src = thumbSrc || "";
 				th.dataset.key = key;
-				th.style.width = "48px";
-				th.style.height = "36px";
 				th.style.objectFit = "contain";
 				th.style.background = "#000";
-				th.style.border = isSelected(node, key) ? "2px solid #4a9" : "1px solid var(--border-color, #444)";
 				th.style.borderRadius = "3px";
 				th.style.cursor = "pointer";
 				if (opts && opts.dim) th.style.opacity = "0.35";
-				th.onclick = (e) => {
-					if (e.ctrlKey || e.metaKey) toggleSelection(node, key);
-					else if (isSelected(node, key) && st.selection.length === 1) clearSelection(node);
-					else setSelection(node, [key]);
-				};
-				item.appendChild(th);
+
 				const name = document.createElement("div");
 				name.textContent = label;
 				name.style.fontSize = "10px";
 				name.style.opacity = "0.85";
-				item.appendChild(name);
+
+				if (list) {
+					const sel = isSelected(node, key);
+					item.style.display = "flex";
+					item.style.alignItems = "center";
+					item.style.gap = "6px";
+					item.style.padding = "2px";
+					item.style.borderRadius = "3px";
+					item.style.cursor = "pointer";
+					item.style.border = sel ? "1px solid #4a9" : "1px solid transparent";
+					item.style.background = sel ? "rgba(68, 170, 153, 0.12)" : "transparent";
+					th.style.width = "56px";
+					th.style.height = "42px";
+					th.style.border = "1px solid var(--border-color, #444)";
+					name.style.flex = "1";
+					name.style.whiteSpace = "nowrap";
+					name.style.overflow = "hidden";
+					name.style.textOverflow = "ellipsis";
+					item.append(th, name);
+					item.onclick = (e) => pick(key, e);
+				} else {
+					item.style.display = "inline-flex";
+					item.style.flexDirection = "column";
+					item.style.alignItems = "center";
+					th.style.width = "48px";
+					th.style.height = "36px";
+					th.style.border = isSelected(node, key) ? "2px solid #4a9" : "1px solid var(--border-color, #444)";
+					th.onclick = (e) => pick(key, e);
+					item.append(th, name);
+				}
+
 				if (opts && opts.controls) {
 					const bar = document.createElement("div");
 					bar.style.display = "flex";
