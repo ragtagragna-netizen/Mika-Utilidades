@@ -300,6 +300,14 @@ const EDITOR_MIN_W = 900;
 const EDITOR_MIN_H = 600;
 const EDITOR_EDGE = 8;
 
+// Espacio + arrastre = paneo dentro de la ventana (la rueda es zoom).
+let spaceHeld = false;
+if (typeof document !== "undefined") {
+	document.addEventListener("keydown", (e) => { if (e.code === "Space") spaceHeld = true; }, true);
+	document.addEventListener("keyup", (e) => { if (e.code === "Space") spaceHeld = false; }, true);
+	window.addEventListener("blur", () => { spaceHeld = false; });
+}
+
 app.registerExtension({
 	name: "Mika.AnimaLineartCanvas",
 
@@ -730,10 +738,11 @@ app.registerExtension({
 					c.width = nw;
 					c.height = nh;
 				}
-				s.stage.style.aspectRatio = `${nw} / ${nh}`;
 				// Solo la superficie del nodo se ajusta al ancho del widget; la
 				// ventana se encaja a su host con fitStageToHost.
-				if (s.id === "node") s.stage.style.width = stageWidthFor(nw, nh);
+				if (s.host) return;
+				s.stage.style.aspectRatio = `${nw} / ${nh}`;
+				s.stage.style.width = stageWidthFor(nw, nh);
 			});
 
 			// Un solo mapeo para todo: con imagen de entrada se sigue el paso del
@@ -788,7 +797,8 @@ app.registerExtension({
 			drawUnderlay(node);
 			renderPreview(node);
 			drawTransformUI(node);
-			forEachSurface(node, (s) => { if (s.host) fitStageToHost(node, s); });
+			// Cambió la resolución: el zoom vuelve a encajar.
+			forEachSurface(node, (s) => { if (s.host) fitStageToHost(node, s, { reset: true }); });
 			refreshWindowChrome(node);
 			refreshCursor(node);
 			if (st.dirty) write(node);
@@ -1797,6 +1807,7 @@ app.registerExtension({
 			if (!st?.editorTitle) return;
 			const [w, h] = parseRes(resolucionWidget(node)?.value);
 			st.editorTitle.textContent = `Editor de lineart — ${w} × ${h} · ${isLineart(node) ? "lineart" : "dibujo"}`;
+			updateZoomReadout(node);
 		}
 
 		function focusEditor(node) {
@@ -2003,6 +2014,26 @@ app.registerExtension({
 			skinWindowParts(historySet.parts);
 			for (const b of historySet.parts) header.insertBefore(b, closeBtn);
 
+			// Pie del riel: zoom relativo al encaje + resolución; clic = reset.
+			const zoomFoot = document.createElement("div");
+			zoomFoot.dataset.mika = "editor-zoom";
+			zoomFoot.title = "Encajar y centrar el lienzo";
+			zoomFoot.style.cssText = "margin-top:auto;display:flex;flex-direction:column;" +
+				"align-self:stretch;align-items:center;gap:2px;box-sizing:border-box;" +
+				"padding-top:8px;cursor:pointer;" +
+				"border-top:1px solid var(--border-color,#444);font-size:11px;";
+			st.editorZoomPct = document.createElement("div");
+			st.editorZoomPct.textContent = "100 %";
+			st.editorZoomSize = document.createElement("div");
+			st.editorZoomSize.style.cssText = "opacity:.7;font-size:10px;";
+			zoomFoot.append(st.editorZoomPct, st.editorZoomSize);
+			zoomFoot.addEventListener("pointerdown", (e) => e.stopPropagation());
+			zoomFoot.onclick = () => {
+				if (st.editorSurface) fitStageToHost(node, st.editorSurface, { reset: true });
+				sink.focus();
+			};
+			rail.appendChild(zoomFoot);
+
 			// Panel derecho: secciones con título centrado y separador, como el
 			// editor de máscaras. La herramienta activa va primero.
 			const sectionTitle = (label) => {
@@ -2074,6 +2105,19 @@ app.registerExtension({
 			root.addEventListener("pointerdown", () => { sink.focus(); focusEditor(node); });
 
 			wireDomDrop(node, host);
+
+			// Rueda = zoom del lienzo de la ventana (no del grafo).
+			host.addEventListener("wheel", (e) => {
+				if (!st.editorSurface) return;
+				e.preventDefault();
+				e.stopPropagation();
+				zoomSurfaceAt(node, st.editorSurface, e.deltaY < 0 ? 1.1 : 0.9, e.clientX, e.clientY);
+			}, { passive: false });
+
+			// Encajar ya (layout forzado): el lienzo queda listo antes de que
+			// termine el clic que abrió la ventana. El rAF de abajo es la red
+			// de seguridad para cuando el host todavía no tiene tamaño.
+			fitStageToHost(node, surface);
 
 			// Encaje del lienzo al host, y reencaje al redimensionar.
 			surface.resizeObserver = new ResizeObserver(() => fitStageToHost(node, surface));
@@ -3129,10 +3173,13 @@ app.registerExtension({
 		// que comparte los mismos datos (paint, calco, máscara, deshacer).
 		function makeSurface(node, { id, rw, rh, host = null }) {
 			const stage = document.createElement("div");
-			stage.style.position = "relative";
-			stage.style.width = stageWidthFor(rw, rh);
-			stage.style.margin = "0 auto";
-			stage.style.aspectRatio = `${rw} / ${rh}`;
+			stage.style.position = host ? "absolute" : "relative";
+			stage.style.width = host ? "0px" : stageWidthFor(rw, rh);
+			stage.style.height = host ? "0px" : "";
+			stage.style.left = host ? "0px" : "";
+			stage.style.top = host ? "0px" : "";
+			stage.style.margin = host ? "0" : "0 auto";
+			stage.style.aspectRatio = host ? "" : `${rw} / ${rh}`;
 			stage.style.background = modeBg(node);
 			stage.style.border = "1px solid var(--border-color, #444)";
 			stage.style.borderRadius = "3px";
@@ -3189,6 +3236,8 @@ app.registerExtension({
 				id, host, stage, preview, underlay, calcoLayersCanvas, overlay,
 				handles, brushCursor, baseLayer, maskLayer,
 				cursorPos: null, lastClient: null,
+				view: host ? { zoom: 1, x: 0, y: 0 } : null,
+				fit: null,
 			};
 			if (host) host.appendChild(stage);
 			return surface;
@@ -3200,15 +3249,87 @@ app.registerExtension({
 
 		// Encaja el stage de una superficie al área de su host (la ventana),
 		// sin deformar: conserva la proporción del lienzo.
-		function fitStageToHost(node, surface) {
+		// Aplica tamaño/posición del lienzo según `fit` y `view` (solo ventana).
+		function applySurfaceView(surface) {
+			if (!surface?.host || !surface.fit || !surface.view) return;
+			const v = surface.view;
+			const w = Math.max(40, Math.round(surface.fit.w * v.zoom));
+			const h = Math.max(40, Math.round(surface.fit.h * v.zoom));
+			surface.stage.style.width = w + "px";
+			surface.stage.style.height = h + "px";
+			surface.stage.style.left = Math.round(v.x) + "px";
+			surface.stage.style.top = Math.round(v.y) + "px";
+		}
+
+		// Nunca se pierde el lienzo: al menos 40 px dentro del host.
+		function clampSurfaceView(node, surface) {
+			const v = surface?.view;
+			if (!v || !surface.fit || !surface.host) return;
+			const { width: hw, height: hh } = surface.host.getBoundingClientRect();
+			if (!hw || !hh) return;
+			const w = surface.fit.w * v.zoom;
+			const h = surface.fit.h * v.zoom;
+			const m = Math.min(40, Math.min(hw, hh) / 2);
+			v.x = Math.min(hw - m, Math.max(m - w, v.x));
+			v.y = Math.min(hh - m, Math.max(m - h, v.y));
+		}
+
+		// Encaja el lienzo al host. `reset` vuelve a 100 % (al abrir y al
+		// cambiar la resolución); sin reset conserva el zoom y recentra si
+		// está en 100 %.
+		function fitStageToHost(node, surface, { reset = false } = {}) {
 			const st = node._mikaLineart;
-			if (!st || !surface?.host) return;
+			if (!st) return;
+			if (!surface?.host) {
+				// La superficie del nodo conserva su encaje por CSS.
+				if (surface?.stage) surface.stage.style.width = stageWidthFor(st.paint.width, st.paint.height);
+				return;
+			}
 			const { width: hw, height: hh } = surface.host.getBoundingClientRect();
 			if (!hw || !hh) return;
 			const rw = st.paint.width, rh = st.paint.height;
 			const k = Math.min((hw - 16) / rw, (hh - 16) / rh);
-			surface.stage.style.width = Math.max(40, Math.floor(rw * k)) + "px";
-			surface.stage.style.height = Math.max(40, Math.floor(rh * k)) + "px";
+			surface.fit = {
+				w: Math.max(40, Math.floor(rw * k)),
+				h: Math.max(40, Math.floor(rh * k)),
+			};
+			if (!surface.view || reset) surface.view = { zoom: 1, x: 0, y: 0 };
+			if (surface.view.zoom === 1) {
+				surface.view.x = Math.round((hw - surface.fit.w) / 2);
+				surface.view.y = Math.round((hh - surface.fit.h) / 2);
+			}
+			clampSurfaceView(node, surface);
+			applySurfaceView(surface);
+			updateZoomReadout(node);
+		}
+
+		// Zoom centrado en el cursor: mantiene fijo el punto del lienzo que
+		// está bajo el puntero.
+		function zoomSurfaceAt(node, surface, factor, clientX, clientY) {
+			const v = surface?.view;
+			if (!v || !surface.fit || !surface.host) return;
+			const next = Math.min(10, Math.max(0.2, v.zoom * factor));
+			if (Math.abs(next - v.zoom) < 1e-6) return;
+			const host = surface.host.getBoundingClientRect();
+			const px = clientX - host.left;
+			const py = clientY - host.top;
+			const cx = (px - v.x) / (surface.fit.w * v.zoom);
+			const cy = (py - v.y) / (surface.fit.h * v.zoom);
+			v.zoom = next;
+			v.x = px - cx * surface.fit.w * next;
+			v.y = py - cy * surface.fit.h * next;
+			clampSurfaceView(node, surface);
+			applySurfaceView(surface);
+			updateZoomReadout(node);
+		}
+
+		function updateZoomReadout(node) {
+			const st = node._mikaLineart;
+			if (!st?.editorZoomPct) return;
+			st.editorZoomPct.textContent = `${Math.round((st.editorSurface?.view?.zoom || 1) * 100)} %`;
+			if (st.editorZoomSize) {
+				st.editorZoomSize.textContent = `${st.paint.width}×${st.paint.height}`;
+			}
 		}
 
 		// --- Render de la capa de trazo con su transformación ---
@@ -4084,6 +4205,17 @@ app.registerExtension({
 				const pv = surface.preview;
 
 				pv.addEventListener("pointerdown", (e) => {
+					// Paneo: botón central o Espacio + arrastre (solo ventana).
+					if (surface.host && (e.button === 1 || (e.button === 0 && spaceHeld))) {
+						e.preventDefault();
+						e.stopPropagation();
+						try { pv.setPointerCapture(e.pointerId); } catch (err) { /* no-op */ }
+						surface.pan = {
+							x: e.clientX, y: e.clientY,
+							vx: surface.view.x, vy: surface.view.y,
+						};
+						return;
+					}
 					if (e.button !== 0) return;
 					e.preventDefault();
 					try { pv.setPointerCapture(e.pointerId); } catch (err) { /* no-op */ }
@@ -4173,6 +4305,13 @@ app.registerExtension({
 				});
 				pv.addEventListener("pointerleave", () => hideCursor(node));
 				pv.addEventListener("pointermove", (e) => {
+					if (surface.pan) {
+						surface.view.x = surface.pan.vx + (e.clientX - surface.pan.x);
+						surface.view.y = surface.pan.vy + (e.clientY - surface.pan.y);
+						clampSurfaceView(node, surface);
+						applySurfaceView(surface);
+						return;
+					}
 					if (st.lasso) {
 						const [cx, cy] = posCanvas(e, surface);
 						const pts = st.lasso.pts;
@@ -4237,10 +4376,17 @@ app.registerExtension({
 					else write(node);
 				};
 				pv.addEventListener("pointerup", (e) => {
+					if (surface.pan) { surface.pan = null; return; }
 					endStroke();
 					if (!st.transformMode) placeCursor(node, surface, e.clientX, e.clientY);
 				});
-				pv.addEventListener("pointercancel", () => { endStroke(); hideCursor(node); });
+				pv.addEventListener("pointercancel", () => {
+					if (surface.pan) { surface.pan = null; return; }
+					endStroke();
+					hideCursor(node);
+				});
+				// El botón central no abre el autoscroll del navegador.
+				pv.addEventListener("auxclick", (e) => { if (e.button === 1) e.preventDefault(); });
 			}
 
 			st.wireSurface = (surface) => wireSurface(node, surface);
