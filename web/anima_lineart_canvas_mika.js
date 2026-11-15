@@ -1631,18 +1631,6 @@ app.registerExtension({
 		}
 
 		// --- ⚡ Lineart desde el calco (no encola el grafo) ---
-		// Una capa de calco guarda un canvas O una imagen (según la operación):
-		// normalizamos a canvas para poder exportarla.
-		function drawableToCanvas(d) {
-			const w = d.naturalWidth || d.width || 1;
-			const h = d.naturalHeight || d.height || 1;
-			const c = document.createElement("canvas");
-			c.width = Math.max(1, w);
-			c.height = Math.max(1, h);
-			c.getContext("2d").drawImage(d, 0, 0, c.width, c.height);
-			return c;
-		}
-
 		// Vuelca el lineart devuelto por el servidor en la capa de trazo.
 		function paintMaskIntoPaint(node, dataUrl) {
 			return new Promise((resolve) => {
@@ -1697,14 +1685,17 @@ app.registerExtension({
 
 		async function runLineartFromCalco(node) {
 			const st = node._mikaLineart;
-			// Solo cuentan el calco base o las capas de calco (no el trazo).
-			const keys = (st.selection || []).filter((k) => k === "underlay" || String(k).startsWith("L:"));
-			const key = keys.find((k) => layerGeom(node, k)) || keys[0];
-			if (!key) { alert("[Mika] Seleccioná una capa de calco para pasarla a lineart."); return; }
-
-			const drawable = key === "underlay" ? st.underlayImg : (layerByKey(node, key) || {}).src;
-			if (!drawable) { alert("[Mika] No se encontró la imagen del calco seleccionado."); return; }
-			const srcCanvas = drawableToCanvas(drawable);
+			// Solo cuentan el calco base o las capas de calco (no el trazo) y
+			// solo las visibles: selectedLayers ya filtra por visibilidad.
+			const keys = selectedLayers(node).filter(
+				(k) => k === "underlay" || String(k).startsWith("L:"),
+			);
+			if (!keys.length) {
+				alert("[Mika] Seleccioná una o más capas de calco para pasarlas a lineart.");
+				return;
+			}
+			// Componer en el espacio del lienzo respeta las transformaciones.
+			const srcCanvas = composeCalco(node, keys);
 
 			const preproc = String(findWidget(node, "preprocesador")?.value || "LineArtPreprocessor");
 			// Misma resolución de trabajo que el workflow del AIO.
@@ -2162,8 +2153,11 @@ app.registerExtension({
 
 		// Composición del calco (fondo blanco + calco base + capas visibles),
 		// igual que la salida "calco" del nodo.
-		function composeCalco(node) {
+		// Con `keys`, solo entran el calco base y las capas incluidas (las
+		// visibles); sin `keys`, todo lo visible (salida "calco" del nodo).
+		function composeCalco(node, keys = null) {
 			const st = node._mikaLineart;
+			const allow = keys ? new Set(keys) : null;
 			const [w, h] = parseRes(resolucionWidget(node)?.value);
 			const tmp = document.createElement("canvas");
 			tmp.width = w;
@@ -2173,7 +2167,7 @@ app.registerExtension({
 			ctx.fillRect(0, 0, w, h);
 			const img = st.underlayImg;
 			const t = st.underlayTransform;
-			if (img && t) {
+			if (img && t && (!allow || allow.has("underlay"))) {
 				ctx.save();
 				ctx.translate(t.cx, t.cy);
 				ctx.rotate(t.rot);
@@ -2183,6 +2177,7 @@ app.registerExtension({
 			}
 			for (const l of st.calcoLayers) {
 				if (!l.visible) continue;
+				if (allow && !allow.has("L:" + l.id)) continue;
 				ctx.save();
 				ctx.translate(l.tf.cx, l.tf.cy);
 				ctx.rotate(l.tf.rot);
