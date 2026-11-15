@@ -72,6 +72,10 @@ const PINCEL_KEYS = [
 	"maskThickness", "calcoOpacity", "shape", "font", "fontSize", "userColor",
 ];
 
+// Debajo de este arrastre (en píxeles de lienzo) un clic crea la figura con
+// el tamaño por defecto en vez de una caja mínima.
+const SHAPE_DRAG_MIN = 4;
+
 // Figuras del Paint ([id, etiqueta]).
 const SHAPES = [
 	["line", "Línea"], ["curve", "Curva"], ["ellipse", "Círculo"], ["rect", "Rectángulo"],
@@ -709,6 +713,8 @@ app.registerExtension({
 		function resize(node, nw, nh) {
 			const st = node._mikaLineart;
 			if (!st || (st.paint.width === nw && st.paint.height === nh)) return;
+			// Lo flotante se fija en el tamaño viejo antes de reencajar.
+			commitFloating(node);
 			st.sel = null;
 			st.lasso = null;
 			st.softPts = null;
@@ -1321,6 +1327,8 @@ app.registerExtension({
 			}
 			for (const [id, b] of Object.entries(toolBtns)) {
 				b.onclick = () => {
+					// Cambiar de herramienta fija lo que esté flotante.
+					commitFloating(node);
 					st.tool = id;
 					writePincelState(node);
 					refreshUI(node);
@@ -2180,7 +2188,7 @@ app.registerExtension({
 			const st = node._mikaLineart;
 			// El círculo del pincel solo se oculta si hay una transformación
 			// en curso: tener una capa seleccionada no cambia el cursor.
-			if (!st || !surface?.brushCursor || st.transformMode || st.tool === "text" || st.tool === "select" || st.textObj || st.sel) return;
+			if (!st || !surface?.brushCursor || st.transformMode || st.tool === "text" || st.tool === "select" || st.textObj || st.shapeObj || st.sel) return;
 			const c = surface.preview;
 			const r = c.getBoundingClientRect();
 			if (!r.width || !r.height) return;
@@ -2223,10 +2231,10 @@ app.registerExtension({
 			if (!c) return;
 			surface.lastClient = [clientX, clientY];
 			// Los cursores de mover/redimensionar/rotar solo aparecen cuando la
-			// transformación está activa (✥, un texto en edición o una pieza
-			// del lazo); con solo tener una capa seleccionada, el cursor sigue
-			// siendo el de la herramienta.
-			if (!st.transformMode && !st.textObj && !st.sel) { c.style.cursor = CURSOR_CROSS; return; }
+			// transformación está activa (✥, un texto o figura en edición o una
+			// pieza del lazo); con solo tener una capa seleccionada, el cursor
+			// sigue siendo el de la herramienta.
+			if (!st.transformMode && !st.textObj && !st.shapeObj && !st.sel) { c.style.cursor = CURSOR_CROSS; return; }
 			const [x, y] = clientToCanvas(node, surface, clientX, clientY);
 			const hit = transformHit(node, x, y);
 			if (!hit) c.style.cursor = CURSOR_CROSS;
@@ -3010,6 +3018,10 @@ app.registerExtension({
 				const o = st.textObj;
 				return o ? { t: o.tf, w: o.w, h: o.h } : null;
 			}
+			if (which === "shape") {
+				const o = st.shapeObj;
+				return o ? { t: o.tf, w: o.w, h: o.h } : null;
+			}
 			const l = layerByKey(node, which);
 			return l ? { t: l.tf, w: l.w, h: l.h } : null;
 		}
@@ -3041,12 +3053,13 @@ app.registerExtension({
 			return { x, y, w: x2 - x, h: y2 - y };
 		}
 
-		// Capa que controla el marco/handles (el lazo/texto en curso tienen
-		// prioridad; si no, la última capa seleccionada).
+		// Capa que controla el marco/handles (el lazo/texto/figura en curso
+		// tienen prioridad; si no, la última capa seleccionada).
 		function primaryLayer(node) {
 			const st = node._mikaLineart;
 			if (st.sel) return "sel";
 			if (st.textObj) return "text";
+			if (st.shapeObj) return "shape";
 			const s = affectedLayers(node);
 			return s.length ? s[s.length - 1] : null;
 		}
@@ -3055,6 +3068,7 @@ app.registerExtension({
 			const st = node._mikaLineart;
 			if (st.sel) return ["sel"];
 			if (st.textObj) return ["text"];
+			if (st.shapeObj) return ["shape"];
 			return selectedLayers(node);
 		}
 
@@ -3064,6 +3078,7 @@ app.registerExtension({
 			else if (which === "underlay") st.underlayTransform = t;
 			else if (which === "sel") { if (st.sel) st.sel.tf = t; }
 			else if (which === "text") { if (st.textObj) st.textObj.tf = t; }
+			else if (which === "shape") { if (st.shapeObj) st.shapeObj.tf = t; }
 			else { const l = layerByKey(node, which); if (l) l.tf = t; }
 		}
 
@@ -3104,7 +3119,7 @@ app.registerExtension({
 		function drawTransformUI(node) {
 			const st = node._mikaLineart;
 			if (!st) return;
-			const active = !!(st.transformMode || st.textObj || st.sel || selectedLayers(node).length);
+			const active = !!(st.transformMode || st.textObj || st.shapeObj || st.sel || selectedLayers(node).length);
 			const which = primaryLayer(node);
 			const layers = affectedLayers(node);
 			const hs = handleSize(node);
@@ -3149,7 +3164,7 @@ app.registerExtension({
 
 		function transformHit(node, x, y) {
 			const st = node._mikaLineart;
-			if (!st?.transformMode && !st?.textObj && !st?.sel && !selectedLayers(node).length) return null;
+			if (!st?.transformMode && !st?.textObj && !st?.shapeObj && !st?.sel && !selectedLayers(node).length) return null;
 			const which = primaryLayer(node);
 			const corners = layerCorners(node, which);
 			if (!corners) return null;
@@ -3432,6 +3447,107 @@ app.registerExtension({
 			drawTransformUI(node);
 		}
 
+		// --- Figura en edición (objeto movible como el texto) ---
+		// El arrastre define la caja; al soltar queda flotante con manijas y
+		// recién se fija al confirmarla (Enter, clic fuera, cambio de
+		// herramienta/capa/resolución o cierre de la ventana).
+		function drawShapeInto(ctx, o, t) {
+			ctx.save();
+			ctx.translate(t.cx, t.cy);
+			ctx.rotate(t.rot);
+			ctx.scale(t.sx, t.sy);
+			ctx.globalCompositeOperation = "source-over";
+			ctx.strokeStyle = o.color;
+			ctx.lineWidth = o.lineWidth;
+			ctx.lineCap = "round";
+			ctx.lineJoin = "round";
+			shapePath(ctx, o.kind, -o.w / 2, -o.h / 2, o.w / 2, o.h / 2);
+			ctx.stroke();
+			ctx.restore();
+		}
+
+		function drawShapeObj(node) {
+			const st = node._mikaLineart;
+			if (!st) return;
+			const o = st.shapeObj;
+			forEachSurface(node, (s) => {
+				const ctx = s.overlay.getContext("2d");
+				ctx.setTransform(1, 0, 0, 1, 0, 0);
+				ctx.clearRect(0, 0, s.overlay.width, s.overlay.height);
+				if (o) drawShapeInto(ctx, o, o.tf);
+			});
+		}
+
+		function createShapeObj(node, x0, y0, x1, y1) {
+			const st = node._mikaLineart;
+			const w = Math.max(1, Math.abs(x1 - x0));
+			const h = Math.max(1, Math.abs(y1 - y0));
+			st.shapeObj = {
+				kind: st.shape,
+				color: st.color,
+				lineWidth: st.thickness,
+				w, h,
+				tf: {
+					cx: Math.min(x0, x1) + w / 2,
+					cy: Math.min(y0, y1) + h / 2,
+					sx: 1, sy: 1, rot: 0,
+				},
+			};
+			drawShapeObj(node);
+			drawTransformUI(node);
+		}
+
+		// Pinta la figura en la capa fuente (paint). La figura vive en
+		// coordenadas de contenido; si el trazo entero está transformado (✥) se
+		// deshace esa transformación para que caiga en su lugar.
+		function drawShapeInPaint(node, o) {
+			const st = node._mikaLineart;
+			const ctx = paintCtx(node);
+			const t = st.paintTransform;
+			if (!t) { drawShapeInto(ctx, o, o.tf); return; }
+			const W = st.paint.width, H = st.paint.height;
+			const cos = Math.cos(t.rot), sin = Math.sin(t.rot);
+			const sx = t.sx || 1, sy = t.sy || 1;
+			// inv(paintTf): content -> source, como matriz afín.
+			const a = cos / sx, b = -sin / sy, c = sin / sx, d = cos / sy;
+			const e = W / 2 - (a * t.cx + c * t.cy);
+			const f = H / 2 - (b * t.cx + d * t.cy);
+			ctx.save();
+			ctx.setTransform(a, b, c, d, e, f);
+			drawShapeInto(ctx, o, o.tf);
+			ctx.restore();
+		}
+
+		// Fija la figura en la capa de trazo y termina la edición.
+		function commitShapeObj(node) {
+			const st = node._mikaLineart;
+			const o = st.shapeObj;
+			if (!o) return;
+			drawShapeInPaint(node, o);
+			st.shapeObj = null;
+			drawShapeObj(node);
+			renderPreview(node);
+			drawTransformUI(node);
+			write(node);
+		}
+
+		function cancelShapeObj(node) {
+			const st = node._mikaLineart;
+			if (!st.shapeObj) return;
+			st.shapeObj = null;
+			drawShapeObj(node);
+			drawTransformUI(node);
+		}
+
+		// Fija lo que esté flotante antes de cambiar de contexto (herramienta,
+		// resolución, cierre de ventana). El lazo se deja como estaba.
+		function commitFloating(node) {
+			const st = node._mikaLineart;
+			if (!st) return;
+			if (st.textObj) commitTextObj(node);
+			if (st.shapeObj) commitShapeObj(node);
+		}
+
 		// --- Selección a mano alzada (lazo; pieza flotante: mover/escalar/rotar/espejar) ---
 		function traceLasso(ctx, pts, dx, dy) {
 			ctx.beginPath();
@@ -3617,13 +3733,20 @@ app.registerExtension({
 			drawTransformUI(node);
 		}
 
-		// Invierte (espeja) la capa, el texto o la selección en edición.
+		// Invierte (espeja) la capa, el texto, la figura o la selección en edición.
 		function flipTarget(node, axis) {
 			const st = node._mikaLineart;
 			if (st.textObj) {
 				const t = st.textObj.tf;
 				if (axis === "h") t.sx *= -1; else t.sy *= -1;
 				drawTextObj(node);
+				drawTransformUI(node);
+				return;
+			}
+			if (st.shapeObj) {
+				const t = st.shapeObj.tf;
+				if (axis === "h") t.sx *= -1; else t.sy *= -1;
+				drawShapeObj(node);
 				drawTransformUI(node);
 				return;
 			}
@@ -3736,6 +3859,7 @@ app.registerExtension({
 			renderPreview(node);
 			if (st.sel) drawSel(node);
 			if (st.textObj) drawTextObj(node);
+			if (st.shapeObj) drawShapeObj(node);
 			drawTransformUI(node);
 		}
 
@@ -4133,37 +4257,37 @@ app.registerExtension({
 				ctx.lineJoin = "round";
 			};
 
-			// Forma: se previsualiza en el overlay mientras se arrastra.
+			// Forma: se previsualiza en el overlay mientras se arrastra. La caja
+			// vive en coordenadas de contenido (como el texto), así que no se
+			// envuelve con withTf.
 			const shapePreviewTo = (x, y) => {
 				st.shapeEnd = [x, y];
 				if (!st.shapeStart) return;
 				clearOverlay(node);
 				forEachSurface(node, (s) => {
-					withTf(node, s.overlay.getContext("2d"), (ctx) => {
-						applyStrokeStyle(ctx, st.color, st.thickness);
-						shapePath(ctx, st.shape, st.shapeStart[0], st.shapeStart[1], x, y);
-						ctx.stroke();
-					});
+					const ctx = s.overlay.getContext("2d");
+					ctx.setTransform(1, 0, 0, 1, 0, 0);
+					applyStrokeStyle(ctx, st.color, st.thickness);
+					shapePath(ctx, st.shape, st.shapeStart[0], st.shapeStart[1], x, y);
+					ctx.stroke();
 				});
 			};
 
-			// Forma: fija el resultado en la capa de trazo.
-			const commitShape = () => {
-				clearOverlay(node);
+			// Suelta la figura: con arrastre queda flotante con ese tamaño; un
+			// clic sin arrastre usa el 30 % del lado menor del lienzo.
+			const finishShape = () => {
 				const s = st.shapeStart;
 				const e = st.shapeEnd;
+				st.shapeStart = null;
+				st.shapeEnd = null;
+				clearOverlay(node);
 				if (!s || !e) return;
-				const pctx = paintCtx(node);
-				applyStrokeStyle(pctx, st.color, st.thickness);
-				shapePath(pctx, st.shape, s[0], s[1], e[0], e[1]);
-				pctx.stroke();
-				forEachSurface(node, (surf) => {
-					withTf(node, surf.preview.getContext("2d"), (ctx) => {
-						applyStrokeStyle(ctx, st.color, st.thickness);
-						shapePath(ctx, st.shape, s[0], s[1], e[0], e[1]);
-						ctx.stroke();
-					});
-				});
+				if (Math.max(Math.abs(e[0] - s[0]), Math.abs(e[1] - s[1])) < SHAPE_DRAG_MIN) {
+					const side = Math.max(8, Math.min(st.paint.width, st.paint.height) * 0.3);
+					createShapeObj(node, s[0] - side / 2, s[1] - side / 2, s[0] + side / 2, s[1] + side / 2);
+					return;
+				}
+				createShapeObj(node, s[0], s[1], e[0], e[1]);
 			};
 
 			// Prepara el arrastre de transformación sobre la capa primaria; el
@@ -4250,6 +4374,18 @@ app.registerExtension({
 						commitTextObj(node);
 					}
 
+					// Figura flotante: si se toca el marco se edita; si no, se
+					// fija y sigue el gesto normal (empezar otra figura).
+					if (st.shapeObj) {
+						const [tx, ty] = posCanvas(e, surface);
+						if (transformHit(node, tx, ty)) {
+							beginTransform(tx, ty);
+							hideCursor(node);
+							return;
+						}
+						commitShapeObj(node);
+					}
+
 					hideCursor(node);
 					if (st.tool === "text") {
 						if (!st.text) { alert("Escribí un texto en el campo antes de colocarlo."); return; }
@@ -4290,8 +4426,9 @@ app.registerExtension({
 					last = null;
 					const [x, y] = pos(e, surface);
 					if (st.tool === "shape") {
-						st.shapeStart = [x, y];
-						st.shapeEnd = [x, y];
+						const [cx, cy] = posCanvas(e, surface);
+						st.shapeStart = [cx, cy];
+						st.shapeEnd = [cx, cy];
 					} else if (st.tool === "eraser") {
 						st.erasePoints = [];
 						erasePreviewTo(x, y);
@@ -4342,8 +4479,10 @@ app.registerExtension({
 							st.softPts.push([x, y]);
 							softLive();
 						}
-					} else if (st.tool === "shape") shapePreviewTo(x, y);
-					else if (st.tool === "eraser") erasePreviewTo(x, y);
+					} else if (st.tool === "shape") {
+						const [cx, cy] = posCanvas(e, surface);
+						shapePreviewTo(cx, cy);
+					} else if (st.tool === "eraser") erasePreviewTo(x, y);
 					else strokeTo(x, y);
 				});
 				const endStroke = () => {
@@ -4365,7 +4504,7 @@ app.registerExtension({
 					if (!drawing) return;
 					drawing = false;
 					const wasMaskStroke = st.tool === "maskBrush" || st.tool === "maskErase";
-					if (st.tool === "shape") commitShape();
+					if (st.tool === "shape") finishShape();
 					else if (st.tool === "eraser") { commitErase(); renderPreview(node); }
 					else if (st.tool === "soft") commitSoft();
 					st.erasePoints = null;
@@ -4373,7 +4512,8 @@ app.registerExtension({
 					st.shapeEnd = null;
 					last = null;
 					if (wasMaskStroke) writeMask(node);
-					else write(node);
+					// La figura queda flotante: recién se escribe al fijarla.
+					else if (st.tool !== "shape") write(node);
 				};
 				pv.addEventListener("pointerup", (e) => {
 					if (surface.pan) { surface.pan = null; return; }
@@ -4420,15 +4560,17 @@ app.registerExtension({
 			root.appendChild(projectInput);
 			node._mikaProjectInput = projectInput;
 
-			// Enter fija el texto en edición; Escape lo cancela.
+			// Enter fija el texto/figura en edición; Escape los cancela.
 			if (node._mikaKeyHandler) document.removeEventListener("keydown", node._mikaKeyHandler, true);
 			const onKey = (e) => {
 				if (e.key === "Enter") {
 					if (st.sel) { e.preventDefault(); commitSel(node); }
 					else if (st.textObj) { e.preventDefault(); commitTextObj(node); }
+					else if (st.shapeObj) { e.preventDefault(); commitShapeObj(node); }
 				} else if (e.key === "Escape") {
 					if (st.sel) { e.preventDefault(); cancelSel(node); }
 					else if (st.textObj) { e.preventDefault(); cancelTextObj(node); }
+					else if (st.shapeObj) { e.preventDefault(); cancelShapeObj(node); }
 					else if (st.editorRoot && activeEditor === node) { e.preventDefault(); closeEditor(node); }
 					return;
 				}
