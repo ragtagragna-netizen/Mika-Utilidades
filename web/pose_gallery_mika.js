@@ -45,6 +45,55 @@ const readInt = (key, def, min, max) => {
 	return Number.isFinite(v) && v >= min && v <= max ? v : def;
 };
 
+// Pregunta el alcance de la descarga masiva en un menú chico.
+function chooseScope(onPick) {
+	const ov = document.createElement("div");
+	ov.style.cssText =
+		"position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10001;display:flex;align-items:center;justify-content:center";
+	const bx = document.createElement("div");
+	bx.style.cssText =
+		"background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px;min-width:250px";
+	const btnCss =
+		"padding:8px;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;cursor:pointer;text-align:left";
+	const mk = (label, scope) => {
+		const b = document.createElement("button");
+		b.textContent = label;
+		b.style.cssText = btnCss;
+		b.onclick = () => { ov.remove(); onPick(scope); };
+		return b;
+	};
+	const cancel = document.createElement("button");
+	cancel.textContent = "Cancelar";
+	cancel.style.cssText = btnCss;
+	cancel.onclick = () => ov.remove();
+	bx.append(mk("Solo line art (1.473)", "line"),
+		mk("Line art + 3D (2.946)", "all"), cancel);
+	ov.appendChild(bx);
+	ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+	document.body.appendChild(ov);
+}
+
+// Arranca la descarga masiva en el servidor y sigue el progreso.
+async function startBulkDownload(scope, setLabel) {
+	let poll = 0;
+	try {
+		const job = fetch(`/mika/pose_gallery/cache?scope=${scope}`);
+		poll = setInterval(async () => {
+			try {
+				const s = await (await fetch("/mika/pose_gallery/cache_status")).json();
+				if (s.total > 0) setLabel(`⬇ Descargando ${s.done}/${s.total}...`);
+				if (!s.running && poll) { clearInterval(poll); poll = 0; }
+			} catch (e) { /* reintenta */ }
+		}, 500);
+		await job;
+	} catch (err) {
+		console.error("PoseGalleryMika:", err);
+	} finally {
+		if (poll) clearInterval(poll);
+		setLabel("⬇ Descargar todas");
+	}
+}
+
 app.registerExtension({
 	name: "Mika.PoseGalleryMika",
 
@@ -165,7 +214,16 @@ app.registerExtension({
 			selectBtn.textContent = "✔ Seleccionar";
 			selectBtn.style.cssText =
 				"flex:1;padding:8px;background:#2a5a2a;color:#ddd;border:1px solid #4a4;border-radius:4px;cursor:pointer;white-space:nowrap";
-			actions.appendChild(selectBtn);
+			const copyBtn = document.createElement("button");
+			copyBtn.textContent = "📋 Copiar imagen";
+			copyBtn.title = "Copiar al portapapeles (para pegar en el lienzo)";
+			copyBtn.style.cssText =
+				"flex:1;padding:8px;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;cursor:pointer;white-space:nowrap";
+			const dlBtn = document.createElement("button");
+			dlBtn.textContent = "⬇ Descargar";
+			dlBtn.title = "Guardar esta pose como PNG";
+			dlBtn.style.cssText = copyBtn.style.cssText;
+			actions.append(selectBtn, copyBtn, dlBtn);
 
 			panel.append(preview, pName, pCat, pDesc, actions);
 			body.append(gridWrap, panel);
@@ -305,6 +363,36 @@ app.registerExtension({
 				close();
 			};
 
+			// Copiar al portapapeles (para pegar en el lienzo). Copia también
+			// fija la selección, así la salida coincide con lo copiado.
+			copyBtn.onclick = async () => {
+				if (!selected) return;
+				writeSelection(node, selected, estilo, angulo);
+				const url = `/mika/pose_gallery/image?file=${encodeURIComponent(imgFile(selected, estilo, angulo))}&format=png`;
+				try {
+					if (!navigator.clipboard?.write || !window.ClipboardItem) {
+						throw new Error("portapapeles no disponible");
+					}
+					const blob = await (await fetch(url)).blob();
+					await navigator.clipboard.write(
+						[new ClipboardItem({ "image/png": blob })]);
+					copyBtn.textContent = "📋 ¡Copiada!";
+					setTimeout(() => { copyBtn.textContent = "📋 Copiar imagen"; }, 1200);
+				} catch (err) {
+					console.error("PoseGalleryMika:", err);
+					window.open(url, "_blank");
+					alert("No se pudo copiar al portapapeles. Se abrió la imagen para que la guardes y la uses.");
+				}
+			};
+
+			dlBtn.onclick = () => {
+				if (!selected) return;
+				const a = document.createElement("a");
+				a.href = `/mika/pose_gallery/image?file=${encodeURIComponent(imgFile(selected, estilo, angulo))}&format=png`;
+				a.download = `${selected.id}-${estilo}-${angulo}.png`;
+				a.click();
+			};
+
 			// Estado inicial.
 			syncStyleBtn();
 			angleSel.value = String(angulo);
@@ -325,6 +413,23 @@ app.registerExtension({
 			this.addWidget("button", "🖼 Abrir galería", null, () => {
 				openGallery(node).catch((err) =>
 					console.error("PoseGalleryMika:", err));
+			});
+
+			// Descarga masiva: baja todo a user/mika_pose_gallery/ para que la
+			// galería funcione sin internet. Muestra el progreso en la etiqueta.
+			let caching = false;
+			this.addWidget("button", "⬇ Descargar todas", null, () => {
+				if (caching) return;
+				chooseScope((scope) => {
+					if (!scope) return;
+					caching = true;
+					const btn = node.widgets.find(
+						(w) => w.type === "button" && w.name.includes("Descargar todas"));
+					const setLabel = (t) => {
+						if (btn) { btn.name = t; node.setDirtyCanvas(true, true); }
+					};
+					startBulkDownload(scope, setLabel).finally(() => { caching = false; });
+				});
 			});
 
 			return r;
