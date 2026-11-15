@@ -2114,6 +2114,23 @@ app.registerExtension({
 
 			wireDomDrop(node, host);
 
+			// Clic fuera = cerrar (con la misma edición que la ✕). Se excluyen
+			// el propio lienzo del nodo y el chip, que siguen operativos; otra
+			// ventana abierta tampoco cierra (solo se enfoca). El evento no se
+			// consume: el clic sigue su curso normal en ComfyUI.
+			const onDocDown = (e) => {
+				if (!st.editorRoot) return;
+				const t = e.target;
+				if (!(t instanceof Node)) return;
+				if (st.editorRoot.contains(t)) return;
+				if (st.surfaceNode?.stage?.contains(t)) return;
+				if (st.editorChip && st.editorChip.contains(t)) return;
+				if (t.nodeType === 1 && t.closest?.('[data-mika="editor-root"]')) return;
+				closeEditor(node);
+			};
+			document.addEventListener("pointerdown", onDocDown, true);
+			st.editorOutsideHandler = onDocDown;
+
 			// Rueda = zoom del lienzo de la ventana (no del grafo).
 			host.addEventListener("wheel", (e) => {
 				if (!st.editorSurface) return;
@@ -2154,6 +2171,13 @@ app.registerExtension({
 		function closeEditor(node) {
 			const st = node._mikaLineart;
 			if (!st?.editorRoot) return;
+			// Misma edición que la ✕: lo flotante (texto/figura) se fija y se
+			// escribe en el widget antes de desmontar la superficie.
+			commitFloating(node);
+			if (st.editorOutsideHandler) {
+				document.removeEventListener("pointerdown", st.editorOutsideHandler, true);
+				st.editorOutsideHandler = null;
+			}
 			const root = st.editorRoot;
 			const surface = st.editorSurface;
 			try { surface?.resizeObserver?.disconnect(); } catch (e) { /* no-op */ }
