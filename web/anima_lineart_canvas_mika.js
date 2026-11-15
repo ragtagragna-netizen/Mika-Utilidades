@@ -1409,6 +1409,319 @@ app.registerExtension({
 			return { parts, refresh };
 		}
 
+		// Deshacer/rehacer reutilizables por los botones y por Ctrl+Z/Ctrl+Y.
+		function undoOnce(node) {
+			const st = node._mikaLineart;
+			if (!st || !st.undo.length) return;
+			st.redo.push(snapshot(node));
+			restore(node, st.undo.pop());
+		}
+
+		function redoOnce(node) {
+			const st = node._mikaLineart;
+			if (!st || !st.redo.length) return;
+			st.undo.push(snapshot(node));
+			restore(node, st.redo.pop());
+		}
+
+		function createHistoryGroup(node) {
+			const st = node._mikaLineart;
+			const undoBtn = mkButton("↶", "Deshacer");
+			const redoBtn = mkButton("↷", "Rehacer");
+			const clearBtn = mkButton("🗑️", "Limpiar");
+			undoBtn.onclick = () => undoOnce(node);
+			redoBtn.onclick = () => redoOnce(node);
+			clearBtn.onclick = () => { pushUndo(node); clearPaint(node); };
+			return { parts: [undoBtn, redoBtn, clearBtn], refresh() {} };
+		}
+
+		// Cargar una imagen en el trazo y sumar/pegar capas del calco.
+		function createFilesGroup(node) {
+			const loadBtn = mkFileButton(
+				"📂",
+				"Cargar imagen para editar",
+				(img, name) => loadContent(node, img, name),
+			);
+			const pasteEditBtn = mkButton("📋✏️", "Pegar imagen del portapapeles para editar");
+			pasteEditBtn.onclick = () => pasteFromClipboard((img) => loadContent(node, img));
+
+			const traceBtn = mkFileButton(
+				"🖼️",
+				"Importar imagen para calcar como capa (o arrastrá una imagen sobre el nodo)",
+				(img, name) => addCalcoLayer(node, img, name),
+			);
+			const pasteTraceBtn = mkButton("📋🖼️", "Pegar imagen del portapapeles como capa del calco");
+			pasteTraceBtn.onclick = () => pasteFromClipboard((img) => addCalcoLayer(node, img));
+			return { parts: [loadBtn, pasteEditBtn, traceBtn, pasteTraceBtn], refresh() {} };
+		}
+
+		// Selector de preprocesador + ⚡ (no encola el grafo).
+		function createLineartGroup(node) {
+			const st = node._mikaLineart;
+			const preprocSel = document.createElement("select");
+			preprocSel.title = "Preprocesador de lineart";
+			preprocSel.style.cssText =
+				"font:12px sans-serif;height:22px;padding:0 4px;border:1px solid var(--border-color,#444);" +
+				"border-radius:3px;background:var(--comfy-input-bg,#222);color:var(--input-text,#eee);";
+			const preprocW = findWidget(node, "preprocesador");
+			const preprocOpts = (preprocW?.options?.values || []).slice();
+			for (const opt of (preprocOpts.length ? preprocOpts : ["LineArtPreprocessor"])) {
+				const o = document.createElement("option");
+				o.value = opt;
+				o.textContent = opt;
+				preprocSel.appendChild(o);
+			}
+			// Un workflow viejo puede traer un valor que ya no existe (p. ej. "lineart"):
+			// caer al primero (el default) y dejarlo escrito en el widget.
+			const fallbackPp = preprocOpts[0] || "LineArtPreprocessor";
+			let curPp = String(preprocW?.value || "");
+			if (!preprocOpts.includes(curPp)) {
+				curPp = fallbackPp;
+				if (preprocW) {
+					preprocW.value = curPp;
+					try { preprocW.callback?.(curPp); } catch (e) { /* no-op */ }
+				}
+			}
+			preprocSel.value = curPp;
+			preprocSel.onchange = () => {
+				if (!preprocW) return;
+				preprocW.value = preprocSel.value;
+				try { preprocW.callback?.(preprocSel.value); } catch (e) { /* no-op */ }
+			};
+			const bolt = mkButton("⚡", "Crear un lineart desde una o más capas de calco seleccionadas (no ejecuta el workflow)");
+			bolt.onclick = () => { runLineartFromCalco(node); };
+			const refresh = () => {
+				const w = findWidget(node, "preprocesador");
+				if (w?.value != null) preprocSel.value = String(w.value);
+				bolt.textContent = st.lineartBusy ? "⚡ …" : "⚡";
+				bolt.disabled = !!st.lineartBusy;
+			};
+			refresh();
+			return { parts: [preprocSel, bolt], refresh };
+		}
+
+		// Transformar: encajar resolución, ✥, resize libre, reestablecer,
+		// estirar y espejar.
+		function createTransformGroup(node) {
+			const st = node._mikaLineart;
+			const fitResBtn = mkButton("📐", "Ajustar la resolución al tamaño del calco o de la imagen cargada");
+			fitResBtn.onclick = () => adaptResolution(node);
+			const transformBtn = mkButton("✥", "Mover / escalar / rotar las capas seleccionadas");
+			transformBtn.onclick = () => {
+				st.transformMode = !st.transformMode;
+				refreshUI(node);
+				if (st.transformMode) hideCursor(node);
+				else refreshCursor(node);
+				refreshPointerCursors(node);
+				drawTransformUI(node);
+			};
+			const freeBtn = mkButton("libre", "Resize libre: X e Y por separado (apagado = mantiene proporción)");
+			freeBtn.onclick = () => {
+				st.freeResize = !st.freeResize;
+				refreshUI(node);
+			};
+			const resetBtn = mkButton("⟲", "Reestablecer las capas seleccionadas (encajar y centrar, sin rotación)");
+			resetBtn.onclick = () => {
+				if (st.sel) { st.sel.tf = { ...st.sel.tf0 }; drawSel(node); drawTransformUI(node); return; }
+				const keys = affectedLayers(node);
+				if (!keys.length) return;
+				for (const which of keys) {
+					if (which === "paint") st.paintTransform = null;
+					else if (which === "underlay") fitUnderlay(node);
+					else { const l = layerByKey(node, which); if (l) l.tf = { ...l.tf0 }; }
+				}
+				drawUnderlay(node);
+				renderPreview(node);
+				drawTransformUI(node);
+				write(node);
+				writeCalco(node);
+			};
+			const stretchBtn = mkButton("⛶", "Ajustar al tamaño del nodo las capas seleccionadas (estirar para llenar)");
+			stretchBtn.onclick = () => {
+				if (st.sel) {
+					const W = st.paint.width, H = st.paint.height;
+					st.sel.tf = { cx: W / 2, cy: H / 2, sx: W / st.sel.w, sy: H / st.sel.h, rot: 0 };
+					drawSel(node);
+					drawTransformUI(node);
+					return;
+				}
+				const W = st.paint.width, H = st.paint.height;
+				const keys = affectedLayers(node);
+				if (!keys.length) return;
+				for (const which of keys) {
+					if (which === "paint") st.paintTransform = null;
+					else if (which === "underlay") stretchUnderlay(node);
+					else { const l = layerByKey(node, which); if (l) l.tf = { cx: W / 2, cy: H / 2, sx: W / l.w, sy: H / l.h, rot: 0 }; }
+				}
+				drawUnderlay(node);
+				renderPreview(node);
+				drawTransformUI(node);
+				write(node);
+				writeCalco(node);
+			};
+			const flipHBtn = mkButton("↔", "Invertir horizontalmente (las capas seleccionadas o el texto)");
+			flipHBtn.onclick = () => flipTarget(node, "h");
+			const flipVBtn = mkButton("↕", "Invertir verticalmente (las capas seleccionadas o el texto)");
+			flipVBtn.onclick = () => flipTarget(node, "v");
+			const refresh = () => {
+				transformBtn.style.outline = st.transformMode ? "1px solid #4a9" : "none";
+				freeBtn.style.outline = st.freeResize ? "1px solid #4a9" : "none";
+			};
+			refresh();
+			return { parts: [fitResBtn, transformBtn, freeBtn, resetBtn, stretchBtn, flipHBtn, flipVBtn], refresh };
+		}
+
+		function createCopyGroup(node) {
+			const copyBtn = mkButton("📄", "Copiar la imagen (fondo + trazos) al portapapeles");
+			copyBtn.onclick = () => {
+				composeOutput(node).toBlob(async (blob) => {
+					try {
+						await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+					} catch (e) {
+						alert("No se pudo copiar la imagen: " + ((e && e.message) || e));
+					}
+				}, "image/png");
+			};
+			return { parts: [copyBtn], refresh() {} };
+		}
+
+		function createMergeGroup(node) {
+			const mergeBtn = mkButton("⤓", "Unir las capas seleccionadas al calco");
+			mergeBtn.onclick = () => mergeSelected(node);
+			return { parts: [mergeBtn], refresh() {} };
+		}
+
+		function createOpacityGroup(node) {
+			const st = node._mikaLineart;
+			const opacity = document.createElement("input");
+			opacity.type = "range";
+			opacity.min = "0";
+			opacity.max = "100";
+			opacity.value = String(st.calcoOpacity);
+			opacity.title = "Opacidad del calco";
+			opacity.style.width = "60px";
+			opacity.addEventListener("input", () => {
+				st.calcoOpacity = parseInt(opacity.value, 10) || 0;
+				applyCalcoOpacity(node);
+				writePincelState(node);
+				refreshUI(node);
+			});
+			const refresh = () => { opacity.value = String(st.calcoOpacity); };
+			refresh();
+			applyCalcoOpacity(node);
+			return { parts: [opacity], refresh };
+		}
+
+		// Proyecto (JSON): solo se monta en la ventana; el nodo lo tiene en su
+		// menú contextual.
+		function createProjectGroup(node) {
+			const exportBtn = mkButton("💾", "Exportar el proyecto (trazo + calco + resolución) a un archivo");
+			exportBtn.onclick = () => exportProject(node);
+			const importBtn = mkButton("📥", "Importar un proyecto desde un archivo");
+			importBtn.onclick = () => node._mikaProjectInput?.click();
+			return { parts: [exportBtn, importBtn], refresh() {} };
+		}
+
+		// --- ⚡ Lineart desde el calco (no encola el grafo) ---
+		// Una capa de calco guarda un canvas O una imagen (según la operación):
+		// normalizamos a canvas para poder exportarla.
+		function drawableToCanvas(d) {
+			const w = d.naturalWidth || d.width || 1;
+			const h = d.naturalHeight || d.height || 1;
+			const c = document.createElement("canvas");
+			c.width = Math.max(1, w);
+			c.height = Math.max(1, h);
+			c.getContext("2d").drawImage(d, 0, 0, c.width, c.height);
+			return c;
+		}
+
+		// Vuelca el lineart devuelto por el servidor en la capa de trazo.
+		function paintMaskIntoPaint(node, dataUrl) {
+			return new Promise((resolve) => {
+				const st = node._mikaLineart;
+				const m = new Image();
+				m.onload = () => {
+					const W = st.paint.width;
+					const H = st.paint.height;
+					const s = Math.min(W / m.naturalWidth, H / m.naturalHeight);
+					const dw = Math.max(1, Math.round(m.naturalWidth * s));
+					const dh = Math.max(1, Math.round(m.naturalHeight * s));
+					const dx = Math.round((W - dw) / 2);
+					const dy = Math.round((H - dh) / 2);
+					const color = modeStroke(node);
+
+					const tmp = document.createElement("canvas");
+					tmp.width = dw;
+					tmp.height = dh;
+					const tctx = tmp.getContext("2d");
+					tctx.drawImage(m, 0, 0, dw, dh);
+					const id = tctx.getImageData(0, 0, dw, dh);
+					const d = id.data;
+					let cr = 0, cg = 0, cb = 0;
+					if (color[0] === "#") {
+						let hex = color.slice(1);
+						if (hex.length === 3) hex = hex.split("").map((c) => c + c).join("");
+						cr = parseInt(hex.slice(0, 2), 16) || 0;
+						cg = parseInt(hex.slice(2, 4), 16) || 0;
+						cb = parseInt(hex.slice(4, 6), 16) || 0;
+					}
+					// El gris de la máscara pasa a ser el alfa; el color, el del trazo.
+					for (let i = 0; i < d.length; i += 4) {
+						const a = d[i];
+						d[i] = cr; d[i + 1] = cg; d[i + 2] = cb; d[i + 3] = a;
+					}
+					tctx.putImageData(id, 0, 0);
+
+					pushUndo(node);
+					const ctx = paintCtx(node);
+					ctx.globalCompositeOperation = "source-over";
+					ctx.clearRect(0, 0, W, H);
+					ctx.drawImage(tmp, dx, dy);
+					st.dirty = true;
+					renderPreview(node);
+					write(node);
+					resolve();
+				};
+				m.onerror = () => resolve();
+				m.src = dataUrl;
+			});
+		}
+
+		async function runLineartFromCalco(node) {
+			const st = node._mikaLineart;
+			// Solo cuentan el calco base o las capas de calco (no el trazo).
+			const keys = (st.selection || []).filter((k) => k === "underlay" || String(k).startsWith("L:"));
+			const key = keys.find((k) => layerGeom(node, k)) || keys[0];
+			if (!key) { alert("[Mika] Seleccioná una capa de calco para pasarla a lineart."); return; }
+
+			const drawable = key === "underlay" ? st.underlayImg : (layerByKey(node, key) || {}).src;
+			if (!drawable) { alert("[Mika] No se encontró la imagen del calco seleccionado."); return; }
+			const srcCanvas = drawableToCanvas(drawable);
+
+			const preproc = String(findWidget(node, "preprocesador")?.value || "LineArtPreprocessor");
+			// Misma resolución de trabajo que el workflow del AIO.
+			const resolution = 512;
+
+			st.lineartBusy = true;
+			refreshUI(node);
+			try {
+				const payload = srcCanvas.toDataURL("image/png");
+				const r = await api.fetchApi("/mika/lineart/preprocess", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ preprocessor: preproc, image: payload, resolution }),
+				});
+				const j = await r.json();
+				if (!r.ok || !j.image) throw new Error(j.error || `HTTP ${r.status}`);
+				await paintMaskIntoPaint(node, j.image);
+			} catch (e) {
+				alert("[Mika] No se pudo generar el lineart: " + ((e && e.message) || e));
+			} finally {
+				st.lineartBusy = false;
+				refreshUI(node);
+			}
+		}
+
 		// --- Cursor circular con el tamaño de la herramienta activa ---
 		function toolSize(node) {
 			const st = node._mikaLineart;
@@ -3033,284 +3346,18 @@ app.registerExtension({
 				}
 			}
 
-			// --- Deshacer / rehacer / limpiar ---
-			const undoBtn = mkButton("↶", "Deshacer");
-			const redoBtn = mkButton("↷", "Rehacer");
-			const clearBtn = mkButton("🗑️", "Limpiar");
-			undoBtn.onclick = () => {
-				if (!st.undo.length) return;
-				st.redo.push(snapshot(node));
-				restore(node, st.undo.pop());
-			};
-			redoBtn.onclick = () => {
-				if (!st.redo.length) return;
-				st.undo.push(snapshot(node));
-				restore(node, st.redo.pop());
-			};
-			clearBtn.onclick = () => { pushUndo(node); clearPaint(node); };
-
-			// --- Cargar imagen para editar (capa de contenido) ---
-			const loadBtn = mkFileButton(
-				"📂",
-				"Cargar imagen para editar",
-				(img, name) => loadContent(node, img, name),
-			);
-			const pasteEditBtn = mkButton("📋✏️", "Pegar imagen del portapapeles para editar");
-			pasteEditBtn.onclick = () => pasteFromClipboard((img) => loadContent(node, img));
-
-			// --- Calcar (referencia; no se exporta) ---
-			const traceBtn = mkFileButton(
-				"🖼️",
-				"Importar imagen para calcar como capa (o arrastrá una imagen sobre el nodo)",
-				(img, name) => addCalcoLayer(node, img, name),
-			);
-			const pasteTraceBtn = mkButton("📋🖼️", "Pegar imagen del portapapeles como capa del calco");
-			pasteTraceBtn.onclick = () => pasteFromClipboard((img) => addCalcoLayer(node, img));
-
-			// --- Lineart desde el calco seleccionado (NO encola el grafo) ---
-			function paintMaskIntoPaint(node, dataUrl) {
-				return new Promise((resolve) => {
-					const st = node._mikaLineart;
-					const m = new Image();
-					m.onload = () => {
-						const W = st.paint.width;
-						const H = st.paint.height;
-						const s = Math.min(W / m.naturalWidth, H / m.naturalHeight);
-						const dw = Math.max(1, Math.round(m.naturalWidth * s));
-						const dh = Math.max(1, Math.round(m.naturalHeight * s));
-						const dx = Math.round((W - dw) / 2);
-						const dy = Math.round((H - dh) / 2);
-						const color = modeStroke(node);
-
-						const tmp = document.createElement("canvas");
-						tmp.width = dw;
-						tmp.height = dh;
-						const tctx = tmp.getContext("2d");
-						tctx.drawImage(m, 0, 0, dw, dh);
-						const id = tctx.getImageData(0, 0, dw, dh);
-						const d = id.data;
-						let cr = 0, cg = 0, cb = 0;
-						if (color[0] === "#") {
-							let hex = color.slice(1);
-							if (hex.length === 3) hex = hex.split("").map((c) => c + c).join("");
-							cr = parseInt(hex.slice(0, 2), 16) || 0;
-							cg = parseInt(hex.slice(2, 4), 16) || 0;
-							cb = parseInt(hex.slice(4, 6), 16) || 0;
-						}
-						// El gris de la máscara pasa a ser el alfa; el color, el del trazo.
-						for (let i = 0; i < d.length; i += 4) {
-							const a = d[i];
-							d[i] = cr; d[i + 1] = cg; d[i + 2] = cb; d[i + 3] = a;
-						}
-						tctx.putImageData(id, 0, 0);
-
-						pushUndo(node);
-						const ctx = paintCtx(node);
-						ctx.globalCompositeOperation = "source-over";
-						ctx.clearRect(0, 0, W, H);
-						ctx.drawImage(tmp, dx, dy);
-						st.dirty = true;
-						renderPreview(node);
-						write(node);
-						resolve();
-					};
-					m.onerror = () => resolve();
-					m.src = dataUrl;
-				});
-			}
-
-			// Una capa de calco guarda un canvas O una imagen (según la operación):
-			// normalizamos a canvas para poder exportarla.
-			function drawableToCanvas(d) {
-				const w = d.naturalWidth || d.width || 1;
-				const h = d.naturalHeight || d.height || 1;
-				const c = document.createElement("canvas");
-				c.width = Math.max(1, w);
-				c.height = Math.max(1, h);
-				c.getContext("2d").drawImage(d, 0, 0, c.width, c.height);
-				return c;
-			}
-
-			async function runLineartFromCalco() {
-				const st = node._mikaLineart;
-				// Solo cuentan el calco base o las capas de calco (no el trazo).
-				const keys = (st.selection || []).filter((k) => k === "underlay" || String(k).startsWith("L:"));
-				const key = keys.find((k) => layerGeom(node, k)) || keys[0];
-				if (!key) { alert("[Mika] Seleccioná una capa de calco para pasarla a lineart."); return; }
-
-				const drawable = key === "underlay" ? st.underlayImg : (layerByKey(node, key) || {}).src;
-				if (!drawable) { alert("[Mika] No se encontró la imagen del calco seleccionado."); return; }
-				const srcCanvas = drawableToCanvas(drawable);
-
-				const preproc = String(findWidget(node, "preprocesador")?.value || "LineArtPreprocessor");
-				// Misma resolución de trabajo que el workflow del AIO.
-				const resolution = 512;
-
-				const old = lineartBtn.textContent;
-				lineartBtn.textContent = "⚡ …";
-				try {
-					const payload = srcCanvas.toDataURL("image/png");
-					const r = await api.fetchApi("/mika/lineart/preprocess", {
-						method: "POST",
-						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ preprocessor: preproc, image: payload, resolution }),
-					});
-					const j = await r.json();
-					if (!r.ok || !j.image) throw new Error(j.error || `HTTP ${r.status}`);
-					await paintMaskIntoPaint(node, j.image);
-				} catch (e) {
-					alert("[Mika] No se pudo generar el lineart: " + ((e && e.message) || e));
-				} finally {
-					lineartBtn.textContent = old;
-				}
-			}
-
-			const preprocSel = document.createElement("select");
-			preprocSel.title = "Preprocesador de lineart";
-			preprocSel.style.cssText =
-				"font:12px sans-serif;height:22px;padding:0 4px;border:1px solid var(--border-color,#444);" +
-				"border-radius:3px;background:var(--comfy-input-bg,#222);color:var(--input-text,#eee);";
-			const preprocW = findWidget(node, "preprocesador");
-			const preprocOpts = (preprocW?.options?.values || []).slice();
-			for (const opt of (preprocOpts.length ? preprocOpts : ["LineArtPreprocessor"])) {
-				const o = document.createElement("option");
-				o.value = opt;
-				o.textContent = opt;
-				preprocSel.appendChild(o);
-			}
-			// Un workflow viejo puede traer un valor que ya no existe (p. ej. "lineart"):
-			// caer al primero (el default) y dejarlo escrito en el widget.
-			const fallbackPp = preprocOpts[0] || "LineArtPreprocessor";
-			let curPp = String(preprocW?.value || "");
-			if (!preprocOpts.includes(curPp)) {
-				curPp = fallbackPp;
-				if (preprocW) {
-					preprocW.value = curPp;
-					try { preprocW.callback?.(curPp); } catch (e) { /* no-op */ }
-				}
-			}
-			preprocSel.value = curPp;
-			preprocSel.onchange = () => {
-				if (!preprocW) return;
-				preprocW.value = preprocSel.value;
-				try { preprocW.callback?.(preprocSel.value); } catch (e) { /* no-op */ }
-			};
-			const lineartBtn = mkButton("⚡", "Crear un lineart desde la capa de calco seleccionada (no ejecuta el workflow)");
-			lineartBtn.onclick = () => { runLineartFromCalco(); };
-			const fitResBtn = mkButton("📐", "Ajustar la resolución al tamaño del calco o de la imagen cargada");
-			fitResBtn.onclick = () => adaptResolution(node);
-			const transformBtn = mkButton("✥", "Mover / escalar / rotar las capas seleccionadas");
-			transformBtn.onclick = () => {
-				st.transformMode = !st.transformMode;
-				transformBtn.style.outline = st.transformMode ? "1px solid #4a9" : "none";
-				if (st.transformMode) hideCursor(node);
-				else refreshCursor(node);
-				refreshPointerCursors(node);
-				if (!nodeSurface.preview.style.cursor) nodeSurface.preview.style.cursor = CURSOR_CROSS;
-				drawTransformUI(node);
-			};
-			const freeBtn = mkButton("libre", "Resize libre: X e Y por separado (apagado = mantiene proporción)");
-			freeBtn.onclick = () => {
-				st.freeResize = !st.freeResize;
-				freeBtn.style.outline = st.freeResize ? "1px solid #4a9" : "none";
-			};
-			transformBtn.style.outline = st.transformMode ? "1px solid #4a9" : "none";
-			freeBtn.style.outline = st.freeResize ? "1px solid #4a9" : "none";
-			const resetBtn = mkButton("⟲", "Reestablecer las capas seleccionadas (encajar y centrar, sin rotación)");
-			resetBtn.onclick = () => {
-				if (st.sel) { st.sel.tf = { ...st.sel.tf0 }; drawSel(node); drawTransformUI(node); return; }
-				const keys = affectedLayers(node);
-				if (!keys.length) return;
-				for (const which of keys) {
-					if (which === "paint") st.paintTransform = null;
-					else if (which === "underlay") fitUnderlay(node);
-					else { const l = layerByKey(node, which); if (l) l.tf = { ...l.tf0 }; }
-				}
-				drawUnderlay(node);
-				renderPreview(node);
-				drawTransformUI(node);
-				write(node);
-				writeCalco(node);
-			};
-			const stretchBtn = mkButton("⛶", "Ajustar al tamaño del nodo las capas seleccionadas (estirar para llenar)");
-			stretchBtn.onclick = () => {
-				if (st.sel) {
-					const W = st.paint.width, H = st.paint.height;
-					st.sel.tf = { cx: W / 2, cy: H / 2, sx: W / st.sel.w, sy: H / st.sel.h, rot: 0 };
-					drawSel(node);
-					drawTransformUI(node);
-					return;
-				}
-				const W = st.paint.width, H = st.paint.height;
-				const keys = affectedLayers(node);
-				if (!keys.length) return;
-				for (const which of keys) {
-					if (which === "paint") st.paintTransform = null;
-					else if (which === "underlay") stretchUnderlay(node);
-					else { const l = layerByKey(node, which); if (l) l.tf = { cx: W / 2, cy: H / 2, sx: W / l.w, sy: H / l.h, rot: 0 }; }
-				}
-				drawUnderlay(node);
-				renderPreview(node);
-				drawTransformUI(node);
-				write(node);
-				writeCalco(node);
-			};
-			const flipHBtn = mkButton("↔", "Invertir horizontalmente (las capas seleccionadas o el texto)");
-			flipHBtn.onclick = () => flipTarget(node, "h");
-			const flipVBtn = mkButton("↕", "Invertir verticalmente (las capas seleccionadas o el texto)");
-			flipVBtn.onclick = () => flipTarget(node, "v");
-			const copyBtn = mkButton("📄", "Copiar la imagen (fondo + trazos) al portapapeles");
-			copyBtn.onclick = () => {
-				composeOutput(node).toBlob(async (blob) => {
-					try {
-						await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-					} catch (e) {
-						alert("No se pudo copiar la imagen: " + ((e && e.message) || e));
-					}
-				}, "image/png");
-			};
-			const opacity = document.createElement("input");
-			opacity.type = "range";
-			opacity.min = "0";
-			opacity.max = "100";
-			opacity.value = String(st.calcoOpacity);
-			opacity.title = "Opacidad del calco";
-			opacity.style.width = "60px";
-			applyCalcoOpacity(node);
-			opacity.addEventListener("input", () => {
-				st.calcoOpacity = parseInt(opacity.value, 10) || 0;
-				applyCalcoOpacity(node);
-				writePincelState(node);
-			});
-
-			const mergeBtn = mkButton("⤓", "Unir las capas seleccionadas al calco");
-			mergeBtn.onclick = () => mergeSelected(node);
-
-			// Herramientas y sus opciones, en el mismo orden de siempre.
+			// La barra se arma con las fábricas, en el mismo orden de siempre.
+			const append = (set) => { for (const p of set.parts) toolbar.appendChild(p); };
 			const toolsSet = registerUISet(node, createToolsGroup(node));
 			for (const b of toolsSet.buttons) toolbar.appendChild(b);
-			const optsSet = registerUISet(node, createToolOptionsGroup(node));
-			for (const p of optsSet.parts) toolbar.appendChild(p);
-
-			toolbar.appendChild(undoBtn);
-			toolbar.appendChild(redoBtn);
-			toolbar.appendChild(clearBtn);
-			toolbar.appendChild(loadBtn);
-			toolbar.appendChild(pasteEditBtn);
-			toolbar.appendChild(traceBtn);
-			toolbar.appendChild(pasteTraceBtn);
-			toolbar.appendChild(preprocSel);
-			toolbar.appendChild(lineartBtn);
-			toolbar.appendChild(fitResBtn);
-			toolbar.appendChild(transformBtn);
-			toolbar.appendChild(freeBtn);
-			toolbar.appendChild(resetBtn);
-			toolbar.appendChild(stretchBtn);
-			toolbar.appendChild(flipHBtn);
-			toolbar.appendChild(flipVBtn);
-			toolbar.appendChild(copyBtn);
-			toolbar.appendChild(opacity);
-			toolbar.appendChild(mergeBtn);
+			append(registerUISet(node, createToolOptionsGroup(node)));
+			append(registerUISet(node, createHistoryGroup(node)));
+			append(registerUISet(node, createFilesGroup(node)));
+			append(registerUISet(node, createLineartGroup(node)));
+			append(registerUISet(node, createTransformGroup(node)));
+			append(registerUISet(node, createCopyGroup(node)));
+			append(registerUISet(node, createOpacityGroup(node)));
+			append(registerUISet(node, createMergeGroup(node)));
 			wireDomDrop(node, root);
 			wireCanvasNav(root);
 			drawCalcoLayers(node);
