@@ -1351,10 +1351,10 @@ app.registerExtension({
 			}
 			shapeSel.value = st.shape;
 			shapeSel.title = "Figura";
-			shapeSel.onchange = () => { st.shape = shapeSel.value; writePincelState(node); };
+			shapeSel.onchange = () => { st.shape = shapeSel.value; writePincelState(node); refreshUI(node); };
 
 			// --- Texto: fuentes del Paint + fuentes de cómic (con vista previa) ---
-			const fontSel = mkFontPicker(() => st.font, (f) => { st.font = f; writePincelState(node); }, fontGroups);
+			const fontSel = mkFontPicker(() => st.font, (f) => { st.font = f; writePincelState(node); refreshUI(node); }, fontGroups);
 			const fontAdd = mkFontAddMenu(() => fontSel.refreshList?.());
 			const fontSizeInput = styleInput(document.createElement("input"));
 			fontSizeInput.type = "number";
@@ -1363,7 +1363,7 @@ app.registerExtension({
 			fontSizeInput.value = String(st.fontSize);
 			fontSizeInput.title = "Tamaño de fuente";
 			fontSizeInput.style.width = "54px";
-			fontSizeInput.oninput = () => { st.fontSize = parseInt(fontSizeInput.value, 10) || 48; writePincelState(node); };
+			fontSizeInput.oninput = () => { st.fontSize = parseInt(fontSizeInput.value, 10) || 48; writePincelState(node); refreshUI(node); };
 			const textInput = styleInput(document.createElement("input"));
 			textInput.type = "text";
 			textInput.placeholder = "texto…";
@@ -1495,6 +1495,7 @@ app.registerExtension({
 				if (!preprocW) return;
 				preprocW.value = preprocSel.value;
 				try { preprocW.callback?.(preprocSel.value); } catch (e) { /* no-op */ }
+				refreshUI(node);
 			};
 			const bolt = mkButton("⚡", "Crear un lineart desde una o más capas de calco seleccionadas (no ejecuta el workflow)");
 			bolt.onclick = () => { runLineartFromCalco(node); };
@@ -1614,9 +1615,13 @@ app.registerExtension({
 				writePincelState(node);
 				refreshUI(node);
 			});
-			const refresh = () => { opacity.value = String(st.calcoOpacity); };
+			// refresh() reaplica la opacidad para cubrir superficies creadas
+			// después de esta instancia (p. ej. la ventana al abrirse).
+			const refresh = () => {
+				opacity.value = String(st.calcoOpacity);
+				applyCalcoOpacity(node);
+			};
 			refresh();
-			applyCalcoOpacity(node);
 			return { parts: [opacity], refresh };
 		}
 
@@ -1905,6 +1910,9 @@ app.registerExtension({
 			st.surfaces.push(surface);
 			st.editorSurface = surface;
 			st.wireSurface(surface);
+			// Los controles se montaron antes de que existiera esta superficie:
+			// reaplicar la opacidad del calco sobre ella.
+			applyCalcoOpacity(node);
 
 			document.body.appendChild(root);
 			root.addEventListener("pointerdown", () => { sink.focus(); focusEditor(node); });
