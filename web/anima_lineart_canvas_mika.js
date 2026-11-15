@@ -1828,6 +1828,19 @@ app.registerExtension({
 			center.append(optionsRow, host);
 			body.append(rail, center, panel);
 			root.append(header, body);
+
+			// Sumidero de foco: ComfyUI ignora sus atajos cuando el foco está
+			// en un campo editable, así Ctrl+Z dentro de la ventana no deshace
+			// el grafo. Lo que se tipee ahí se descarta.
+			const sink = document.createElement("textarea");
+			sink.setAttribute("aria-hidden", "true");
+			sink.tabIndex = -1;
+			sink.style.cssText = "position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;" +
+				"border:0;padding:0;margin:0;resize:none;overflow:hidden;";
+			sink.addEventListener("input", () => { sink.value = ""; });
+			root.appendChild(sink);
+			st.editorSink = sink;
+
 			if (st.editorChip) st.editorChip.textContent = "Cerrar editor";
 
 			st.editorRoot = root;
@@ -1894,7 +1907,7 @@ app.registerExtension({
 			st.wireSurface(surface);
 
 			document.body.appendChild(root);
-			root.addEventListener("pointerdown", () => { root.focus(); focusEditor(node); });
+			root.addEventListener("pointerdown", () => { sink.focus(); focusEditor(node); });
 
 			wireDomDrop(node, host);
 
@@ -1911,6 +1924,7 @@ app.registerExtension({
 			drawTransformUI(node);
 			refreshWindowChrome(node);
 			focusEditor(node);
+			sink.focus();
 		}
 
 		function closeEditor(node) {
@@ -1924,6 +1938,7 @@ app.registerExtension({
 			st.editorRoot = null;
 			st.editorSurface = null;
 			st.editorTitle = null;
+			st.editorSink = null;
 			st.uiWindow = null;
 			root.remove();
 			if (st.editorChip) st.editorChip.textContent = "Abrir editor";
@@ -4222,6 +4237,7 @@ app.registerExtension({
 				document.removeEventListener("keydown", this._mikaKeyHandler, true);
 				this._mikaKeyHandler = null;
 			}
+
 			if (this._mikaExecHandler) {
 				app.api?.removeEventListener?.("execution_success", this._mikaExecHandler);
 				this._mikaExecHandler = null;
