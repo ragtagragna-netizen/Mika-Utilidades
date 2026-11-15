@@ -1206,33 +1206,33 @@ app.registerExtension({
 			return st.thickness;
 		}
 
-		function placeCursor(node, clientX, clientY) {
+		function placeCursor(node, surface, clientX, clientY) {
 			const st = node._mikaLineart;
 			// El círculo del pincel solo se oculta si hay una transformación
 			// en curso: tener una capa seleccionada no cambia el cursor.
-			if (!st?.brushCursor || st.transformMode || st.tool === "text" || st.tool === "select" || st.textObj || st.sel) return;
-			const c = st.preview;
+			if (!st || !surface?.brushCursor || st.transformMode || st.tool === "text" || st.tool === "select" || st.textObj || st.sel) return;
+			const c = surface.preview;
 			const r = c.getBoundingClientRect();
 			if (!r.width || !r.height) return;
 			// Coordenadas LOCALES: el DOM del nodo se escala con CSS al hacer
 			// zoom, así que screen-px != layout-px.
 			const kx = (c.offsetWidth || r.width) / r.width;
 			const ky = (c.offsetHeight || r.height) / r.height;
-			st.cursorPos = [clientX, clientY];
+			surface.cursorPos = [clientX, clientY];
 			// El círculo refleja el grosor real (incluido 1 px) escalado por
 			// la transformación de la capa; sin mínimo alto.
 			const t = paintTf(node);
 			const layerScale = Math.sqrt(Math.abs(t.sx * t.sy)) || 1;
 			const d = Math.max(1, toolSize(node) * ((c.offsetWidth || r.width) / st.paint.width) * layerScale);
-			st.brushCursor.style.width = d + "px";
-			st.brushCursor.style.height = d + "px";
-			st.brushCursor.style.left = (clientX - r.left) * kx + "px";
-			st.brushCursor.style.top = (clientY - r.top) * ky + "px";
-			st.brushCursor.style.display = "block";
+			surface.brushCursor.style.width = d + "px";
+			surface.brushCursor.style.height = d + "px";
+			surface.brushCursor.style.left = (clientX - r.left) * kx + "px";
+			surface.brushCursor.style.top = (clientY - r.top) * ky + "px";
+			surface.brushCursor.style.display = "block";
 		}
 
-		function clientToCanvas(node, clientX, clientY) {
-			const c = node._mikaLineart.preview;
+		function clientToCanvas(node, surface, clientX, clientY) {
+			const c = surface.preview;
 			const r = c.getBoundingClientRect();
 			return [(clientX - r.left) * c.width / r.width, (clientY - r.top) * c.height / r.height];
 		}
@@ -1247,17 +1247,17 @@ app.registerExtension({
 			return deg <= 90 ? "nwse-resize" : "nesw-resize";
 		}
 
-		function updatePointerCursor(node, clientX, clientY) {
+		function updatePointerCursor(node, surface, clientX, clientY) {
 			const st = node._mikaLineart;
-			const c = st?.preview;
+			const c = surface?.preview;
 			if (!c) return;
-			st.lastClientPos = [clientX, clientY];
+			surface.lastClient = [clientX, clientY];
 			// Los cursores de mover/redimensionar/rotar solo aparecen cuando la
 			// transformación está activa (✥, un texto en edición o una pieza
 			// del lazo); con solo tener una capa seleccionada, el cursor sigue
 			// siendo el de la herramienta.
 			if (!st.transformMode && !st.textObj && !st.sel) { c.style.cursor = CURSOR_CROSS; return; }
-			const [x, y] = clientToCanvas(node, clientX, clientY);
+			const [x, y] = clientToCanvas(node, surface, clientX, clientY);
 			const hit = transformHit(node, x, y);
 			if (!hit) c.style.cursor = CURSOR_CROSS;
 			else if (hit.kind === "rotate") c.style.cursor = CURSOR_ROTATE;
@@ -1266,15 +1266,24 @@ app.registerExtension({
 		}
 
 		function hideCursor(node) {
-			const st = node._mikaLineart;
-			if (!st?.brushCursor) return;
-			st.brushCursor.style.display = "none";
-			st.cursorPos = null;
+			forEachSurface(node, (s) => {
+				if (s.brushCursor) s.brushCursor.style.display = "none";
+				s.cursorPos = null;
+			});
 		}
 
 		function refreshCursor(node) {
-			const st = node._mikaLineart;
-			if (st?.cursorPos) placeCursor(node, st.cursorPos[0], st.cursorPos[1]);
+			forEachSurface(node, (s) => {
+				if (s.cursorPos) placeCursor(node, s, s.cursorPos[0], s.cursorPos[1]);
+			});
+		}
+
+		// Recalcula el cursor de puntero (mano/mover) en cada superficie que ya
+		// tenga una posición conocida; se usa al activar o salir de ✥.
+		function refreshPointerCursors(node) {
+			forEachSurface(node, (s) => {
+				if (s.lastClient) updatePointerCursor(node, s, s.lastClient[0], s.lastClient[1]);
+			});
 		}
 
 		// --- Capas transformables (trazo y calco) ---
@@ -2226,6 +2235,19 @@ app.registerExtension({
 			for (const s of node._mikaLineart?.surfaces || []) fn(s);
 		}
 
+		// Encaja el stage de una superficie al área de su host (la ventana),
+		// sin deformar: conserva la proporción del lienzo.
+		function fitStageToHost(node, surface) {
+			const st = node._mikaLineart;
+			if (!st || !surface?.host) return;
+			const { width: hw, height: hh } = surface.host.getBoundingClientRect();
+			if (!hw || !hh) return;
+			const rw = st.paint.width, rh = st.paint.height;
+			const k = Math.min((hw - 16) / rw, (hh - 16) / rh);
+			surface.stage.style.width = Math.max(40, Math.floor(rw * k)) + "px";
+			surface.stage.style.height = Math.max(40, Math.floor(rh * k)) + "px";
+		}
+
 		// --- Render de la capa de trazo con su transformación ---
 		function renderPreview(node) {
 			const st = node._mikaLineart;
@@ -2679,9 +2701,6 @@ app.registerExtension({
 			// Superficie del nodo: capas apiladas + el canvas que recibe el
 			// dibujo. La ventana flotante crea otra con makeSurface.
 			const nodeSurface = makeSurface(node, { id: "node", rw, rh });
-			// Alias local mientras el cableado del puntero vive en build();
-			// la Tarea 2 lo pasa a wireSurface.
-			const preview = nodeSurface.preview;
 
 			// Fondo con la imagen de entrada (solo inpaint): la compone el nodo
 			// Python en "image"; acá se muestra para poder dibujar encima.
@@ -3129,8 +3148,8 @@ app.registerExtension({
 				transformBtn.style.outline = st.transformMode ? "1px solid #4a9" : "none";
 				if (st.transformMode) hideCursor(node);
 				else refreshCursor(node);
-				if (st.lastClientPos) updatePointerCursor(node, st.lastClientPos[0], st.lastClientPos[1]);
-				else preview.style.cursor = CURSOR_CROSS;
+				refreshPointerCursors(node);
+				if (!nodeSurface.preview.style.cursor) nodeSurface.preview.style.cursor = CURSOR_CROSS;
 				drawTransformUI(node);
 			};
 			const freeBtn = mkButton("libre", "Resize libre: X e Y por separado (apagado = mantiene proporción)");
@@ -3257,16 +3276,16 @@ app.registerExtension({
 			let last = null;
 
 			// Puntero -> coordenadas del lienzo (espacio de la capa visible).
-			const posCanvas = (e) => {
-				const r = preview.getBoundingClientRect();
+			const posCanvas = (e, surface) => {
+				const r = surface.preview.getBoundingClientRect();
 				return [
-					(e.clientX - r.left) * preview.width / r.width,
-					(e.clientY - r.top) * preview.height / r.height,
+					(e.clientX - r.left) * surface.preview.width / r.width,
+					(e.clientY - r.top) * surface.preview.height / r.height,
 				];
 			};
 			// Puntero -> coordenadas fuente de la capa de trazo (con inversa).
-			const pos = (e) => {
-				const [cx, cy] = posCanvas(e);
+			const pos = (e, surface) => {
+				const [cx, cy] = posCanvas(e, surface);
 				return contentToSource(node, cx, cy);
 			};
 
@@ -3509,164 +3528,174 @@ app.registerExtension({
 				return true;
 			};
 
-			preview.addEventListener("pointerdown", (e) => {
-				if (e.button !== 0) return;
-				e.preventDefault();
-				try { preview.setPointerCapture(e.pointerId); } catch (err) { /* no-op */ }
+			// Cablea el puntero de una superficie. El estado del trazo
+			// (drawing/last) es compartido: solo hay un trazo a la vez, aunque
+			// haya dos superficies vivas.
+			function wireSurface(node, surface) {
+				const pv = surface.preview;
 
-				if (st.transformMode) {
-					const [tx, ty] = posCanvas(e);
-					if (!beginTransform(tx, ty)) return;
+				pv.addEventListener("pointerdown", (e) => {
+					if (e.button !== 0) return;
+					e.preventDefault();
+					try { pv.setPointerCapture(e.pointerId); } catch (err) { /* no-op */ }
+
+					if (st.transformMode) {
+						const [tx, ty] = posCanvas(e, surface);
+						if (!beginTransform(tx, ty)) return;
+						hideCursor(node);
+						return;
+					}
+
+					// Selección flotante: si se toca el marco se edita; si no, se fija.
+					if (st.sel) {
+						const [tx, ty] = posCanvas(e, surface);
+						if (transformHit(node, tx, ty)) {
+							beginTransform(tx, ty);
+							hideCursor(node);
+							return;
+						}
+						commitSel(node);
+					}
+
+					// Texto en edición: si se toca el marco se arrastra/redimensiona;
+					// si no, se fija y (con la herramienta texto) empieza otro.
+					if (st.textObj) {
+						const [tx, ty] = posCanvas(e, surface);
+						if (transformHit(node, tx, ty)) {
+							beginTransform(tx, ty);
+							hideCursor(node);
+							return;
+						}
+						commitTextObj(node);
+					}
+
 					hideCursor(node);
-					return;
-				}
-
-				// Selección flotante: si se toca el marco se edita; si no, se fija.
-				if (st.sel) {
-					const [tx, ty] = posCanvas(e);
-					if (transformHit(node, tx, ty)) {
-						beginTransform(tx, ty);
-						hideCursor(node);
+					if (st.tool === "text") {
+						if (!st.text) { alert("Escribí un texto en el campo antes de colocarlo."); return; }
+						pushUndo(node);
+						const [cx, cy] = posCanvas(e, surface);
+						createTextObj(node, cx, cy);
 						return;
 					}
-					commitSel(node);
-				}
 
-				// Texto en edición: si se toca el marco se arrastra/redimensiona;
-				// si no, se fija y (con la herramienta texto) empieza otro.
-				if (st.textObj) {
-					const [tx, ty] = posCanvas(e);
-					if (transformHit(node, tx, ty)) {
-						beginTransform(tx, ty);
-						hideCursor(node);
-						return;
-					}
-					commitTextObj(node);
-				}
-
-				hideCursor(node);
-				if (st.tool === "text") {
-					if (!st.text) { alert("Escribí un texto en el campo antes de colocarlo."); return; }
-					pushUndo(node);
-					const [cx, cy] = posCanvas(e);
-					createTextObj(node, cx, cy);
-					return;
-				}
-
-				if (st.tool === "select") {
-					if (!selectedLayers(node).length) return;
-					const [cx, cy] = posCanvas(e);
-					st.lasso = { pts: [[cx, cy]] };
-					drawLasso(node);
-					return;
-				}
-
-				if (st.tool === "maskBrush" || st.tool === "maskErase") {
-					pushUndo(node);
-					drawing = true;
-					last = null;
-					const [mx, my] = posCanvas(e);
-					maskSeg(mx, my);
-					return;
-				}
-
-				if (st.tool === "soft") {
-					pushUndo(node);
-					drawing = true;
-					last = null;
-					st.softPts = [pos(e)];
-					softLive();
-					return;
-				}
-
-				pushUndo(node);
-				drawing = true;
-				last = null;
-				const [x, y] = pos(e);
-				if (st.tool === "shape") {
-					st.shapeStart = [x, y];
-					st.shapeEnd = [x, y];
-				} else if (st.tool === "eraser") {
-					st.erasePoints = [];
-					erasePreviewTo(x, y);
-				} else {
-					strokeTo(x, y);
-				}
-			});
-			preview.addEventListener("pointerenter", (e) => {
-				updatePointerCursor(node, e.clientX, e.clientY);
-				if (!st.transformMode) placeCursor(node, e.clientX, e.clientY);
-			});
-			preview.addEventListener("pointerleave", () => hideCursor(node));
-			preview.addEventListener("pointermove", (e) => {
-				if (st.lasso) {
-					const [cx, cy] = posCanvas(e);
-					const pts = st.lasso.pts;
-					const p = pts[pts.length - 1];
-					if (Math.hypot(cx - p[0], cy - p[1]) > 2) {
-						pts.push([cx, cy]);
+					if (st.tool === "select") {
+						if (!selectedLayers(node).length) return;
+						const [cx, cy] = posCanvas(e, surface);
+						st.lasso = { pts: [[cx, cy]] };
 						drawLasso(node);
+						return;
 					}
-					return;
-				}
-				if (st.transformDrag) {
-					const [cx, cy] = posCanvas(e);
-					applyTransformDrag(node, cx, cy);
-					return;
-				}
-				updatePointerCursor(node, e.clientX, e.clientY);
-				if (st.transformMode) { hideCursor(node); return; }
-				if (!drawing) { placeCursor(node, e.clientX, e.clientY); return; }
-				if (st.tool === "maskBrush" || st.tool === "maskErase") {
-					const [mx, my] = posCanvas(e);
-					maskSeg(mx, my);
-					return;
-				}
-				const [x, y] = pos(e);
-				if (st.tool === "soft") {
-					const p = st.softPts[st.softPts.length - 1];
-					if (Math.hypot(x - p[0], y - p[1]) >= 1) {
-						st.softPts.push([x, y]);
+
+					if (st.tool === "maskBrush" || st.tool === "maskErase") {
+						pushUndo(node);
+						drawing = true;
+						last = null;
+						const [mx, my] = posCanvas(e, surface);
+						maskSeg(mx, my);
+						return;
+					}
+
+					if (st.tool === "soft") {
+						pushUndo(node);
+						drawing = true;
+						last = null;
+						st.softPts = [pos(e, surface)];
 						softLive();
+						return;
 					}
-				} else if (st.tool === "shape") shapePreviewTo(x, y);
-				else if (st.tool === "eraser") erasePreviewTo(x, y);
-				else strokeTo(x, y);
-			});
-			const endStroke = () => {
-				if (st.transformDrag) {
-					const layers = st.transformDrag.layers;
-					st.transformDrag = null;
-					if (layers.includes("paint")) write(node);
-					if (layers.includes("underlay") || layers.some((k) => String(k).startsWith("L:"))) writeCalco(node);
-					drawTransformUI(node);
-					return;
-				}
-				if (st.lasso) {
-					const pts = st.lasso.pts;
-					st.lasso = null;
-					clearOverlay(node);
-					createSelection(node, pts);
-					return;
-				}
-				if (!drawing) return;
-				drawing = false;
-				const wasMaskStroke = st.tool === "maskBrush" || st.tool === "maskErase";
-				if (st.tool === "shape") commitShape();
-				else if (st.tool === "eraser") { commitErase(); renderPreview(node); }
-				else if (st.tool === "soft") commitSoft();
-				st.erasePoints = null;
-				st.shapeStart = null;
-				st.shapeEnd = null;
-				last = null;
-				if (wasMaskStroke) writeMask(node);
-				else write(node);
-			};
-			preview.addEventListener("pointerup", (e) => {
-				endStroke();
-				if (!st.transformMode) placeCursor(node, e.clientX, e.clientY);
-			});
-			preview.addEventListener("pointercancel", () => { endStroke(); hideCursor(node); });
+
+					pushUndo(node);
+					drawing = true;
+					last = null;
+					const [x, y] = pos(e, surface);
+					if (st.tool === "shape") {
+						st.shapeStart = [x, y];
+						st.shapeEnd = [x, y];
+					} else if (st.tool === "eraser") {
+						st.erasePoints = [];
+						erasePreviewTo(x, y);
+					} else {
+						strokeTo(x, y);
+					}
+				});
+				pv.addEventListener("pointerenter", (e) => {
+					updatePointerCursor(node, surface, e.clientX, e.clientY);
+					if (!st.transformMode) placeCursor(node, surface, e.clientX, e.clientY);
+				});
+				pv.addEventListener("pointerleave", () => hideCursor(node));
+				pv.addEventListener("pointermove", (e) => {
+					if (st.lasso) {
+						const [cx, cy] = posCanvas(e, surface);
+						const pts = st.lasso.pts;
+						const p = pts[pts.length - 1];
+						if (Math.hypot(cx - p[0], cy - p[1]) > 2) {
+							pts.push([cx, cy]);
+							drawLasso(node);
+						}
+						return;
+					}
+					if (st.transformDrag) {
+						const [cx, cy] = posCanvas(e, surface);
+						applyTransformDrag(node, cx, cy);
+						return;
+					}
+					updatePointerCursor(node, surface, e.clientX, e.clientY);
+					if (st.transformMode) { hideCursor(node); return; }
+					if (!drawing) { placeCursor(node, surface, e.clientX, e.clientY); return; }
+					if (st.tool === "maskBrush" || st.tool === "maskErase") {
+						const [mx, my] = posCanvas(e, surface);
+						maskSeg(mx, my);
+						return;
+					}
+					const [x, y] = pos(e, surface);
+					if (st.tool === "soft") {
+						const p = st.softPts[st.softPts.length - 1];
+						if (Math.hypot(x - p[0], y - p[1]) >= 1) {
+							st.softPts.push([x, y]);
+							softLive();
+						}
+					} else if (st.tool === "shape") shapePreviewTo(x, y);
+					else if (st.tool === "eraser") erasePreviewTo(x, y);
+					else strokeTo(x, y);
+				});
+				const endStroke = () => {
+					if (st.transformDrag) {
+						const layers = st.transformDrag.layers;
+						st.transformDrag = null;
+						if (layers.includes("paint")) write(node);
+						if (layers.includes("underlay") || layers.some((k) => String(k).startsWith("L:"))) writeCalco(node);
+						drawTransformUI(node);
+						return;
+					}
+					if (st.lasso) {
+						const pts = st.lasso.pts;
+						st.lasso = null;
+						clearOverlay(node);
+						createSelection(node, pts);
+						return;
+					}
+					if (!drawing) return;
+					drawing = false;
+					const wasMaskStroke = st.tool === "maskBrush" || st.tool === "maskErase";
+					if (st.tool === "shape") commitShape();
+					else if (st.tool === "eraser") { commitErase(); renderPreview(node); }
+					else if (st.tool === "soft") commitSoft();
+					st.erasePoints = null;
+					st.shapeStart = null;
+					st.shapeEnd = null;
+					last = null;
+					if (wasMaskStroke) writeMask(node);
+					else write(node);
+				};
+				pv.addEventListener("pointerup", (e) => {
+					endStroke();
+					if (!st.transformMode) placeCursor(node, surface, e.clientX, e.clientY);
+				});
+				pv.addEventListener("pointercancel", () => { endStroke(); hideCursor(node); });
+			}
+
+			st.wireSurface = (surface) => wireSurface(node, surface);
+			st.wireSurface(nodeSurface);
 
 			// --- Montar el DOM widget ---
 			const domWidget = node.addDOMWidget("mika_lineart_canvas", "div", root);
