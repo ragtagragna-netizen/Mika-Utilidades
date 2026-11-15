@@ -790,7 +790,7 @@ app.registerExtension({
 			forEachSurface(node, (s) => { s.stage.style.background = modeBg(node); });
 			st.color = modeStroke(node);
 			clearOverlay(node);
-			if (st.colorInput) st.colorInput.style.display = isLineart(node) ? "none" : "";
+			refreshUI(node);
 		}
 
 		function hookWidget(node, widget, fn) {
@@ -1195,6 +1195,218 @@ app.registerExtension({
 			};
 			el.addEventListener("pointerup", endPan, { capture: true });
 			el.addEventListener("pointercancel", endPan, { capture: true });
+		}
+
+		// --- Fábricas de controles ---
+		// Cada fábrica crea SUS propios elementos (no mueve nodos del DOM) y
+		// expone refresh() para reflejar el estado. El nodo y la ventana tienen
+		// una instancia cada una, registradas con registerUISet.
+		function registerUISet(node, set, scope = "node") {
+			const st = node._mikaLineart;
+			if (!st) return set;
+			if (scope === "window") (st.uiWindow ??= { sets: [] }).sets.push(set);
+			else (st.uiNode ??= []).push(set);
+			return set;
+		}
+
+		function refreshUI(node) {
+			const st = node._mikaLineart;
+			if (!st) return;
+			for (const set of [...(st.uiNode || []), ...(st.uiWindow?.sets || [])]) set.refresh?.();
+		}
+
+		function mkSlider(node, max, value, title, onInput, min = 1) {
+			const s = document.createElement("input");
+			s.type = "range";
+			s.min = String(min);
+			s.max = String(max);
+			s.value = String(value);
+			s.title = title;
+			s.style.width = "70px";
+			s.addEventListener("input", () => {
+				onInput(parseInt(s.value, 10) || min);
+				writePincelState(node);
+				refreshUI(node);
+			});
+			return s;
+		}
+
+		// Botones de herramienta (pincel/borrador/difuminado/forma/texto/lazo y,
+		// en inpaint, las de máscara) con su outline activo.
+		function createToolsGroup(node) {
+			const st = node._mikaLineart;
+			const brushBtn = mkButton("✏️", "Pincel");
+			const eraserBtn = mkButton("🧽", "Borrador");
+			const softBtn = mkIconButton(SOFT_BRUSH_ICON, "Pincel difuminado: borde suave y/o grano tipo lápiz");
+			const shapeBtn = mkButton("▭", "Forma (elegí la figura en la lista)");
+			const textBtn = mkButton("🅣", "Texto (escribí y hacé clic en el lienzo)");
+			const selectBtn = mkButton("▚", "Seleccionar a mano alzada (lazo) un área del trazo/calco para editarla");
+			const toolBtns = { brush: brushBtn, eraser: eraserBtn, soft: softBtn, shape: shapeBtn, text: textBtn, select: selectBtn };
+			const buttons = [brushBtn, eraserBtn, softBtn, shapeBtn, textBtn, selectBtn];
+			// Herramientas de máscara: solo en el nodo de inpaint.
+			if (isInpaint) {
+				const maskBrushBtn = mkButton("🖌️", "Pincel de máscara (zona a regenerar)");
+				const maskEraseBtn = mkButton("🧼", "Borrador de máscara");
+				toolBtns.maskBrush = maskBrushBtn;
+				toolBtns.maskErase = maskEraseBtn;
+				buttons.push(maskBrushBtn, maskEraseBtn);
+			}
+			for (const [id, b] of Object.entries(toolBtns)) {
+				b.onclick = () => {
+					st.tool = id;
+					writePincelState(node);
+					refreshUI(node);
+					refreshCursor(node);
+				};
+			}
+			const refresh = () => {
+				for (const [id, b] of Object.entries(toolBtns)) {
+					b.style.outline = st.tool === id ? "1px solid #4a9" : "none";
+				}
+			};
+			refresh();
+			return { buttons, refresh };
+		}
+
+		// Opciones contextuales: grosor de cada herramienta, difuminado/grano,
+		// color, forma y fuente/texto. Solo se muestran las de la activa.
+		function createToolOptionsGroup(node) {
+			const st = node._mikaLineart;
+
+			const thickVal = mkValueLabel(st.thickness);
+			const thick = mkSlider(node, 64, st.thickness, "Grosor lápiz", (v) => {
+				st.thickness = v;
+				refreshCursor(node);
+			});
+			const eraseVal = mkValueLabel(st.eraseThickness);
+			const eraseThick = mkSlider(node, 128, st.eraseThickness, "Grosor borrador", (v) => {
+				st.eraseThickness = v;
+				refreshCursor(node);
+			});
+			// Pincel difuminado: sliders propios (aparecen con esa herramienta).
+			// "Grosor" y "Difuminado" son suyos; "Grano" da textura de lápiz.
+			const softThickVal = mkValueLabel(st.softThickness);
+			const softThick = mkSlider(node, 128, st.softThickness, "Grosor pincel difuminado", (v) => {
+				st.softThickness = v;
+				refreshCursor(node);
+			});
+			const softVal = mkValueLabel(st.softBlur);
+			const softBlur = mkSlider(node, 40, st.softBlur, "Difuminado: suaviza el borde del trazo", (v) => {
+				st.softBlur = v;
+			});
+			const grainVal = mkValueLabel(st.softGrain);
+			const grain = mkSlider(node, 100, st.softGrain, "Grano: textura tipo lápiz / carboncillo", (v) => {
+				st.softGrain = v;
+			}, 0);
+			const softGroup = mkGroup(softThick, softThickVal, softBlur, softVal, grain, grainVal);
+			// Grupos de grosor: cada herramienta muestra el suyo (el de lápiz
+			// también con las formas, que usan el mismo grosor).
+			const thickGroup = mkGroup(thick, thickVal);
+			const eraseGroup = mkGroup(eraseThick, eraseVal);
+			let maskThickGroup = null;
+			let maskThick = null;
+			let maskVal = null;
+			if (isInpaint) {
+				maskVal = mkValueLabel(st.maskThickness);
+				maskThick = mkSlider(node, 128, st.maskThickness, "Grosor máscara", (v) => {
+					st.maskThickness = v;
+					refreshCursor(node);
+				});
+				maskThickGroup = mkGroup(maskThick, maskVal);
+			}
+			const maskClearBtn = isInpaint ? mkButton("🧹", "Limpiar la máscara") : null;
+			if (maskClearBtn) maskClearBtn.onclick = () => clearMask(node);
+			const maskInvertBtn = isInpaint ? mkButton("⇆", "Invertir la máscara") : null;
+			if (maskInvertBtn) maskInvertBtn.onclick = () => invertMask(node);
+
+			const colorInput = document.createElement("input");
+			colorInput.type = "color";
+			colorInput.value = st.userColor || "#000000";
+			colorInput.title = "Color de trazo (dibujo normal)";
+			colorInput.style.width = "28px";
+			colorInput.style.height = "22px";
+			colorInput.style.padding = "0";
+			colorInput.addEventListener("input", () => {
+				st.userColor = colorInput.value;
+				if (!isLineart(node)) st.color = st.userColor;
+				writePincelState(node);
+				refreshUI(node);
+			});
+
+			// --- Formas ---
+			const shapeSel = styleInput(document.createElement("select"));
+			for (const [id, label] of SHAPES) {
+				const o = document.createElement("option");
+				o.value = id;
+				o.textContent = label;
+				shapeSel.appendChild(o);
+			}
+			shapeSel.value = st.shape;
+			shapeSel.title = "Figura";
+			shapeSel.onchange = () => { st.shape = shapeSel.value; writePincelState(node); };
+
+			// --- Texto: fuentes del Paint + fuentes de cómic (con vista previa) ---
+			const fontSel = mkFontPicker(() => st.font, (f) => { st.font = f; writePincelState(node); }, fontGroups);
+			const fontAdd = mkFontAddMenu(() => fontSel.refreshList?.());
+			const fontSizeInput = styleInput(document.createElement("input"));
+			fontSizeInput.type = "number";
+			fontSizeInput.min = "8";
+			fontSizeInput.max = "400";
+			fontSizeInput.value = String(st.fontSize);
+			fontSizeInput.title = "Tamaño de fuente";
+			fontSizeInput.style.width = "54px";
+			fontSizeInput.oninput = () => { st.fontSize = parseInt(fontSizeInput.value, 10) || 48; writePincelState(node); };
+			const textInput = styleInput(document.createElement("input"));
+			textInput.type = "text";
+			textInput.placeholder = "texto…";
+			textInput.value = st.text;
+			textInput.title = "Texto a colocar (clic en el lienzo)";
+			textInput.style.width = "120px";
+			textInput.oninput = () => { st.text = textInput.value; };
+
+			const shapeGroup = mkGroup(shapeSel);
+			const fontGroup = mkGroup(fontSel, fontAdd, fontSizeInput, textInput);
+
+			const parts = [thickGroup, eraseGroup];
+			if (maskThickGroup) parts.push(maskThickGroup);
+			parts.push(softGroup);
+			if (maskClearBtn) parts.push(maskClearBtn);
+			if (maskInvertBtn) parts.push(maskInvertBtn);
+			parts.push(colorInput, shapeGroup, fontGroup);
+
+			const refresh = () => {
+				const t = st.tool;
+				shapeGroup.style.display = t === "shape" ? "inline-flex" : "none";
+				fontGroup.style.display = t === "text" ? "inline-flex" : "none";
+				thickGroup.style.display = t === "brush" || t === "shape" ? "inline-flex" : "none";
+				eraseGroup.style.display = t === "eraser" ? "inline-flex" : "none";
+				softGroup.style.display = t === "soft" ? "inline-flex" : "none";
+				if (maskThickGroup) {
+					const maskTool = t === "maskBrush" || t === "maskErase";
+					maskThickGroup.style.display = maskTool ? "inline-flex" : "none";
+				}
+				thickVal.textContent = String(st.thickness);
+				thick.value = String(st.thickness);
+				eraseVal.textContent = String(st.eraseThickness);
+				eraseThick.value = String(st.eraseThickness);
+				softThickVal.textContent = String(st.softThickness);
+				softThick.value = String(st.softThickness);
+				softVal.textContent = String(st.softBlur);
+				softBlur.value = String(st.softBlur);
+				grainVal.textContent = String(st.softGrain);
+				grain.value = String(st.softGrain);
+				if (maskThick) {
+					maskVal.textContent = String(st.maskThickness);
+					maskThick.value = String(st.maskThickness);
+				}
+				colorInput.value = st.userColor || "#000000";
+				colorInput.style.display = isLineart(node) ? "none" : "";
+				shapeSel.value = st.shape;
+				fontSizeInput.value = String(st.fontSize);
+				textInput.value = st.text;
+			};
+			refresh();
+			return { parts, refresh };
 		}
 
 		// --- Cursor circular con el tamaño de la herramienta activa ---
@@ -2821,161 +3033,6 @@ app.registerExtension({
 				}
 			}
 
-			// --- Herramientas: pincel / borrador / forma / texto ---
-			const brushBtn = mkButton("✏️", "Pincel");
-			const eraserBtn = mkButton("🧽", "Borrador");
-			const softBtn = mkIconButton(SOFT_BRUSH_ICON, "Pincel difuminado: borde suave y/o grano tipo lápiz");
-			const shapeBtn = mkButton("▭", "Forma (elegí la figura en la lista)");
-			const textBtn = mkButton("🅣", "Texto (escribí y hacé clic en el lienzo)");
-			const selectBtn = mkButton("▚", "Seleccionar a mano alzada (lazo) un área del trazo/calco para editarla");
-			const toolBtns = { brush: brushBtn, eraser: eraserBtn, soft: softBtn, shape: shapeBtn, text: textBtn, select: selectBtn };
-			// Herramientas de máscara: solo en el nodo de inpaint.
-			let maskBrushBtn = null;
-			let maskEraseBtn = null;
-			if (isInpaint) {
-				maskBrushBtn = mkButton("🖌️", "Pincel de máscara (zona a regenerar)");
-				maskEraseBtn = mkButton("🧼", "Borrador de máscara");
-				toolBtns.maskBrush = maskBrushBtn;
-				toolBtns.maskErase = maskEraseBtn;
-			}
-			let updateToolExtras = () => {};
-			const refreshTools = () => {
-				for (const [id, b] of Object.entries(toolBtns)) {
-					b.style.outline = st.tool === id ? "1px solid #4a9" : "none";
-				}
-				updateToolExtras();
-				writePincelState(node);
-			};
-			for (const [id, b] of Object.entries(toolBtns)) {
-				b.onclick = () => { st.tool = id; refreshTools(); refreshCursor(node); };
-			}
-			refreshTools();
-
-			const mkSlider = (max, value, title, onInput, min = 1) => {
-				const s = document.createElement("input");
-				s.type = "range";
-				s.min = String(min);
-				s.max = String(max);
-				s.value = String(value);
-				s.title = title;
-				s.style.width = "70px";
-				s.addEventListener("input", () => {
-					onInput(parseInt(s.value, 10) || min);
-					writePincelState(node);
-				});
-				return s;
-			};
-
-			const thickVal = mkValueLabel(st.thickness);
-			const thick = mkSlider(64, st.thickness, "Grosor lápiz", (v) => {
-				st.thickness = v;
-				thickVal.textContent = String(v);
-				refreshCursor(node);
-			});
-			const eraseVal = mkValueLabel(st.eraseThickness);
-			const eraseThick = mkSlider(128, st.eraseThickness, "Grosor borrador", (v) => {
-				st.eraseThickness = v;
-				eraseVal.textContent = String(v);
-				refreshCursor(node);
-			});
-			// Pincel difuminado: sliders propios (aparecen con esa herramienta).
-			// "Grosor" y "Difuminado" son suyos; "Grano" da textura de lápiz.
-			const softThickVal = mkValueLabel(st.softThickness);
-			const softThick = mkSlider(128, st.softThickness, "Grosor pincel difuminado", (v) => {
-				st.softThickness = v;
-				softThickVal.textContent = String(v);
-				refreshCursor(node);
-			});
-			const softVal = mkValueLabel(st.softBlur);
-			const softBlur = mkSlider(40, st.softBlur, "Difuminado: suaviza el borde del trazo", (v) => {
-				st.softBlur = v;
-				softVal.textContent = String(v);
-			});
-			const grainVal = mkValueLabel(st.softGrain);
-			const grain = mkSlider(100, st.softGrain, "Grano: textura tipo lápiz / carboncillo", (v) => {
-				st.softGrain = v;
-				grainVal.textContent = String(v);
-			}, 0);
-			const softGroup = mkGroup(softThick, softThickVal, softBlur, softVal, grain, grainVal);
-			// Grupos de grosor: cada herramienta muestra el suyo (el de lápiz
-			// también con las formas, que usan el mismo grosor).
-			const thickGroup = mkGroup(thick, thickVal);
-			const eraseGroup = mkGroup(eraseThick, eraseVal);
-			let maskThickGroup = null;
-			if (isInpaint) {
-				const maskVal = mkValueLabel(st.maskThickness);
-				const maskThick = mkSlider(128, st.maskThickness, "Grosor máscara", (v) => {
-					st.maskThickness = v;
-					maskVal.textContent = String(v);
-					refreshCursor(node);
-				});
-				maskThickGroup = mkGroup(maskThick, maskVal);
-			}
-			const maskClearBtn = isInpaint ? mkButton("🧹", "Limpiar la máscara") : null;
-			if (maskClearBtn) maskClearBtn.onclick = () => clearMask(node);
-			const maskInvertBtn = isInpaint ? mkButton("⇆", "Invertir la máscara") : null;
-			if (maskInvertBtn) maskInvertBtn.onclick = () => invertMask(node);
-
-			st.colorInput = document.createElement("input");
-			st.colorInput.type = "color";
-			st.colorInput.value = st.userColor || "#000000";
-			st.colorInput.title = "Color de trazo (dibujo normal)";
-			st.colorInput.style.width = "28px";
-			st.colorInput.style.height = "22px";
-			st.colorInput.style.padding = "0";
-			st.colorInput.addEventListener("input", () => {
-				st.userColor = st.colorInput.value;
-				if (!isLineart(node)) st.color = st.userColor;
-				writePincelState(node);
-			});
-
-			// --- Formas ---
-			const shapeSel = styleInput(document.createElement("select"));
-			for (const [id, label] of SHAPES) {
-				const o = document.createElement("option");
-				o.value = id;
-				o.textContent = label;
-				shapeSel.appendChild(o);
-			}
-			shapeSel.value = st.shape;
-			shapeSel.title = "Figura";
-			shapeSel.onchange = () => { st.shape = shapeSel.value; writePincelState(node); };
-
-			// --- Texto: fuentes del Paint + fuentes de cómic (con vista previa) ---
-			const fontSel = mkFontPicker(() => st.font, (f) => { st.font = f; writePincelState(node); }, fontGroups);
-			const fontAdd = mkFontAddMenu(() => fontSel.refreshList?.());
-			const fontSizeInput = styleInput(document.createElement("input"));
-			fontSizeInput.type = "number";
-			fontSizeInput.min = "8";
-			fontSizeInput.max = "400";
-			fontSizeInput.value = String(st.fontSize);
-			fontSizeInput.title = "Tamaño de fuente";
-			fontSizeInput.style.width = "54px";
-			fontSizeInput.oninput = () => { st.fontSize = parseInt(fontSizeInput.value, 10) || 48; writePincelState(node); };
-			const textInput = styleInput(document.createElement("input"));
-			textInput.type = "text";
-			textInput.placeholder = "texto…";
-			textInput.value = st.text;
-			textInput.title = "Texto a colocar (clic en el lienzo)";
-			textInput.style.width = "120px";
-			textInput.oninput = () => { st.text = textInput.value; };
-
-			const shapeGroup = mkGroup(shapeSel);
-			const fontGroup = mkGroup(fontSel, fontAdd, fontSizeInput, textInput);
-			updateToolExtras = () => {
-				const t = st.tool;
-				shapeGroup.style.display = t === "shape" ? "inline-flex" : "none";
-				fontGroup.style.display = t === "text" ? "inline-flex" : "none";
-				thickGroup.style.display = t === "brush" || t === "shape" ? "inline-flex" : "none";
-				eraseGroup.style.display = t === "eraser" ? "inline-flex" : "none";
-				softGroup.style.display = t === "soft" ? "inline-flex" : "none";
-				if (maskThickGroup) {
-					const maskTool = t === "maskBrush" || t === "maskErase";
-					maskThickGroup.style.display = maskTool ? "inline-flex" : "none";
-				}
-			};
-			updateToolExtras();
-
 			// --- Deshacer / rehacer / limpiar ---
 			const undoBtn = mkButton("↶", "Deshacer");
 			const redoBtn = mkButton("↷", "Rehacer");
@@ -3229,23 +3286,12 @@ app.registerExtension({
 			const mergeBtn = mkButton("⤓", "Unir las capas seleccionadas al calco");
 			mergeBtn.onclick = () => mergeSelected(node);
 
-			toolbar.appendChild(brushBtn);
-			toolbar.appendChild(eraserBtn);
-			toolbar.appendChild(softBtn);
-			toolbar.appendChild(shapeBtn);
-			toolbar.appendChild(textBtn);
-			toolbar.appendChild(selectBtn);
-			if (maskBrushBtn) toolbar.appendChild(maskBrushBtn);
-			if (maskEraseBtn) toolbar.appendChild(maskEraseBtn);
-			toolbar.appendChild(thickGroup);
-			toolbar.appendChild(eraseGroup);
-			if (maskThickGroup) toolbar.appendChild(maskThickGroup);
-			toolbar.appendChild(softGroup);
-			if (maskClearBtn) toolbar.appendChild(maskClearBtn);
-			if (maskInvertBtn) toolbar.appendChild(maskInvertBtn);
-			toolbar.appendChild(st.colorInput);
-			toolbar.appendChild(shapeGroup);
-			toolbar.appendChild(fontGroup);
+			// Herramientas y sus opciones, en el mismo orden de siempre.
+			const toolsSet = registerUISet(node, createToolsGroup(node));
+			for (const b of toolsSet.buttons) toolbar.appendChild(b);
+			const optsSet = registerUISet(node, createToolOptionsGroup(node));
+			for (const p of optsSet.parts) toolbar.appendChild(p);
+
 			toolbar.appendChild(undoBtn);
 			toolbar.appendChild(redoBtn);
 			toolbar.appendChild(clearBtn);
