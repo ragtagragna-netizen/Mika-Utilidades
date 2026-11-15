@@ -503,6 +503,12 @@ app.registerExtension({
 			forEachSurface(node, (s) => {
 				s.overlay.getContext("2d").clearRect(0, 0, s.overlay.width, s.overlay.height);
 			});
+			// Lo flotante (texto/figura) vive en el overlay: un borrado
+			// cualquiera (deshacer, cargar imagen, reencajar) no debe hacerlo
+			// desaparecer antes de fijarlo.
+			const st = node._mikaLineart;
+			if (st?.textObj) drawTextObj(node);
+			else if (st?.shapeObj) drawShapeObj(node);
 		}
 
 		function clearPaint(node) {
@@ -2162,6 +2168,10 @@ app.registerExtension({
 			drawUnderlay(node);
 			drawBase(node);
 			redrawMask(node);
+			// Lo que haya quedado flotante en el nodo también se ve en la
+			// ventana nueva (el overlay de la ventana nace vacío).
+			if (st.textObj) drawTextObj(node);
+			if (st.shapeObj) drawShapeObj(node);
 			drawTransformUI(node);
 			refreshWindowChrome(node);
 			focusEditor(node);
@@ -2191,6 +2201,8 @@ app.registerExtension({
 			st.editorSurface = null;
 			st.editorTitle = null;
 			st.editorSink = null;
+			st.editorZoomPct = null;
+			st.editorZoomSize = null;
 			st.uiWindow = null;
 			root.remove();
 			if (st.editorChip) st.editorChip.textContent = "Abrir editor";
@@ -4020,7 +4032,7 @@ app.registerExtension({
 				cursorPos: null,
 				transformMode: false, freeResize: false,
 				underlayTransform: null, paintTransform: null, transformDrag: null,
-				shapeStart: null, shapeEnd: null, textObj: null,
+				shapeStart: null, shapeEnd: null, textObj: null, shapeObj: null,
 				sel: null, lasso: null, contentSize: null,
 			};
 			const st = node._mikaLineart;
