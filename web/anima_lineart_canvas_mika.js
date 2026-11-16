@@ -1769,6 +1769,42 @@ app.registerExtension({
 			return { parts: [opacity], refresh };
 		}
 
+		// Tamaño del lienzo (resolución) elegido desde la ventana: escribe el
+		// widget del nodo, así los dos lados comparten el mismo valor.
+		function createSizeGroup(node) {
+			const sizeSel = styleInput(document.createElement("select"));
+			sizeSel.dataset.mika = "size-select";
+			sizeSel.title = "Tamaño del lienzo (resolución)";
+			// Un workflow viejo puede traer una resolución que ya no está en la
+			// lista: se agrega como opción para no mostrar otra cosa.
+			const setValue = (value) => {
+				const v = String(value || "");
+				if (!v) return;
+				if (!Array.from(sizeSel.options).some((o) => o.value === v)) {
+					sizeSel.appendChild(new Option(v, v));
+				}
+				sizeSel.value = v;
+			};
+			const refresh = () => {
+				const w = resolucionWidget(node);
+				if (!w) return;
+				if (!sizeSel.options.length) {
+					for (const opt of w.options?.values || []) {
+						sizeSel.appendChild(new Option(opt, opt));
+					}
+				}
+				setValue(w.value);
+			};
+			sizeSel.onchange = () => {
+				const w = resolucionWidget(node);
+				if (!w) return;
+				w.value = sizeSel.value;
+				w.callback?.(w.value);
+			};
+			refresh();
+			return { parts: [sizeSel], refresh };
+		}
+
 		// Proyecto (JSON): solo se monta en la ventana; el nodo lo tiene en su
 		// menú contextual.
 		function createProjectGroup(node) {
@@ -2141,6 +2177,7 @@ app.registerExtension({
 			toolSec.dataset.mika = "editor-options";
 
 			addSection("Archivo", registerUISet(node, createFilesGroup(node), "window"));
+			addSection("Tamaño", registerUISet(node, createSizeGroup(node), "window"));
 
 			// Capas: lista vertical con preview + opacidad debajo.
 			const layersSec = document.createElement("div");
