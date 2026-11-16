@@ -919,11 +919,66 @@ app.registerExtension({
 			}
 		}
 
-		function skinWindowParts(parts) {
+		// Un slider de la ventana: su propia fila, nombre a la vista y ancho
+		// del panel. Con los 140 px fijos, dos o tres sliders en una fila se
+		// salían del riel de 220 px y el panel los recortaba.
+		function skinWindowSlider(input) {
+			if (input.dataset.mikaSlider) return;
+			input.dataset.mikaSlider = "1";
+			const parent = input.parentElement;
+			if (!parent) return;
+			const wrap = document.createElement("div");
+			wrap.style.cssText = "display:flex;flex-direction:column;gap:2px;flex:1 1 100%;min-width:0;";
+			const row = document.createElement("div");
+			row.style.cssText = "display:flex;align-items:center;gap:6px;min-width:0;";
+			// El <span> del valor sigue al slider en todos los grupos.
+			const val = input.nextElementSibling;
+			parent.insertBefore(wrap, input);
+			wrap.appendChild(row);
+			// Nombre a la vista solo donde el tooltip no alcanza (varios sliders
+			// juntos); en las secciones con un único slider ya está el título.
+			const label = input.dataset.mikaLabel;
+			if (label) {
+				const cap = document.createElement("div");
+				cap.dataset.mika = "slider-cap";
+				cap.textContent = label;
+				cap.style.cssText =
+					"font-size:11px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+				wrap.insertBefore(cap, row);
+			}
+			row.appendChild(input);
+			if (val && val.tagName === "SPAN") {
+				val.style.flex = "0 0 auto";
+				row.appendChild(val);
+			}
+			input.style.width = "auto";
+			input.style.flex = "1 1 auto";
+			input.style.minWidth = "40px";
+		}
+
+		// `stack`: cada parte en su propio renglón (la sección Herramienta, que
+		// puede tener sliders + selector y no entra en una fila).
+		function skinWindowParts(parts, stack = false) {
 			for (const p of parts || []) {
 				skinWindowControl(p);
 				for (const el of p.querySelectorAll?.("button, select, input, span") || []) {
 					skinWindowControl(el);
+				}
+			}
+			for (const p of parts || []) {
+				const ranges = [];
+				if (p.matches?.('input[type="range"]')) ranges.push(p);
+				for (const r of p.querySelectorAll?.('input[type="range"]') || []) ranges.push(r);
+				// Un grupo con sliders ocupa el ancho del panel y deja que cada
+				// uno caiga en su propio renglón.
+				if (ranges.length && !p.matches?.('input[type="range"]')) {
+					p.style.width = "100%";
+					p.style.flexWrap = "wrap";
+				}
+				for (const r of ranges) skinWindowSlider(r);
+				if (stack && !ranges.length) {
+					p.style.width = "100%";
+					p.style.flexWrap = "wrap";
 				}
 			}
 		}
@@ -1293,13 +1348,15 @@ app.registerExtension({
 			for (const set of [...(st.uiNode || []), ...(st.uiWindow?.sets || [])]) set.refresh?.();
 		}
 
-		function mkSlider(node, max, value, title, onInput, min = 1) {
+		function mkSlider(node, max, value, title, onInput, min = 1, label = "") {
 			const s = document.createElement("input");
 			s.type = "range";
 			s.min = String(min);
 			s.max = String(max);
 			s.value = String(value);
 			s.title = title;
+			// Nombre corto para la ventana (el nodo usa el `title` del tooltip).
+			s.dataset.mikaLabel = label;
 			s.style.width = "70px";
 			s.addEventListener("input", () => {
 				onInput(parseInt(s.value, 10) || min);
@@ -1372,27 +1429,27 @@ app.registerExtension({
 			const thick = mkSlider(node, 64, st.thickness, "Grosor lápiz", (v) => {
 				st.thickness = v;
 				refreshCursor(node);
-			});
+			}, 1, "Grosor");
 			const eraseVal = mkValueLabel(st.eraseThickness);
 			const eraseThick = mkSlider(node, 128, st.eraseThickness, "Grosor borrador", (v) => {
 				st.eraseThickness = v;
 				refreshCursor(node);
-			});
+			}, 1, "Grosor");
 			// Pincel difuminado: sliders propios (aparecen con esa herramienta).
 			// "Grosor" y "Difuminado" son suyos; "Grano" da textura de lápiz.
 			const softThickVal = mkValueLabel(st.softThickness);
 			const softThick = mkSlider(node, 128, st.softThickness, "Grosor pincel difuminado", (v) => {
 				st.softThickness = v;
 				refreshCursor(node);
-			});
+			}, 1, "Grosor");
 			const softVal = mkValueLabel(st.softBlur);
 			const softBlur = mkSlider(node, 40, st.softBlur, "Difuminado: suaviza el borde del trazo", (v) => {
 				st.softBlur = v;
-			});
+			}, 1, "Difuminado");
 			const grainVal = mkValueLabel(st.softGrain);
 			const grain = mkSlider(node, 100, st.softGrain, "Grano: textura tipo lápiz / carboncillo", (v) => {
 				st.softGrain = v;
-			}, 0);
+			}, 0, "Grano");
 			const softGroup = mkGroup(softThick, softThickVal, softBlur, softVal, grain, grainVal);
 			// Grupos de grosor: cada herramienta muestra el suyo (el de lápiz
 			// también con las formas, que usan el mismo grosor).
@@ -1406,7 +1463,7 @@ app.registerExtension({
 				maskThick = mkSlider(node, 128, st.maskThickness, "Grosor máscara", (v) => {
 					st.maskThickness = v;
 					refreshCursor(node);
-				});
+				}, 1, "Grosor máscara");
 				maskThickGroup = mkGroup(maskThick, maskVal);
 			}
 			const maskClearBtn = isInpaint ? mkButton("🧹", "Limpiar la máscara") : null;
@@ -2057,24 +2114,30 @@ app.registerExtension({
 					"text-transform:uppercase;opacity:.75;text-align:center;";
 				return cap;
 			};
-			const section = (label, parts) => {
+			// `stack`: una parte por renglón (la sección Herramienta, que puede
+			// traer sliders y selector y no entra en una sola fila).
+			const section = (label, parts, stack = false) => {
 				const sec = document.createElement("div");
 				sec.style.cssText = "display:flex;flex-direction:column;gap:6px;padding:8px 0;" +
 					"border-top:1px solid var(--border-color,#333);";
 				const holder = document.createElement("div");
-				holder.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:center;";
-				skinWindowParts(parts);
+				holder.style.cssText = stack
+					? "display:flex;flex-direction:column;align-items:stretch;gap:8px;"
+					: "display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:center;";
+				// Las partes van al DOM antes del skin: el skin puede envolver
+				// un slider suelto (opacidad) y necesita su lugar en el holder.
 				for (const p of parts) holder.appendChild(p);
+				skinWindowParts(parts, stack);
 				sec.append(sectionTitle(label), holder);
 				return sec;
 			};
-			const addSection = (label, set) => {
-				const sec = section(label, set.parts);
+			const addSection = (label, set, stack = false) => {
+				const sec = section(label, set.parts, stack);
 				panel.appendChild(sec);
 				return sec;
 			};
 
-			const toolSec = addSection("Herramienta", registerUISet(node, createToolOptionsGroup(node), "window"));
+			const toolSec = addSection("Herramienta", registerUISet(node, createToolOptionsGroup(node), "window"), true);
 			toolSec.dataset.mika = "editor-options";
 
 			addSection("Archivo", registerUISet(node, createFilesGroup(node), "window"));
