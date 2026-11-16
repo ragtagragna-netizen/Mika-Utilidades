@@ -812,6 +812,9 @@ app.registerExtension({
 			// Cambió la resolución: el zoom vuelve a encajar.
 			forEachSurface(node, (s) => { if (s.host) fitStageToHost(node, s, { reset: true }); });
 			refreshWindowChrome(node);
+			// La resolución cambió (desde el nodo o desde la ventana): los
+			// controles de la ventana se ponen al día con el valor nuevo.
+			refreshUI(node);
 			refreshCursor(node);
 			if (st.dirty) write(node);
 			if (st.underlayImg || st.calcoLayers.length) writeCalco(node);
