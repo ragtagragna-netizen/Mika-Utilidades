@@ -2373,6 +2373,7 @@ app.registerExtension({
 			renderLayerPanel(node);
 			drawTransformUI(node);
 			writeCalco(node);
+			return layer;
 		}
 
 		function removeCalcoLayer(node, id) {
@@ -4036,6 +4037,14 @@ app.registerExtension({
 				sel: null, lasso: null, contentSize: null,
 			};
 			const st = node._mikaLineart;
+
+			// Puente para otras extensiones (Pose Gallery-Mika → calco): suma la
+			// imagen como capa de calco y devuelve la capa creada.
+			st.addCalcoImage = (img, name) => {
+				const layer = addCalcoLayer(node, img, name);
+				node.setDirtyCanvas(true, true);
+				return layer;
+			};
 
 			// Estado guardado en el workflow (widget oculto "pincel"). Lo de la
 			// sesión (prevState) se aplica después y pisa esto si existe.
