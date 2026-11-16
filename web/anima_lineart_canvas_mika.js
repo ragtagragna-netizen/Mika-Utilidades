@@ -3352,6 +3352,9 @@ app.registerExtension({
 			}
 			clampSurfaceView(node, surface);
 			applySurfaceView(surface);
+			// Reencaje (resize del host, reset de zoom): el círculo del pincel
+			// se recalcula con la geometría nueva.
+			refreshCursor(node);
 			updateZoomReadout(node);
 		}
 
@@ -3372,6 +3375,9 @@ app.registerExtension({
 			v.y = py - cy * surface.fit.h * next;
 			clampSurfaceView(node, surface);
 			applySurfaceView(surface);
+			// El lienzo cambió de tamaño/posición sin que el mouse se mueva: el
+			// círculo del pincel se recalcula ya (si no, queda atrás).
+			refreshCursor(node);
 			updateZoomReadout(node);
 		}
 
