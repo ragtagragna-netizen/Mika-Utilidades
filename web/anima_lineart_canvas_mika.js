@@ -812,9 +812,6 @@ app.registerExtension({
 			// Cambió la resolución: el zoom vuelve a encajar.
 			forEachSurface(node, (s) => { if (s.host) fitStageToHost(node, s, { reset: true }); });
 			refreshWindowChrome(node);
-			// La resolución cambió (desde el nodo o desde la ventana): los
-			// controles de la ventana se ponen al día con el valor nuevo.
-			refreshUI(node);
 			refreshCursor(node);
 			if (st.dirty) write(node);
 			if (st.underlayImg || st.calcoLayers.length) writeCalco(node);
@@ -1778,25 +1775,28 @@ app.registerExtension({
 			const sizeSel = styleInput(document.createElement("select"));
 			sizeSel.dataset.mika = "size-select";
 			sizeSel.title = "Tamaño del lienzo (resolución)";
-			// Un workflow viejo puede traer una resolución que ya no está en la
-			// lista: se agrega como opción para no mostrar otra cosa.
-			const setValue = (value) => {
-				const v = String(value || "");
-				if (!v) return;
-				if (!Array.from(sizeSel.options).some((o) => o.value === v)) {
-					sizeSel.appendChild(new Option(v, v));
-				}
-				sizeSel.value = v;
-			};
+			// La lista sale siempre del widget (una sola fuente de verdad). El
+			// valor actual se agrega si no está en la lista: un workflow viejo
+			// puede traer una resolución que ya no existe, y se muestra tal cual
+			// (y se saca sola cuando el valor vuelve a uno de la lista).
 			const refresh = () => {
 				const w = resolucionWidget(node);
 				if (!w) return;
-				if (!sizeSel.options.length) {
-					for (const opt of w.options?.values || []) {
-						sizeSel.appendChild(new Option(opt, opt));
+				const values = (w.options?.values || []).slice();
+				const cur = String(w.value || "");
+				if (cur && !values.includes(cur)) values.push(cur);
+				const key = values.join("\u0000");
+				if (sizeSel.dataset.mikaOptions !== key) {
+					sizeSel.dataset.mikaOptions = key;
+					sizeSel.innerHTML = "";
+					for (const v of values) {
+						const o = document.createElement("option");
+						o.value = v;
+						o.textContent = v;
+						sizeSel.appendChild(o);
 					}
 				}
-				setValue(w.value);
+				if (cur) sizeSel.value = cur;
 			};
 			sizeSel.onchange = () => {
 				const w = resolucionWidget(node);
@@ -4745,6 +4745,11 @@ app.registerExtension({
 			hookWidget(node, resolucionWidget(node), (value) => {
 				const [nw, nh] = parseRes(value);
 				resize(node, nw, nh);
+				// La resolución cambió (desde el nodo o desde la ventana): los
+				// controles de la ventana se ponen al día con el valor nuevo,
+				// aunque el tamaño medido no cambie (dos etiquetas con las
+				// mismas medidas).
+				refreshUI(node);
 			});
 			hookWidget(node, modoWidget(node), () => applyMode(node));
 
