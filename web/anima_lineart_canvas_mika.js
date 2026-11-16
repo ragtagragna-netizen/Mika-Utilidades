@@ -4806,8 +4806,26 @@ app.registerExtension({
 			}
 		}
 
+		// ComfyUI guarda los valores de los widgets en un vector POSICIONAL y los
+		// vuelve a aplicar así al reconstruir el nodo (cambio de pestaña,
+		// onConfigure). El calco es solo de sesión (`serialize = false`) y su
+		// casillero no existe en el vector, pero al restaurar SÍ ocupa su lugar:
+		// por eso va al final, si no todo lo que viene después (el nombre del
+		// archivo y el preprocesador) se corre un casillero. Se ordena antes de
+		// que ComfyUI aplique `widgets_values` y es idempotente.
+		function keepCalcoLast(node) {
+			const cw = node.widgets?.find((w) => w.name === "calco");
+			if (!cw) return;
+			const i = node.widgets.indexOf(cw);
+			if (i >= 0 && i !== node.widgets.length - 1) {
+				node.widgets.splice(i, 1);
+				node.widgets.push(cw);
+			}
+		}
+
 		const onNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function () {
+			keepCalcoLast(this);
 			const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
 			setTimeout(() => build(this), 100);
 			return r;
@@ -4816,6 +4834,7 @@ app.registerExtension({
 		const onConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function () {
 			const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+			keepCalcoLast(this);
 			setTimeout(() => build(this), 100);
 			return r;
 		};
