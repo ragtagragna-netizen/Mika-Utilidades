@@ -452,30 +452,43 @@ app.registerExtension({
 			};
 
 			// Mandar la pose al calco del nodo Lineart (sin portapapeles).
+			let calcoSending = false;
+			const showCalcoMsg = (text, isError) => {
+				calcoMsg.textContent = text || "";
+				calcoMsg.style.display = text ? "" : "none";
+				calcoMsg.style.color = isError ? "#f88" : "#bbb";
+			};
 			calcoBtn.onclick = async () => {
-				if (!selected) return;
-				const targets = syncCalcoTargets();
-				const node2 = targets.length === 1
-					? targets[0]
-					: targets.find((t) => String(t.id) === calcoSel.value);
-				if (!node2) {
-					calcoMsg.style.display = "";
-					calcoMsg.textContent = "No hay ningún Anima Lineart Canvas en este workflow.";
-					return;
-				}
-				const url = `/mika/pose_gallery/image?file=${encodeURIComponent(imgFile(selected, estilo, angulo))}&format=png`;
+				// Un clic por vez: un doble clic no debe apilar dos veces.
+				if (calcoSending) return;
+				if (!selected) { showCalcoMsg(""); return; }
+				calcoSending = true;
 				try {
+					const targets = syncCalcoTargets();
+					const node2 = targets.length === 1
+						? targets[0]
+						: targets.find((t) => String(t.id) === calcoSel.value);
+					if (!node2) {
+						showCalcoMsg("No hay ningún Anima Lineart Canvas en este workflow.", false);
+						return;
+					}
+					// Se fija acá lo que se manda: si el usuario cambia de pose,
+					// estilo o ángulo mientras baja la imagen, van y se registran
+					// los de este clic.
+					const pose = selected, est = estilo, ang = angulo;
+					const url = `/mika/pose_gallery/image?file=${encodeURIComponent(imgFile(pose, est, ang))}&format=png`;
 					const img = await loadImage(url);
 					node2._mikaLineart.addCalcoImage(img);
-					writeSelection(node, selected, estilo, angulo);
-					calcoMsg.style.display = "none";
+					writeSelection(node, pose, est, ang);
+					showCalcoMsg("");
 					calcoBtn.textContent = `🖼️ ¡Al nodo ${node2.id}!`;
 					setTimeout(() => { calcoBtn.textContent = "🖼️ A calco"; }, 1200);
 				} catch (err) {
 					console.error("PoseGalleryMika:", err);
-					calcoMsg.style.display = "";
-					calcoMsg.textContent = "No se pudo mandar la pose al calco: " +
-						((err && err.message) || err);
+					showCalcoMsg("No se pudo mandar la pose al calco: " +
+						((err && err.message) || err), true);
+				} finally {
+					calcoSending = false;
 				}
 			};
 
