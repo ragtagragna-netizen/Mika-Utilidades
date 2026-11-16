@@ -250,14 +250,20 @@ app.registerExtension({
 			dlBtn.title = "Guardar esta pose como PNG";
 			dlBtn.style.cssText = copyBtn.style.cssText;
 			const calcoBtn = document.createElement("button");
+			calcoBtn.dataset.mika = "pose-calco-btn";
 			calcoBtn.textContent = "🖼️ A calco";
 			calcoBtn.title = "Mandar esta pose como capa de calco del Anima Lineart Canvas";
 			calcoBtn.style.cssText = copyBtn.style.cssText;
+			// Con más de un Lineart en el workflow, se elige el destino por ID.
+			const calcoSel = document.createElement("select");
+			calcoSel.title = "Nodo destino del calco";
+			calcoSel.style.cssText = catSel.style.cssText;
+			calcoSel.style.display = "none";
 			const calcoMsg = document.createElement("div");
 			calcoMsg.dataset.mika = "pose-calco-msg";
 			calcoMsg.style.cssText =
 				"display:none;font-size:12px;color:#f88;white-space:pre-wrap";
-			actions.append(selectBtn, copyBtn, calcoBtn, dlBtn);
+			actions.append(selectBtn, copyBtn, calcoBtn, calcoSel, dlBtn);
 
 			panel.append(preview, pName, pCat, pDesc, calcoMsg, actions);
 			body.append(gridWrap, panel);
@@ -280,6 +286,24 @@ app.registerExtension({
 			const choose = (pose) => {
 				selected = pose;
 				showPreview(pose);
+			};
+
+			// Destino del calco: uno solo = directo; varios = se elige por ID.
+			// Al recargar se conserva el ID elegido si sigue existiendo.
+			const syncCalcoTargets = () => {
+				const targets = calcoTargets();
+				const keep = calcoSel.value;
+				calcoSel.innerHTML = "";
+				for (const t of targets) {
+					calcoSel.appendChild(new Option(`Nodo ${t.id}`, String(t.id)));
+				}
+				if (targets.some((t) => String(t.id) === keep)) calcoSel.value = keep;
+				calcoSel.style.display = targets.length > 1 ? "" : "none";
+				calcoBtn.disabled = !targets.length;
+				calcoBtn.title = targets.length
+					? "Mandar esta pose como capa de calco del Anima Lineart Canvas"
+					: "No hay ningún Anima Lineart Canvas en este workflow";
+				return targets;
 			};
 
 			// --- Filtro + grid virtualizado ---
@@ -430,7 +454,10 @@ app.registerExtension({
 			// Mandar la pose al calco del nodo Lineart (sin portapapeles).
 			calcoBtn.onclick = async () => {
 				if (!selected) return;
-				const node2 = calcoTargets()[0];
+				const targets = syncCalcoTargets();
+				const node2 = targets.length === 1
+					? targets[0]
+					: targets.find((t) => String(t.id) === calcoSel.value);
 				if (!node2) {
 					calcoMsg.style.display = "";
 					calcoMsg.textContent = "No hay ningún Anima Lineart Canvas en este workflow.";
@@ -455,6 +482,7 @@ app.registerExtension({
 			// Estado inicial.
 			syncStyleBtn();
 			angleSel.value = String(angulo);
+			syncCalcoTargets();
 			if (selected) showPreview(selected);
 			refresh();
 			filter.focus();
