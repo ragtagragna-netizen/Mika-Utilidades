@@ -45,6 +45,23 @@ const readInt = (key, def, min, max) => {
 	return Number.isFinite(v) && v >= min && v <= max ? v : def;
 };
 
+// Nodos del workflow abierto que pueden recibir una imagen en su calco.
+function calcoTargets() {
+	const nodes = app.graph?._nodes || app.graph?.nodes || [];
+	return nodes.filter((n) => n.type === "AnimaLineartCanvasMika"
+		&& typeof n._mikaLineart?.addCalcoImage === "function");
+}
+
+// Carga una imagen del mismo origen como promesa (para pasarla al calco).
+function loadImage(url) {
+	return new Promise((res, rej) => {
+		const img = new Image();
+		img.onload = () => res(img);
+		img.onerror = () => rej(new Error("no se pudo cargar la imagen"));
+		img.src = url;
+	});
+}
+
 // Pregunta el alcance de la descarga masiva en un menú chico.
 function chooseScope(onPick) {
 	const ov = document.createElement("div");
@@ -146,6 +163,7 @@ app.registerExtension({
 
 			// --- Overlay ---
 			const overlay = document.createElement("div");
+			overlay.dataset.mika = "pose-overlay";
 			overlay.style.cssText =
 				"position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center";
 
@@ -231,9 +249,17 @@ app.registerExtension({
 			dlBtn.textContent = "⬇ Descargar";
 			dlBtn.title = "Guardar esta pose como PNG";
 			dlBtn.style.cssText = copyBtn.style.cssText;
-			actions.append(selectBtn, copyBtn, dlBtn);
+			const calcoBtn = document.createElement("button");
+			calcoBtn.textContent = "🖼️ A calco";
+			calcoBtn.title = "Mandar esta pose como capa de calco del Anima Lineart Canvas";
+			calcoBtn.style.cssText = copyBtn.style.cssText;
+			const calcoMsg = document.createElement("div");
+			calcoMsg.dataset.mika = "pose-calco-msg";
+			calcoMsg.style.cssText =
+				"display:none;font-size:12px;color:#f88;white-space:pre-wrap";
+			actions.append(selectBtn, copyBtn, calcoBtn, dlBtn);
 
-			panel.append(preview, pName, pCat, pDesc, actions);
+			panel.append(preview, pName, pCat, pDesc, calcoMsg, actions);
 			body.append(gridWrap, panel);
 
 			box.append(header, body);
@@ -399,6 +425,31 @@ app.registerExtension({
 				a.href = `/mika/pose_gallery/image?file=${encodeURIComponent(imgFile(selected, estilo, angulo))}&format=png`;
 				a.download = `${selected.id}-${estilo}-${angulo}.png`;
 				a.click();
+			};
+
+			// Mandar la pose al calco del nodo Lineart (sin portapapeles).
+			calcoBtn.onclick = async () => {
+				if (!selected) return;
+				const node2 = calcoTargets()[0];
+				if (!node2) {
+					calcoMsg.style.display = "";
+					calcoMsg.textContent = "No hay ningún Anima Lineart Canvas en este workflow.";
+					return;
+				}
+				const url = `/mika/pose_gallery/image?file=${encodeURIComponent(imgFile(selected, estilo, angulo))}&format=png`;
+				try {
+					const img = await loadImage(url);
+					node2._mikaLineart.addCalcoImage(img);
+					writeSelection(node, selected, estilo, angulo);
+					calcoMsg.style.display = "none";
+					calcoBtn.textContent = `🖼️ ¡Al nodo ${node2.id}!`;
+					setTimeout(() => { calcoBtn.textContent = "🖼️ A calco"; }, 1200);
+				} catch (err) {
+					console.error("PoseGalleryMika:", err);
+					calcoMsg.style.display = "";
+					calcoMsg.textContent = "No se pudo mandar la pose al calco: " +
+						((err && err.message) || err);
+				}
 			};
 
 			// Estado inicial.
