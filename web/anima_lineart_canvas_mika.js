@@ -1,5 +1,6 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { openPoseGallery, poseImageUrl } from "./pose_gallery_mika.js";
 
 // -----------------------------------------------------------------------
 // Mika · Anima Lineart Canvas
@@ -36,7 +37,7 @@ const RES_RE = /(\d+)\s*x\s*(\d+)/;
 const stageWidthFor = (cw, ch) => (cw >= ch ? "100%" : `calc(100% * ${cw / ch})`);
 const LIN = "lineart";
 const NORMAL = "dibujo normal";
-const ERASE_PREVIEW = "rgba(255, 0, 170, 0.55)"; // color que marca la zona a borrar
+const ERASE_PREVIEW = "rgba(53, 215, 255, 0.55)"; // azul cielo (#35D7FF): marca la zona a borrar
 
 // Cursores SVG (cruz chica y flecha de giro) con contorno claro+oscuro.
 const cursorUrl = (inner) =>
@@ -450,17 +451,46 @@ app.registerExtension({
 			img.src = "data:image/png;base64," + val;
 		}
 
-		// Estado deshacible: el trazo y (en el nodo de inpaint) la máscara.
-		function snapshot(node) {
+		// Estado deshacible: el trazo, (en el nodo de inpaint) la máscara y,
+		// cuando el borrador toca capas de calco, el contenido de esas capas
+		// (las demás operaciones de calco no entran en el deshacer).
+		function snapshot(node, withCalco = false) {
 			const st = node._mikaLineart;
-			return {
+			const snap = {
 				paint: st.paint.toDataURL("image/png"),
 				mask: st.maskCanvas ? st.maskCanvas.toDataURL("image/png") : null,
+				calco: null,
 			};
+			if (withCalco && st.calcoLayers.length) {
+				snap.calco = st.calcoLayers.map((l) => ({
+					id: l.id, data: l.src.toDataURL("image/png"),
+				}));
+			}
+			return snap;
 		}
 
 		function restore(node, snap) {
 			const st = node._mikaLineart;
+			// Las capas de calco que el borrador vació vuelven si el snapshot
+			// las trae (operaciones de calco sin deshacer no).
+			if (snap.calco) {
+				for (const item of snap.calco) {
+					const l = st.calcoLayers.find((x) => x.id === item.id);
+					if (!l) continue;
+					const img = new Image();
+					img.onload = () => {
+						const ctx = l.src.getContext("2d");
+						ctx.setTransform(1, 0, 0, 1, 0, 0);
+						ctx.globalCompositeOperation = "source-over";
+						ctx.clearRect(0, 0, l.src.width, l.src.height);
+						ctx.drawImage(img, 0, 0);
+						refreshLayerThumb(l);
+						drawCalcoLayers(node);
+						renderLayerPanel(node);
+					};
+					img.src = item.data;
+				}
+			}
 			const ctx = paintCtx(node);
 			const img = new Image();
 			img.onload = () => {
@@ -492,9 +522,9 @@ app.registerExtension({
 			mimg.src = snap.mask;
 		}
 
-		function pushUndo(node) {
+		function pushUndo(node, withCalco = false) {
 			const st = node._mikaLineart;
-			st.undo.push(snapshot(node));
+			st.undo.push(snapshot(node, withCalco));
 			if (st.undo.length > MAX_UNDO) st.undo.shift();
 			st.redo.length = 0;
 		}
@@ -1565,15 +1595,19 @@ app.registerExtension({
 		function undoOnce(node) {
 			const st = node._mikaLineart;
 			if (!st || !st.undo.length) return;
-			st.redo.push(snapshot(node));
-			restore(node, st.undo.pop());
+			const prev = st.undo.pop();
+			// El estado actual va a la pila de rehacer: si el paso que se
+			// deshace traía capas de calco, el actual también debe traerlas.
+			st.redo.push(snapshot(node, Boolean(prev.calco)));
+			restore(node, prev);
 		}
 
 		function redoOnce(node) {
 			const st = node._mikaLineart;
 			if (!st || !st.redo.length) return;
-			st.undo.push(snapshot(node));
-			restore(node, st.redo.pop());
+			const next = st.redo.pop();
+			st.undo.push(snapshot(node, Boolean(next.calco)));
+			restore(node, next);
 		}
 
 		function createHistoryGroup(node) {
@@ -1604,7 +1638,32 @@ app.registerExtension({
 			);
 			const pasteTraceBtn = mkButton("📋🖼️", "Pegar imagen del portapapeles como capa del calco");
 			pasteTraceBtn.onclick = () => pasteFromClipboard((img) => addCalcoLayer(node, img));
-			return { parts: [loadBtn, pasteEditBtn, traceBtn, pasteTraceBtn], refresh() {} };
+
+			// Galería de poses (WaveSpeed + POSE-DB): la pose elegida entra
+			// como capa de calco, igual que si se importara una imagen.
+			const posesBtn = mkButton(
+				"🧍",
+				"Abrir la galería de poses (WaveSpeed AI + POSE-DB) y mandar una pose como capa del calco",
+			);
+			posesBtn.onclick = () => {
+				openPoseGallery({
+					onSelect: async (pose, estilo, angulo) => {
+						try {
+							const img = await new Promise((res, rej) => {
+								const el = new Image();
+								el.onload = () => res(el);
+								el.onerror = () => rej(new Error("no se pudo cargar la pose"));
+								el.src = poseImageUrl(pose, estilo, angulo, "png");
+							});
+							addCalcoLayer(node, img, pose.name);
+						} catch (err) {
+							console.error("MikaLineartCanvas:", err);
+							alert("No se pudo traer la pose: " + ((err && err.message) || err));
+						}
+					},
+				}).catch((err) => console.error("MikaLineartCanvas:", err));
+			};
+			return { parts: [loadBtn, pasteEditBtn, traceBtn, pasteTraceBtn, posesBtn], refresh() {} };
 		}
 
 		// Selector de preprocesador + ⚡ (no encola el grafo).
@@ -2477,6 +2536,17 @@ app.registerExtension({
 			drawTransformUI(node);
 			writeCalco(node);
 			return layer;
+		}
+
+		// Regenera la miniatura de una capa (p. ej. después de borrar sobre
+		// ella con el borrador).
+		function refreshLayerThumb(layer) {
+			const thumb = document.createElement("canvas");
+			const ts = Math.min(1, 64 / Math.max(layer.src.width, layer.src.height));
+			thumb.width = Math.max(1, Math.round(layer.src.width * ts));
+			thumb.height = Math.max(1, Math.round(layer.src.height * ts));
+			thumb.getContext("2d").drawImage(layer.src, 0, 0, thumb.width, thumb.height);
+			layer.thumb = thumb.toDataURL("image/png");
 		}
 
 		function removeCalcoLayer(node, id) {
@@ -3926,6 +3996,22 @@ app.registerExtension({
 			return [st.paint.width / 2 + rx / t.sx, st.paint.height / 2 + ry / t.sy];
 		}
 
+		// Inversa de contentToSource: coordenadas de la fuente del trazo ->
+		// espacio del lienzo (donde viven las capas del calco).
+		function sourceToContent(node, sx, sy) {
+			const st = node._mikaLineart;
+			const t = st.paintTransform;
+			if (!t) return [sx, sy];
+			const dx = sx - st.paint.width / 2;
+			const dy = sy - st.paint.height / 2;
+			const c = Math.cos(t.rot);
+			const s = Math.sin(t.rot);
+			return [
+				t.cx + (dx * c - dy * s) * t.sx,
+				t.cy + (dx * s + dy * c) * t.sy,
+			];
+		}
+
 		function applyTransformDrag(node, x, y) {
 			const st = node._mikaLineart;
 			const d = st.transformDrag;
@@ -4139,6 +4225,7 @@ app.registerExtension({
 				calcoOpacity: 40,
 				userColor: "#000",
 				color: modeStroke(node), dirty: false, erasePoints: null,
+				eraseContentPts: null,
 				cursorPos: null,
 				transformMode: false, freeResize: false,
 				underlayTransform: null, paintTransform: null, transformDrag: null,
@@ -4374,31 +4461,92 @@ app.registerExtension({
 					withTf(node, s.overlay.getContext("2d"), (ctx) => seg(ctx, x, y, st.eraseThickness, "source-over", ERASE_PREVIEW));
 				});
 				last = [x, y];
-				if (st.erasePoints) st.erasePoints.push([x, y]);
+				if (st.erasePoints) {
+					st.erasePoints.push([x, y]);
+					// Las capas del calco viven en espacio del lienzo: guardo
+					// también el punto convertido por si el borrado las toca.
+					if (st.eraseContentPts) {
+						st.eraseContentPts.push(sourceToContent(node, x, y));
+					}
+				}
 			};
+
+			// Capas de calco (visibles) seleccionadas: el objetivo del
+			// borrador cuando hay alguna; si no, borra el trazo como siempre.
+			const eraseCalcoLayers = () =>
+				(st.selection || [])
+					.filter((k) => String(k).startsWith("L:"))
+					.map((k) => layerByKey(node, k))
+					.filter((l) => l && l.visible);
 
 			const commitErase = () => {
 				const pts = st.erasePoints || [];
+				const cpts = st.eraseContentPts || [];
 				clearOverlay(node);
 				if (!pts.length) return;
-				const ctx = paintCtx(node);
-				ctx.globalCompositeOperation = "destination-out";
-				ctx.strokeStyle = "#000";
-				ctx.fillStyle = "#000";
-				ctx.lineWidth = st.eraseThickness;
-				ctx.lineCap = "round";
-				ctx.lineJoin = "round";
-				if (pts.length === 1) {
-					ctx.beginPath();
-					ctx.arc(pts[0][0], pts[0][1], st.eraseThickness / 2, 0, Math.PI * 2);
-					ctx.fill();
-				} else {
-					ctx.beginPath();
-					ctx.moveTo(pts[0][0], pts[0][1]);
-					for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-					ctx.stroke();
+
+				// El trazo del borrador (source-over: sobre el trazo borra con
+				// destination-out aparte; sobre la máscara del calco dibuja).
+				const strokePolyline = (ctx, points) => {
+					ctx.strokeStyle = "#000";
+					ctx.fillStyle = "#000";
+					ctx.lineWidth = st.eraseThickness;
+					ctx.lineCap = "round";
+					ctx.lineJoin = "round";
+					if (points.length === 1) {
+						ctx.beginPath();
+						ctx.arc(points[0][0], points[0][1], st.eraseThickness / 2, 0, Math.PI * 2);
+						ctx.fill();
+					} else {
+						ctx.beginPath();
+						ctx.moveTo(points[0][0], points[0][1]);
+						for (let i = 1; i < points.length; i++) {
+							ctx.lineTo(points[i][0], points[i][1]);
+						}
+						ctx.stroke();
+					}
+				};
+
+				const layers = eraseCalcoLayers();
+				// Sin capas de calco seleccionadas (o con el trazo también en
+				// la selección) se borra el trazo, como siempre. Con solo una
+				// capa oculta seleccionada no borra nada (el objetivo no está
+				// en el lienzo).
+				const calcoSel = (st.selection || []).some((k) => String(k).startsWith("L:"));
+				if (!calcoSel || st.selection.includes("paint")) {
+					const ctx = paintCtx(node);
+					ctx.globalCompositeOperation = "destination-out";
+					strokePolyline(ctx, pts);
+					ctx.globalCompositeOperation = "source-over";
 				}
-				ctx.globalCompositeOperation = "source-over";
+
+				// Cada capa de calco seleccionada se resta con destination-out:
+				// el área borrada queda transparente. El trazo se arma en una
+				// máscara en espacio del lienzo y se aplica con la inversa de
+				// la transformación de la capa, así el grosor es el del
+				// borrador en pantalla sin importar escala ni rotación.
+				if (layers.length && cpts.length) {
+					const scratch = document.createElement("canvas");
+					scratch.width = st.paint.width;
+					scratch.height = st.paint.height;
+					strokePolyline(scratch.getContext("2d"), cpts);
+					for (const l of layers) {
+						const ctx = l.src.getContext("2d");
+						ctx.save();
+						ctx.setTransform(1, 0, 0, 1, 0, 0);
+						ctx.translate(l.w / 2, l.h / 2);
+						ctx.scale(1 / l.tf.sx, 1 / l.tf.sy);
+						ctx.rotate(-l.tf.rot);
+						ctx.translate(-l.tf.cx, -l.tf.cy);
+						ctx.globalCompositeOperation = "destination-out";
+						ctx.drawImage(scratch, 0, 0);
+						ctx.restore();
+						refreshLayerThumb(l);
+					}
+					drawCalcoLayers(node);
+					renderLayerPanel(node);
+					writeCalco(node);
+				}
 			};
 
 			// Estilo común de trazo para formas/texto.
@@ -4575,7 +4723,10 @@ app.registerExtension({
 						return;
 					}
 
-					pushUndo(node);
+					// El borrador sobre capas de calco entra en el deshacer:
+					// el snapshot guarda el contenido previo de esas capas.
+					const eraseOnCalco = st.tool === "eraser" && eraseCalcoLayers().length > 0;
+					pushUndo(node, eraseOnCalco);
 					drawing = true;
 					last = null;
 					const [x, y] = pos(e, surface);
@@ -4585,6 +4736,7 @@ app.registerExtension({
 						st.shapeEnd = [cx, cy];
 					} else if (st.tool === "eraser") {
 						st.erasePoints = [];
+						st.eraseContentPts = [];
 						erasePreviewTo(x, y);
 					} else {
 						strokeTo(x, y);
@@ -4662,6 +4814,7 @@ app.registerExtension({
 					else if (st.tool === "eraser") { commitErase(); renderPreview(node); }
 					else if (st.tool === "soft") commitSoft();
 					st.erasePoints = null;
+					st.eraseContentPts = null;
 					st.shapeStart = null;
 					st.shapeEnd = null;
 					last = null;

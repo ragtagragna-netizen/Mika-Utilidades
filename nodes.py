@@ -1297,8 +1297,15 @@ if PromptServer is not None and PromptServer.instance is not None:
             if png is None:
                 return _web.Response(status=404)
             return _web.Response(body=png, content_type="image/png")
+        # El content-type sale de la extensión: WaveSpeed sirve .webp y
+        # POSE-DB sirve .png.
+        ctype = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+        }.get(name.rsplit(".", 1)[-1].lower(), "image/webp")
         return _web.Response(
-            body=data, content_type="image/webp",
+            body=data, content_type=ctype,
             headers={"Cache-Control": "no-cache"})
 
     @PromptServer.instance.routes.get("/mika/pose_gallery/thumb")
@@ -1352,8 +1359,11 @@ if PromptServer is not None and PromptServer.instance is not None:
 
 # ======================================================================
 # POSE GALLERY (Pose Gallery-Mika): datos, caché y conversión de las poses.
-# El listado va empaquetado en data/poses.json; las imágenes se bajan del CDN
-# de WaveSpeed y se cachean en user/mika_pose_gallery/ (fuera del paquete).
+# El listado va empaquetado en data/poses.json (lo arma
+# scripts/build_pose_manifest.py con dos galerías: WaveSpeed AI y POSE-DB-01
+# de ai-pose-gallery.pages.dev, cada una con su base de imágenes); las
+# imágenes se bajan del origen de cada pose y se cachean en
+# user/mika_pose_gallery/ (fuera del paquete).
 # ======================================================================
 
 _MIKA_POSE_GALLERY_DIR = os.path.join(
@@ -1362,11 +1372,44 @@ _MIKA_POSE_GALLERY_THUMBS = os.path.join(_MIKA_POSE_GALLERY_DIR, "thumbs")
 _MIKA_POSE_GALLERY_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "data", "poses.json")
 
-# Los archivos son UUID + .webp; cualquier separador de ruta se rechaza.
-_MIKA_POSE_GALLERY_FILE_RE = re.compile(r"^[0-9a-fA-F\-]+\.webp$")
+# Los archivos son <uuid>.webp (WaveSpeed) o <pose>_<angulo>.png (POSE-DB);
+# cualquier separador de ruta se rechaza.
+_MIKA_POSE_GALLERY_FILE_RE = re.compile(r"^[0-9a-zA-Z][0-9a-zA-Z_\-]*\.(?:webp|png|jpe?g)$")
 _MIKA_POSE_GALLERY_ESTILOS = ("line", "3d")
-_MIKA_POSE_GALLERY_ANGLES_MAX = 2  # Front / 3/4 / Side
+# Máximo de ángulos de cualquier fuente: WaveSpeed trae 3 (Front/3/4/Side)
+# y POSE-DB 5 (suma "Desde arriba" y "Desde abajo"). El límite real por pose
+# lo pone el largo de su lista de archivos.
+_MIKA_POSE_GALLERY_ANGLES_MAX = 4
 _MIKA_POSE_GALLERY_MANIFEST = None
+
+# Origen de cada archivo: base de descarga y, si la fuente trae miniaturas
+# propias, de dónde sacar el thumb. WaveSpeed usa el image_base del
+# manifiesto; POSE-DB lleva base propio por pose (su sitio).
+_MIKA_POSE_GALLERY_BASES = {}
+_MIKA_POSE_GALLERY_THUMB_SRC = {}
+
+
+def _mika_pose_gallery_rebuild_bases(manifest):
+    """Mapas archivo -> (base de imagen, base+archivo de miniatura)."""
+    global _MIKA_POSE_GALLERY_BASES, _MIKA_POSE_GALLERY_THUMB_SRC
+    bases = {}
+    thumbs = {}
+    default_base = (manifest or {}).get("image_base") or ""
+    for p in (manifest or {}).get("poses", []):
+        base = p.get("base") or ""
+        img = p.get("img") or {}
+        th = p.get("thumbs") or {}
+        tbase = p.get("thumb_base") or ""
+        for estilo in _MIKA_POSE_GALLERY_ESTILOS:
+            files = img.get(estilo) or []
+            tfiles = th.get(estilo) or []
+            for i, name in enumerate(files):
+                if base and base != default_base:
+                    bases[name] = base
+                if tbase and i < len(tfiles):
+                    thumbs[name] = (tbase, tfiles[i])
+    _MIKA_POSE_GALLERY_BASES = bases
+    _MIKA_POSE_GALLERY_THUMB_SRC = thumbs
 
 
 def _mika_pose_gallery_load_manifest():
@@ -1382,11 +1425,14 @@ def _mika_pose_gallery_load_manifest():
             data = json.load(f)
         data.setdefault("poses", [])
         _MIKA_POSE_GALLERY_MANIFEST = data
+        _mika_pose_gallery_rebuild_bases(data)
     except Exception as exc:
         _MIKA_POSE_GALLERY_MANIFEST = {
             "poses": [], "total": 0, "image_base": "", "categories": [],
             "error": str(exc),
         }
+        _MIKA_POSE_GALLERY_BASES = {}
+        _MIKA_POSE_GALLERY_THUMB_SRC = {}
     return _MIKA_POSE_GALLERY_MANIFEST
 
 
@@ -1446,6 +1492,10 @@ def _mika_pose_gallery_resolve(index, pose_id, estilo, angulo):
         i = 0
     if not (0 <= i <= _MIKA_POSE_GALLERY_ANGLES_MAX) or i >= len(files):
         i = 0
+    if not files[i]:
+        # Ángulo sin imagen en esta pose (p. ej. POSE-DB sin "desde abajo"):
+        # cae al primero disponible.
+        i = next((k for k, f in enumerate(files) if f), 0)
     return files[i]
 
 
@@ -1510,15 +1560,28 @@ def _mika_pose_gallery_lock(key):
         return lock
 
 
+def _mika_pose_gallery_fetch(url):
+    """Bytes de una URL remota (con cabeceras de navegador), o None."""
+    try:
+        resp = requests.get(
+            url, headers=_MIKA_POSE_GALLERY_HEADERS, timeout=(10, 30))
+        resp.raise_for_status()
+        return resp.content
+    except Exception:
+        return None
+
+
 def _mika_pose_gallery_ensure(name):
-    """Ruta del .webp cacheado; lo baja del CDN y lo guarda si falta."""
+    """Ruta de la imagen cacheada; la baja de su origen y la guarda si falta."""
     if not _mika_pose_gallery_valid_file(name):
         return None
     path = _mika_pose_gallery_path(name)
     if os.path.isfile(path):
         return path
 
-    base = _mika_pose_gallery_load_manifest().get("image_base") or ""
+    _mika_pose_gallery_load_manifest()  # arma los mapas de bases si faltan
+    base = (_MIKA_POSE_GALLERY_BASES.get(name)
+            or _MIKA_POSE_GALLERY_MANIFEST.get("image_base") or "")
     if not base:
         return None
 
@@ -1527,13 +1590,12 @@ def _mika_pose_gallery_ensure(name):
             return path
         try:
             os.makedirs(_MIKA_POSE_GALLERY_DIR, exist_ok=True)
-            resp = requests.get(
-                base + name, headers=_MIKA_POSE_GALLERY_HEADERS,
-                timeout=(10, 30))
-            resp.raise_for_status()
+            data = _mika_pose_gallery_fetch(base + name)
+            if data is None:
+                return None
             tmp = path + ".part"
             with open(tmp, "wb") as f:
-                f.write(resp.content)
+                f.write(data)
             os.replace(tmp, path)
             return path
         except Exception:
@@ -1568,7 +1630,14 @@ def _mika_pose_gallery_ensure_thumb(name, size):
     with _mika_pose_gallery_lock(f"{name}.{size}.thumb"):
         if os.path.isfile(path):
             return path
-        data = _mika_pose_gallery_read_bytes(name)
+        # Si la fuente trae miniatura propia (POSE-DB), baja esa, que pesa
+        # mucho menos que el PNG completo; si no, genera del original.
+        _mika_pose_gallery_load_manifest()  # arma los mapas si faltan
+        src = _MIKA_POSE_GALLERY_THUMB_SRC.get(name)
+        if src:
+            data = _mika_pose_gallery_fetch(src[0] + src[1])
+        else:
+            data = _mika_pose_gallery_read_bytes(name)
         if data is None:
             return None
         try:
@@ -4343,11 +4412,12 @@ class AnimaInpaintCanvasMika:
 
 class PoseGalleryMika:
     """
-    Pose Gallery-Mika: galería de las 491 poses de WaveSpeed AI (buscador,
-    categoría, estilo line/3d y ángulo Front/3/4/Side). La ventana
-    (web/pose_gallery_mika.js) guarda la pose elegida como JSON en el widget
-    oculto "seleccion"; este nodo la resuelve a su imagen cacheada y la
-    entrega como IMAGE, más el nombre y la descripción de la pose.
+    Pose Gallery-Mika: galería de 779 poses (491 de WaveSpeed AI y 288 de
+    POSE-DB-01, ai-pose-gallery.pages.dev) con buscador, categoría, estilo
+    line/3d y ángulo Front/3/4/Side. La ventana (web/pose_gallery_mika.js)
+    guarda la pose elegida como JSON en el widget oculto "seleccion"; este
+    nodo la resuelve a su imagen cacheada y la entrega como IMAGE, más el
+    nombre y la descripción de la pose.
     """
 
     @classmethod
@@ -4627,18 +4697,18 @@ class CustomSamplerTangentMika:
                 "add_noise": ("BOOLEAN", {"default": True,
                                           "tooltip": "Agregar ruido antes de muestrear."}),
                 "start": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
-                "middle": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+                "middle": ("FLOAT", {"default": 0.55, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
                 "end": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
-                "pivot_1": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
-                "pivot_2": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+                "pivot_1": ("FLOAT", {"default": 0.45, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+                "pivot_2": ("FLOAT", {"default": 0.45, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
                 "slope_1": ("FLOAT", {"default": 0.2, "min": 0.01, "max": 10.0, "step": 0.01, **adv}),
-                "slope_2": ("FLOAT", {"default": 0.5, "min": 0.01, "max": 10.0, "step": 0.01, **adv}),
+                "slope_2": ("FLOAT", {"default": 0.2, "min": 0.01, "max": 10.0, "step": 0.01, **adv}),
             }
         }
 
     def sample(self, model, seed, steps, cfg, sampler_name, positive, negative,
-               latent_image, vae, denoise=1.0, add_noise=True, start=1.0, middle=0.5,
-               end=0.0, pivot_1=0.6, pivot_2=0.6, slope_1=0.2, slope_2=0.2):
+               latent_image, vae, denoise=1.0, add_noise=True, start=1.0, middle=0.55,
+               end=0.0, pivot_1=0.45, pivot_2=0.45, slope_1=0.2, slope_2=0.2):
         import latent_preview
         import comfy.sample
         import comfy.utils
@@ -4672,6 +4742,89 @@ class CustomSamplerTangentMika:
                 model, noise, cfg, sampler, sigmas, positive, negative, samples_in,
                 noise_mask=noise_mask, callback=callback,
                 disable_pbar=disable_pbar, seed=seed)
+
+        out = latent.copy()
+        out.pop("downscale_ratio_spacial", None)
+        out.pop("downscale_ratio_temporal", None)
+        out["samples"] = denoised
+
+        image_latent = out["samples"]
+        if image_latent.is_nested:
+            image_latent = image_latent.unbind()[0]
+        images = vae.decode(image_latent)
+        if len(images.shape) == 5:  # combinar batch 5D
+            images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+        return (images, out)
+
+
+class KSamplerVAEMika:
+    """KSampler nativo con el VAE integrado: muestrea con el sampler y el
+    scheduler del menú de ComfyUI (igual que el KSampler) y decodifica la
+    imagen con el VAE en el mismo nodo.
+
+    Entradas de conexión: model, positive, negative, latent_image, vae.
+    Salidas: image (IMAGE ya decodificada) y latent (LATENT).
+    """
+
+    CATEGORY = "Mika Utilidades/sampling"
+    FUNCTION = "sample"
+    RETURN_TYPES = ("IMAGE", "LATENT")
+    RETURN_NAMES = ("image", "latent")
+    DESCRIPTION = (
+        "Un KSampler normal (sampler y scheduler del menú) con el VAE integrado: "
+        "genera el latente y lo decodifica en un solo nodo. Mismas opciones y "
+        "preview del latente que el KSampler."
+    )
+    SEARCH_ALIASES = ["ksampler", "sampler", "vae", "decode", "txt2img", "img2img"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL", {"tooltip": "El modelo a muestrear."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
+                                 "control_after_generate": True,
+                                 "tooltip": "Semilla del ruido."}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000,
+                                  "tooltip": "Pasos de muestreo."}),
+                "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1,
+                                  "round": 0.01, "tooltip": "Escala de guidance (CFG)."}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,
+                                 {"default": "euler",
+                                  "tooltip": "Algoritmo de muestreo."}),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,
+                              {"default": "normal",
+                               "tooltip": "Cómo se reparte el ruido entre los pasos."}),
+                "positive": ("CONDITIONING", {"tooltip": "Condicionamiento positivo."}),
+                "negative": ("CONDITIONING", {"tooltip": "Condicionamiento negativo."}),
+                "latent_image": ("LATENT", {"tooltip": "Latente a muestrear."}),
+                "vae": ("VAE", {"tooltip": "VAE para decodificar la imagen."}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                                      "tooltip": "Porción del schedule. 1 = desde ruido puro."}),
+            }
+        }
+
+    def sample(self, model, seed, steps, cfg, sampler_name, scheduler,
+               positive, negative, latent_image, vae, denoise=1.0):
+        import latent_preview
+        import comfy.sample
+        import comfy.utils
+
+        latent = latent_image.copy()
+        samples_in = comfy.sample.fix_empty_latent_channels(
+            model, latent["samples"],
+            latent.get("downscale_ratio_spacial"), latent.get("downscale_ratio_temporal"))
+
+        batch_inds = latent["batch_index"] if "batch_index" in latent else None
+        noise = comfy.sample.prepare_noise(samples_in, seed, batch_inds)
+        noise_mask = latent.get("noise_mask")
+        # Igual que el KSampler: preview del latente durante el muestreo.
+        callback = latent_preview.prepare_callback(model, steps)
+        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+        denoised = comfy.sample.sample(
+            model, noise, steps, cfg, sampler_name, scheduler, positive, negative,
+            samples_in, denoise=denoise, noise_mask=noise_mask, callback=callback,
+            disable_pbar=disable_pbar, seed=seed)
 
         out = latent.copy()
         out.pop("downscale_ratio_spacial", None)
@@ -9376,6 +9529,7 @@ NODE_CLASS_MAPPINGS = {
     "SamplerSelectorMika": SamplerSelectorMika,
     "SchedulerSelectorMika": SchedulerSelectorMika,
     "CustomSamplerTangentMika": CustomSamplerTangentMika,
+    "KSamplerVAEMika": KSamplerVAEMika,
     "ImageSaveAutoMika": ImageSaveAutoMika,
     "IndexIntMika": IndexIntMika,
     "IndexStepperMika": IndexStepperMika,
@@ -9461,6 +9615,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SamplerSelectorMika": "Sampler Selector-Mika",
     "SchedulerSelectorMika": "Scheduler Selector-Mika",
     "CustomSamplerTangentMika": "Custom Sampler Tangent-Mika",
+    "KSamplerVAEMika": "KSampler VAE-Mika",
     "ImageSaveAutoMika": "Image Save Auto-Mika",
     "IndexIntMika": "Index Int-Mika",
     "IndexStepperMika": "Index Stepper-Mika",
