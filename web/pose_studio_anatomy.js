@@ -95,6 +95,10 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 		penisRotX: Number(anatomy.penisRotX ?? 0),
 		penisRotY: Number(anatomy.penisRotY ?? 0),
 		penisRotZ: Number(anatomy.penisRotZ ?? 0),
+		// El morph nativo llega a 1; por encima el target procedural escala
+		// el miembro hasta ×1.5 de largo y ×3 de grosor en el slider 2.5.
+		penisLength: Number(anatomy.penisLength ?? 0.5),
+		penisGirth: Number(anatomy.penisGirth ?? 0.5),
 	};
 
 	return {

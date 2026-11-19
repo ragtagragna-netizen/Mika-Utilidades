@@ -64,6 +64,12 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const rotX = (d.penisRotX ?? 0) * Math.PI / 180;
 	const rotY = (d.penisRotY ?? 0) * Math.PI / 180;
 	const rotZ = (d.penisRotZ ?? 0) * Math.PI / 180;
+	// Por encima de 1 el target procedural sigue al morph nativo: en 2.5 el
+	// largo llega a ×1.5 y el grosor a ×3, medidos desde el ancla.
+	const lenExtra = Math.max(0, (d.penisLength ?? 0.5) - 1);
+	const girthExtra = Math.max(0, (d.penisGirth ?? 0.5) - 1);
+	const fLen = 1 + lenExtra / 3;
+	const fGirth = 1 + girthExtra * 4 / 3;
 	const fWaist = 1 + (0.5 - (d.waist ?? 0.5)) * 0.45;
 	const fHips = 1 + ((d.hips ?? 0.5) - 0.5) * 0.4;
 	const fGlute = 1 + ((d.glutes ?? 0.5) - 0.5) * 0.85;
@@ -245,7 +251,7 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	// El pene gira alrededor de su ancla en la entrepierna, como un hueso: la
 	// raíz (vértice más peso del pelvis) se queda fija y el resto oscila.
 	// Es un componente separado, así que no se arrastra el bajo vientre.
-	if ((rotX || rotY || rotZ) && pack.genitalIndices?.length) {
+	if ((rotX || rotY || rotZ || fLen !== 1 || fGirth !== 1) && pack.genitalIndices?.length) {
 		const pelvisIdx = names.indexOf("pelvis");
 		const gset = new Set(pack.genitalIndices);
 		let ax = 0, ay = pubisY, az = 0, best = -1;
@@ -262,10 +268,24 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 				az = verts[gi * 3 + 2];
 			}
 		}
+		// Eje del miembro: del ancla al vértice más alejado. El escalado se
+		// aplica antes que la rotación para que giren las proporciones ya
+		// exageradas y no al revés.
+		let tx = ax, ty = ay + 1, tz = az, far = -1;
+		for (const gi of gset) {
+			const dx = verts[gi * 3] - ax;
+			const dy = verts[gi * 3 + 1] - ay;
+			const dz = verts[gi * 3 + 2] - az;
+			const d2 = dx * dx + dy * dy + dz * dz;
+			if (d2 > far) { far = d2; tx = verts[gi * 3]; ty = verts[gi * 3 + 1]; tz = verts[gi * 3 + 2]; }
+		}
+		let ux = tx - ax, uy = ty - ay, uz = tz - az;
+		const ul = Math.hypot(ux, uy, uz) || 1;
+		ux /= ul; uy /= ul; uz /= ul;
 		const cx = Math.cos(rotX), sx = Math.sin(rotX);
 		const cy = Math.cos(rotY), sy = Math.sin(rotY);
 		const cz = Math.cos(rotZ), sz = Math.sin(rotZ);
-		const pivot = (x, y, z) => {
+		const rotate = (x, y, z) => {
 			let ny = y * cx - z * sx, nz = y * sx + z * cx;
 			y = ny; z = nz;
 			let nx2 = x * cy + z * sy; nz = -x * sy + z * cy;
@@ -275,11 +295,14 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 		};
 		for (const gi of gset) {
 			const i = gi * 3;
-			const r = pivot(verts[i] - ax, verts[i + 1] - ay, verts[i + 2] - az);
-			delta("penisRot", i,
-				r[0] - (verts[i] - ax),
-				r[1] - (verts[i + 1] - ay),
-				r[2] - (verts[i + 2] - az));
+			const vx = verts[i] - ax, vy = verts[i + 1] - ay, vz = verts[i + 2] - az;
+			const along = vx * ux + vy * uy + vz * uz;
+			const rx0 = vx - ux * along, ry0 = vy - uy * along, rz0 = vz - uz * along;
+			const sx0 = ux * along * fLen + rx0 * fGirth;
+			const sy0 = uy * along * fLen + ry0 * fGirth;
+			const sz0 = uz * along * fLen + rz0 * fGirth;
+			const r = rotate(sx0, sy0, sz0);
+			delta("penisRot", i, r[0] - vx, r[1] - vy, r[2] - vz);
 		}
 	}
 

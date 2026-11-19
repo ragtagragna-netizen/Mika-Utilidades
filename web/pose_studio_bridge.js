@@ -396,7 +396,9 @@ function buildCharacter(pack, params, pose) {
 		const tip = new THREE.Bone();
 		tip.name = "penis_tip";
 		pivot.add(tip);
-		tip.position.set(tx - ax, ty - ay, tz - az);
+		// El tirador sigue la punta también cuando el miembro crece.
+		const fLenTip = 1 + Math.max(0, (d0.penisLength ?? 0.5) - 1) / 3;
+		tip.position.set((tx - ax) * fLenTip, (ty - ay) * fLenTip, (tz - az) * fLenTip);
 		byName.penis = pivot;
 		byName.penis_tip = tip;
 		bones.push(pivot, tip);
@@ -1038,8 +1040,8 @@ export async function openPoseStudio3D(node) {
 		["footRotZ", "Rotar pie Z", "Inversión / eversión, -180°…180°"],
 		["headSize", "Cabeza"],
 		["genitalSize", "Genitales"],
-		["penisLength", "Largo pene", "Morf nativo de longitud, activo en modo NSFW masculino"],
-		["penisGirth", "Grosor pene", "Morf nativo de circunferencia, activo en modo NSFW masculino"],
+		["penisLength", "Largo pene", "Longitud: ×1.5 al máximo (2.5), activo en NSFW masculino"],
+		["penisGirth", "Grosor pene", "Circunferencia: ×3 al máximo (2.5), activo en NSFW masculino"],
 		["penisRotX", "Pivote pene X", "Ángulo alrededor de la entrepierna; arrastra el tirador de la punta"],
 		["penisRotY", "Pivote pene Y", "Ángulo alrededor de la entrepierna; arrastra el tirador de la punta"],
 		["penisRotZ", "Pivote pene Z", "Ángulo alrededor de la entrepierna"],
