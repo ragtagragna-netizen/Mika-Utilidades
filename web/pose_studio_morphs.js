@@ -14,8 +14,6 @@ const C = {
 	calf: ["calf_l", "calf_r", "foot_l", "foot_r"],
 	armLength: ["lowerarm_l", "lowerarm_r", "hand_l", "hand_r"],
 	legLength: ["calf_l", "calf_r", "foot_l", "foot_r"],
-	hand: ["hand_l", "hand_r", "thumb_01_l", "thumb_02_l", "thumb_03_l",
-		"thumb_01_r", "thumb_02_r", "thumb_03_r"],
 	pubis: ["pelvis"],
 };
 
@@ -40,12 +38,19 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 		maxY = Math.max(maxY, verts[i]);
 	}
 	const span = Math.max(0.001, maxY - minY);
-	const chestY = minY + 0.73 * span;
-	const hipY = minY + 0.54 * span;
 	const pubisY = minY + 0.53 * span;
+	// Centros medidos sobre el asset en reposo (breast peak ≈ [±0.6, 1.19, 1.5],
+	// glute peak ≈ [±0.36, -1.32, -0.75]); se guardan en fracciones de la altura
+	// para que sigan al cuerpo cuando cambian gender/weight/altura nativa.
+	const bustY = minY + 0.70 * span;
+	const bustX = 0.045 * span;
+	const bustZ = 0.05 * span;
+	const gluteY = minY + 0.52 * span;
+	const gluteX = 0.033 * span;
+	const gluteZ = -0.025 * span;
 
 	const keys = ["waist", "hips", "glutes", "bust", "arm", "thigh", "calf",
-		"armLength", "legLength", "handGrip", "pubis", "height"];
+		"armLength", "legLength", "pubis", "height"];
 	const targets = {};
 	for (const k of keys) targets[k] = new Float32Array(verts.length);
 	const delta = (k, i, x, y, z) => {
@@ -58,18 +63,20 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const d = params.localDeform || {};
 	const fWaist = 1 + (0.5 - (d.waist ?? 0.5)) * 0.45;
 	const fHips = 1 + ((d.hips ?? 0.5) - 0.5) * 0.4;
-	const fGlute = 1 + ((d.glutes ?? 0.5) - 0.5) * 0.5;
+	const fGlute = 1 + ((d.glutes ?? 0.5) - 0.5) * 0.85;
 	const raw = params.rawAnatomy || {};
-	const fBust = 1 + Math.min(2.6, Math.max(0, (raw.bust ?? 0.5) - 1) * 0.95);
+	const fBust = 1 + Math.min(3.4, Math.max(0, (raw.bust ?? 0.5) - 1) * 1.4);
 	const fArm = 1 + ((d.armThickness ?? 0.5) - 0.5) * 0.5;
 	const fThigh = 1 + ((d.thighThickness ?? 0.5) - 0.5) * 0.5;
 	const fCalf = 1 + ((d.calfThickness ?? 0.5) - 0.5) * 0.5;
 	const fArmLen = 1 + ((d.armLength ?? 0.5) - 0.5) * 0.55;
 	const fLegLen = 1 + ((d.legLength ?? 0.5) - 0.5) * 0.55;
-	const grip = d.handGrip ?? 0.5;
 	const fPubis = 1 + ((d.genitalSize ?? 0.5) - 0.5) * 0.35;
+	// La altura nativa (MakeHuman) cubre 0..1. Fuera de ese rango un residuo
+	// continuo estira desde los pies: antes había un salto del 30% al cruzar 0/1.
 	const h = d.height ?? 0.5;
-	const fHeight = h < 0 || h > 1 ? 1 + (h - 0.5) * 0.6 : 1;
+	const extraH = h > 1 ? h - 1 : h < 0 ? h : 0;
+	const fHeight = 1 + extraH * 0.22;
 
 	// Eje de cada hueso (cabeza -> cola) en espacio de malla.
 	const axis = (index) => {
@@ -79,9 +86,6 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 			tx: bonePos[o + 3], ty: bonePos[o + 4], tz: bonePos[o + 5],
 		};
 	};
-	// En este pack los huesos "_l" están en X POSITIVO (upperarm_l head x=+1.24).
-	const sideOf = (name) => (name.endsWith("_l") ? 1 : name.endsWith("_r") ? -1 : 0);
-
 	for (let v = 0; v < count; v++) {
 		const i = v * 3;
 		const x = verts[i];
@@ -95,7 +99,6 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 			if (w < 0.02) continue;
 			const name = byName.get(skin[o + k]);
 			if (!name) continue;
-			const s = sideOf(name);
 
 			if (C.waist.includes(name) && t > 0.55 && t < 0.72) {
 				const fall = smooth((Math.abs(t - 0.63) - 0.025) / 0.07) * w;
@@ -104,27 +107,27 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 
 			if (C.hips.includes(name) && t > 0.46 && t < 0.62) {
 				const fall = smooth((Math.abs(t - 0.54) - 0.02) / 0.08) * w;
-				delta("hips", i, x * (fHips - 1) * fall, 0, z * (fHips - 1) * fall);
-				if (z < 0) {
-					// Crecimiento hacia ATRAS: el eje Z manda; X apenas se toca.
-					delta("glutes", i,
-						x * (fGlute - 1) * 0.18 * fall,
-						(y - hipY) * (fGlute - 1) * 0.2 * fall,
-						z * (fGlute - 1) * 1.3 * fall);
-				}
+				// La cadera ensancha sobre todo en X; el volumen de atrás lo
+				// controla el target de glúteos, no este.
+				delta("hips", i, x * (fHips - 1) * fall, 0,
+					z * (fHips - 1) * 0.4 * fall);
 			}
 
-			if (C.bust.includes(name) && z > 0 && t > 0.64 && t < 0.84 && fBust !== 1) {
-				const cx = s || (x >= 0 ? 0.6 : -0.6);
-				const dx = (x - cx) / 1.0;
-				const dy = (y - chestY) / 0.9;
-				const dz = (z - 1.0) / 1.1;
+			if (C.bust.includes(name) && z > 0.1 && t > 0.62 && t < 0.86 && fBust !== 1) {
+				const cx = (x >= 0 ? 1 : -1) * bustX;
+				const dx = (x - cx) / (0.075 * span);
+				const dy = (y - bustY) / (0.075 * span);
+				const dz = (z - bustZ) / (0.085 * span);
 				const r2 = dx * dx + dy * dy + dz * dz;
-				const fall = Math.exp(-r2 * 1.6) * Math.min(1, z / 0.5) * w;
+				// La campana se ensancha con el pecho: así un seno muy grande
+				// escala como una esfera y no como un pico ni un "ala".
+				const widen = 1 + (fBust - 1) * 0.28;
+				const fall = Math.exp(-r2 * 1.25 / (widen * widen))
+					* Math.min(1, z / (0.02 * span)) * w;
 				delta("bust", i,
 					(x - cx) * (fBust - 1) * fall,
-					(y - chestY) * (fBust - 1) * 0.55 * fall,
-					(z - 1.0) * (fBust - 1) * fall);
+					(y - bustY) * (fBust - 1) * 0.7 * fall,
+					(z - bustZ) * (fBust - 1) * 1.15 * fall);
 			}
 
 			if (name === "pelvis" && z > 0 && t > 0.49 && t < 0.57) {
@@ -198,33 +201,28 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 			stretchLimb("legLength", "thigh_", fLegLen, [...C.thigh, ...C.calf]);
 		}
 
-		// Abrir/cerrar manos: el pack no tiene huesos de dedos, así que se
-		// curvatura los vértices de la mano alrededor del eje de la muñeca.
-		if (Math.abs(grip - 0.5) > 0.001) {
+		// Glúteos: dos lóbulos redondeados en lugar de una banda plana. Cada
+		// mejilla crece desde su propio centro (eje Z hacia atrás, algo de X y
+		// Y) con una campana que se ensancha al exagerar, y un pliegue central
+		// para que no se fundan en una sola masa.
+		if (fGlute !== 1 && z < -0.01 && t > 0.42 && t < 0.63) {
+			let wg = 0;
 			for (let k = 0; k < 4; k++) {
-				const name = byName.get(skin[o + k]);
-				if (!name || !C.hand.includes(name)) continue;
-				const side = name.endsWith("_l") ? "l" : "r";
-				const hi = names.indexOf("hand_" + side);
-				if (hi < 0) continue;
-				const a = axis(hi);
-				let dx = a.tx - a.hx, dy = a.ty - a.hy, dz = a.tz - a.hz;
-				const len = Math.hypot(dx, dy, dz) || 1;
-				dx /= len; dy /= len; dz /= len;
-				// Eje de curvatura: perpendicular al antebrazo y a "arriba".
-				let ax = dy * 0 - dz * 1;
-				let ay = dz * 0 - dx * 0;
-				let az = dx * 1 - dy * 0;
-				const al = Math.hypot(ax, ay, az) || 1;
-				ax /= al; ay /= al; az /= al;
-				const angle = (0.5 - grip) * 2.0 * weights[o + k];
-				const px = x - a.hx, py = y - a.hy, pz = z - a.hz;
-				const dot = ax * px + ay * py + az * pz;
-				const cs = Math.cos(angle), sn = Math.sin(angle);
-				const rx = px * cs + (ay * pz - az * py) * sn + ax * dot * (1 - cs);
-				const ry = py * cs + (az * px - ax * pz) * sn + ay * dot * (1 - cs);
-				const rz = pz * cs + (ax * py - ay * px) * sn + az * dot * (1 - cs);
-				delta("handGrip", i, rx - px, ry - py, rz - pz);
+				if (C.glutes.includes(byName.get(skin[o + k]))) wg += weights[o + k];
+			}
+			if (wg > 0.01) {
+				const cx = (x >= 0 ? 1 : -1) * gluteX;
+				const dx = (x - cx) / (0.065 * span);
+				const dy = (y - gluteY) / (0.07 * span);
+				const dz = (z - gluteZ) / (0.055 * span);
+				const r2 = dx * dx + dy * dy + dz * dz;
+				const widen = 1 + (fGlute - 1) * 0.3;
+				const cleft = Math.min(1, Math.abs(x) / (0.022 * span));
+				const fall = Math.exp(-r2 * 1.2 / (widen * widen)) * cleft * wg;
+				delta("glutes", i,
+					(x - cx) * (fGlute - 1) * 0.45 * fall,
+					(y - gluteY) * (fGlute - 1) * 0.35 * fall,
+					(z - gluteZ) * (fGlute - 1) * 1.6 * fall);
 			}
 		}
 

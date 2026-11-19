@@ -27,6 +27,20 @@ const DEFAULT_ANATOMY = {
 	gender: 0, bust: 0.75, waist: 0.35, hips: 0.65, glutes: 0.6, headSize: 0.45,
 };
 
+// Huesos que maneja la anatomía (rotación de muñecas/tobillos y cierre de
+// dedos). No se guardan en `pose`: si se guardaran, el siguiente rebuild los
+// aplicaría dos veces. El asset trae falanges completas, así que la mano se
+// cierra articulando huesos, no curvando vértices.
+const FINGERS = ["index", "middle", "ring", "pinky", "thumb"];
+const PHALANGES = ["01", "02", "03"];
+const PROCEDURAL_BONES = new Set(["hand_l", "hand_r", "foot_l", "foot_r"]);
+for (const finger of FINGERS) {
+	for (const ph of PHALANGES) {
+		PROCEDURAL_BONES.add(`${finger}_${ph}_l`);
+		PROCEDURAL_BONES.add(`${finger}_${ph}_r`);
+	}
+}
+
 function emit(dataUrl, nodeId) {
 	for (const fn of LISTENERS) {
 		try { fn(dataUrl, nodeId); } catch (e) { console.warn("Mika pose capture", e); }
@@ -263,7 +277,8 @@ function buildCharacter(pack, params, pose) {
 	// de vértices: si la altura se estira fuera de 0..1 hay aplicar el mismo
 	// escalado desde los pies, o los pivotes de pose quedan desalineados.
 	const hd = params.localDeform?.height ?? 0.5;
-	const hStretch = hd < 0 || hd > 1 ? 1 + (hd - 0.5) * 0.6 : 1;
+	const hExtra = hd > 1 ? hd - 1 : hd < 0 ? hd : 0;
+	const hStretch = 1 + hExtra * 0.22;
 	if (hStretch !== 1) {
 		for (let i = 0; i < solved.bonePositions.length; i += 6) {
 			solved.bonePositions[i + 1] = height.minY + (solved.bonePositions[i + 1] - height.minY) * hStretch;
@@ -409,6 +424,7 @@ function applyPose(character, pose) {
 function capturePose(character) {
 	const out = {};
 	for (const bone of character.bones) {
+		if (PROCEDURAL_BONES.has(bone.name)) continue;
 		const q = bone.quaternion;
 		if (Math.abs(q.x) + Math.abs(q.y) + Math.abs(q.z) > 1e-4) {
 			out[bone.name] = [q.x, q.y, q.z, q.w];
@@ -595,7 +611,8 @@ function sliderRow(panel, label, key, state, onInput) {
 	input.type = "range";
 	const RANGES = {
 		gender: [0, 1], posX: [-8, 8], posY: [-3, 3], rotationY: [-180, 180],
-		handRotation: [-180, 180], footRotation: [-180, 180],
+		handRotX: [-180, 180], handRotY: [-180, 180], handRotZ: [-180, 180],
+		footRotX: [-180, 180], footRotY: [-180, 180], footRotZ: [-180, 180],
 	};
 	const [mn, mx] = RANGES[key] || [-1, 2.5];
 	input.min = String(mn);
@@ -779,17 +796,48 @@ export async function openPoseStudio3D(node) {
 			charactersGroup.add(built.group);
 			applyPose(built, poses[i]);
 			const anatomy = st.slots[i]?.anatomy || {};
-			const axis = new THREE.Vector3(0, 1, 0);
-			for (const [names, deg] of [
-				[["hand_l", "hand_r"], anatomy.handRotation || 0],
-				[["foot_l", "foot_r"], anatomy.footRotation || 0],
-			]) {
-				for (const n of names) {
-					const bone = built.byName[n];
-					if (!bone) continue;
-					bone.quaternion.identity();
-					if (Math.abs(deg) > 0.5) {
-						bone.quaternion.setFromAxisAngle(axis, (deg * Math.PI) / 180);
+			// Rotación en los tres ejes de manos y pies. Se compone sobre la
+			// pose guardada (no la sobrescribe) en el marco local del hueso.
+			const rotatePair = (prefix, x, y, z) => {
+				if (Math.abs(x) + Math.abs(y) + Math.abs(z) < 0.01) return;
+				const q = new THREE.Quaternion().setFromEuler(
+					new THREE.Euler(x * Math.PI / 180, y * Math.PI / 180,
+						z * Math.PI / 180, "XYZ"));
+				for (const side of ["l", "r"]) {
+					const bone = built.byName[prefix + "_" + side];
+					if (bone) bone.quaternion.multiply(q);
+				}
+			};
+			const oldHand = anatomy.handRotation ?? 0;
+			const oldFoot = anatomy.footRotation ?? 0;
+			rotatePair("hand", anatomy.handRotX ?? 0,
+				anatomy.handRotY ?? oldHand, anatomy.handRotZ ?? 0);
+			rotatePair("foot", anatomy.footRotX ?? 0,
+				anatomy.footRotY ?? oldFoot, anatomy.footRotZ ?? 0);
+
+			// Cerrar/abrir la mano articulando las falanges reales del asset.
+			// -1 = abierta, 0.5 = reposo, 2.5 = puño. El eje X local flexionan
+			// los dedos (apuntan en +Z); el pulgar se mueve menos y con otro eje.
+			const grip = anatomy.handGrip ?? 0.5;
+			const curl = Math.max(-12, Math.min(105, (grip - 0.5) * 55));
+			if (Math.abs(curl) > 0.1) {
+				const xAxis = new THREE.Vector3(1, 0, 0);
+				const yAxis = new THREE.Vector3(0, 1, 0);
+				const q = new THREE.Quaternion();
+				const factors = { "01": 1, "02": 0.85, "03": 0.6 };
+				for (const finger of FINGERS) {
+					for (const side of ["l", "r"]) {
+						for (const ph of PHALANGES) {
+							const bone = built.byName[`${finger}_${ph}_${side}`];
+							if (!bone) continue;
+							const deg = finger === "thumb"
+								? curl * 0.5
+								: curl * factors[ph];
+							q.setFromAxisAngle(
+								finger === "thumb" ? yAxis : xAxis,
+								deg * Math.PI / 180);
+							bone.quaternion.multiply(q);
+						}
 					}
 				}
 			}
@@ -909,9 +957,13 @@ export async function openPoseStudio3D(node) {
 		["armThickness", "Grosor brazos"],
 		["thighThickness", "Grosor muslos"],
 		["calfThickness", "Grosor pantorrillas"],
-		["handGrip", "Abrir/cerrar manos"],
-		["handRotation", "Rotar manos"],
-		["footRotation", "Rotar pies"],
+		["handGrip", "Abrir/cerrar manos", "De -1 (mano abierta) a 2.5 (puño cerrado)"],
+		["handRotX", "Rotar mano X", "Inclinación de muñeca, -180°…180°"],
+		["handRotY", "Rotar mano Y", "Giro de muñeca, -180°…180°"],
+		["handRotZ", "Rotar mano Z", "Pivotar muñeca, -180°…180°"],
+		["footRotX", "Rotar pie X", "Dorsiflexión / flexión plantar, -180°…180°"],
+		["footRotY", "Rotar pie Y", "Giro del pie, -180°…180°"],
+		["footRotZ", "Rotar pie Z", "Inversión / eversión, -180°…180°"],
 		["headSize", "Cabeza"],
 		["genitalSize", "Genitales"],
 		["openingSize", "Abertura"],
@@ -933,9 +985,13 @@ export async function openPoseStudio3D(node) {
 				posX: slot.offset?.[0] ?? 0,
 				posY: slot.offset?.[1] ?? 0,
 				rotationY: Math.round((slot.rotationY || 0) * 180 / Math.PI),
-				handRotation: slot.anatomy?.handRotation ?? 0,
-				footRotation: slot.anatomy?.footRotation ?? 0,
 				handGrip: slot.anatomy?.handGrip ?? 0.5,
+				handRotX: slot.anatomy?.handRotX ?? 0,
+				handRotY: slot.anatomy?.handRotY ?? 0,
+				handRotZ: slot.anatomy?.handRotZ ?? 0,
+				footRotX: slot.anatomy?.footRotX ?? 0,
+				footRotY: slot.anatomy?.footRotY ?? 0,
+				footRotZ: slot.anatomy?.footRotZ ?? 0,
 			},
 		};
 	};
@@ -1048,7 +1104,9 @@ export async function openPoseStudio3D(node) {
 	};
 	reset.onclick = () => {
 		const slot = activeSlot(stateOf(node));
-		for (const k of Object.keys(slot.anatomy)) slot.anatomy[k] = 0.5;
+		for (const k of Object.keys(slot.anatomy)) {
+			slot.anatomy[k] = /^(hand|foot)Rot[XYZ]$/.test(k) ? 0 : 0.5;
+		}
 		slot.anatomy.gender = 0.5;
 		slot.pose = {};
 		slot.offset = [0, 0];

@@ -9,8 +9,10 @@
 export const ANATOMY_KEYS = [
 	"height", "bust", "firmness", "waist", "hips", "glutes",
 	"armLength", "legLength", "armThickness", "thighThickness",
-	"calfThickness", "handGrip", "handRotation", "footRotation", "headSize",
-	"genitalSize", "openingSize", "anusSize",
+	"calfThickness", "handGrip",
+	"handRotX", "handRotY", "handRotZ",
+	"footRotX", "footRotY", "footRotZ",
+	"headSize", "genitalSize", "openingSize", "anusSize",
 ];
 
 export const BODY_PRESETS = {
@@ -18,19 +20,26 @@ export const BODY_PRESETS = {
 		gender: 0, height: 0.55, bust: 0.82, firmness: 0.5, waist: 0.3,
 		hips: 0.85, glutes: 0.8, armLength: 0.5, legLength: 0.55,
 		armThickness: 0.45, thighThickness: 0.5, calfThickness: 0.5,
-		handGrip: 0.5, handRotation: 0, footRotation: 0, headSize: 0.45,
+		handGrip: 0.5,
+		handRotX: 0, handRotY: 0, handRotZ: 0,
+		footRotX: 0, footRotY: 0, footRotZ: 0,
+		headSize: 0.45,
 		genitalSize: 0.5, openingSize: 0.5, anusSize: 0.5,
 	},
 	muscular_male: {
 		gender: 1, height: 0.72, bust: 0.45, firmness: 0.7, waist: 0.55,
 		hips: 0.4, glutes: 0.55, armLength: 0.7, legLength: 0.65,
-		armThickness: 0.75, thighThickness: 0.7, calfThickness: 0.65, handGrip: 0.5, handRotation: 0, footRotation: 0, headSize: 0.5,
+		armThickness: 0.75, thighThickness: 0.7, calfThickness: 0.65, handGrip: 0.5,
+		handRotX: 0, handRotY: 0, handRotZ: 0,
+		footRotX: 0, footRotY: 0, footRotZ: 0, headSize: 0.5,
 		genitalSize: 0.6, openingSize: 0.5, anusSize: 0.5,
 	},
 	slim_female: {
 		gender: 0, height: 0.65, bust: 0.35, firmness: 0.45, waist: 0.2,
 		hips: 0.35, glutes: 0.3, armLength: 0.6, legLength: 0.7,
-		armThickness: 0.35, thighThickness: 0.35, calfThickness: 0.35, handGrip: 0.5, handRotation: 0, footRotation: 0, headSize: 0.5,
+		armThickness: 0.35, thighThickness: 0.35, calfThickness: 0.35, handGrip: 0.5,
+		handRotX: 0, handRotY: 0, handRotZ: 0,
+		footRotX: 0, footRotY: 0, footRotZ: 0, headSize: 0.5,
 		genitalSize: 0.45, openingSize: 0.45, anusSize: 0.45,
 	},
 };
@@ -106,7 +115,9 @@ export function deformVertices(vertices, bounds, deform, metrics = {}) {
 	const hipF = 1 + ((deform.hips ?? 0.5) - 0.5) * 0.45;
 	const gluteF = 1 + ((deform.glutes ?? 0.5) - 0.5) * 0.55;
 	const h = deform.height ?? 0.5;
-	const heightStretch = h < 0 || h > 1 ? 1 + (h - 0.5) * 0.6 : 1;
+	// Continuo en 0 y 1: el salto que había en esos límites partía la anatomía.
+	const extraH = h > 1 ? h - 1 : h < 0 ? h : 0;
+	const heightStretch = 1 + extraH * 0.22;
 
 	for (let i = 0; i < vertices.length; i += 3) {
 		const v = i / 3;
