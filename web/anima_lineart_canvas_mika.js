@@ -3,7 +3,7 @@ import { api } from "/scripts/api.js";
 import { openPoseGallery, poseImageUrl } from "./pose_gallery_mika.js";
 import {
 	createMannequin, drawMannequin, serializeMannequins, deserializeMannequins,
-	mannequinBounds, jointHit, localPoint, setJoint, setProportion, applyGender,
+	mannequinBounds, jointHit, localPoint, setJoint, setProportion, applyGender, skeleton,
 	PROPORTIONS, GENDERS, JOINTS,
 } from "./mannequin_mika.js";
 
@@ -3499,6 +3499,67 @@ app.registerExtension({
 					ctx.fill();
 				}
 			});
+			drawMannequinHandles(node);
+		}
+
+		const JOINT_PARENT = {
+			shoulderL: "shoulderL", shoulderR: "shoulderR",
+			elbowL: "elbowL", elbowR: "elbowR",
+			hipL: "hipL", hipR: "hipR",
+			kneeL: "kneeL", kneeR: "kneeR",
+			neck: "neck", wristL: "elbowL", wristR: "elbowR",
+			ankleL: "kneeL", ankleR: "kneeR",
+		};
+		const JOINT_BASE = {
+			shoulderL: [-8, 68], shoulderR: [8, 68],
+			elbowL: [-6, 62], elbowR: [6, 62],
+			hipL: [-4, 74], hipR: [4, 74],
+			kneeL: [-2, 72], kneeR: [2, 72],
+		};
+
+		function jointAngleFrom(m, joint, lx, ly) {
+			const pt = skeleton(m);
+			const key = JOINT_PARENT[joint];
+			const anchor = pt[key] || pt.pelvis;
+			const dx = lx - anchor[0], dy = ly - anchor[1];
+			if (joint === "neck") return Math.atan2(dx, -dy);
+			const base = JOINT_BASE[joint];
+			if (!base) return Math.atan2(dx, dy);
+			let a = Math.atan2(dx, dy) - Math.atan2(base[0], base[1]);
+			const side = joint.endsWith("L") ? "L" : "R";
+			if (joint.startsWith("elbow")) a -= m.pose["shoulder" + side];
+			if (joint.startsWith("knee")) a -= m.pose["hip" + side];
+			return a;
+		}
+
+		function drawMannequinHandles(node) {
+			const st = node._mikaLineart;
+			if (!st) return;
+			forEachSurface(node, (s) => {
+				const ctx = s.handles.getContext("2d");
+				const key = (st.selection || []).find((k) => String(k).startsWith("M:"));
+				const m = key && mannequinByKey(node, key);
+				if (!m) return;
+				const t = m.tf;
+				const pt = skeleton(m);
+				const hs = handleSize(node) / Math.max(0.1, (Math.abs(t.sx) + Math.abs(t.sy)) / 2);
+				ctx.save();
+				ctx.translate(t.cx, t.cy);
+				ctx.rotate(t.rot);
+				ctx.scale(t.sx, t.sy);
+				for (const j of JOINTS) {
+					const q = pt[j];
+					if (!q) continue;
+					ctx.beginPath();
+					ctx.arc(q[0], q[1], hs, 0, Math.PI * 2);
+					ctx.fillStyle = "rgba(0, 220, 255, 0.85)";
+					ctx.fill();
+					ctx.lineWidth = hs * 0.4;
+					ctx.strokeStyle = "#fff";
+					ctx.stroke();
+				}
+				ctx.restore();
+			});
 		}
 
 		function transformHit(node, x, y) {
@@ -4406,6 +4467,7 @@ app.registerExtension({
 
 			// Ganchos para los tests del editor (mismo patrón que el puente de calco).
 			window.__drawMannequins = () => drawMannequins(node);
+			window.__drawHandles = () => { drawTransformUI(node); drawMannequinHandles(node); };
 			window.__writeCalco = () => writeCalco(node);
 
 			// Estado guardado en el workflow (widget oculto "pincel"). Lo de la
@@ -4821,6 +4883,22 @@ app.registerExtension({
 						return;
 					}
 
+					// Articulación de un maniquí seleccionado: manda antes que el marco.
+					{
+						const mkey = (st.selection || []).find((k) => String(k).startsWith("M:"));
+						const m = mkey && mannequinByKey(node, mkey);
+						if (m) {
+							const [tx, ty] = posCanvas(e, surface);
+							const [lx, ly] = localPoint(m, tx, ty);
+							const joint = jointHit(m, lx, ly, handleSize(node) * 1.5);
+							if (joint) {
+								st.jointDrag = { id: m.id, joint };
+								hideCursor(node);
+								return;
+							}
+						}
+					}
+
 					// Selección flotante: si se toca el marco se edita; si no, se fija.
 					if (st.sel) {
 						const [tx, ty] = posCanvas(e, surface);
@@ -4938,6 +5016,17 @@ app.registerExtension({
 						}
 						return;
 					}
+					if (st.jointDrag) {
+						const [cx, cy] = posCanvas(e, surface);
+						const m = mannequinByKey(node, "M:" + st.jointDrag.id);
+						if (m) {
+							const [lx, ly] = localPoint(m, cx, cy);
+							setJoint(m, st.jointDrag.joint, jointAngleFrom(m, st.jointDrag.joint, lx, ly));
+							drawMannequins(node);
+							drawTransformUI(node);
+						}
+						return;
+					}
 					if (st.transformDrag) {
 						const [cx, cy] = posCanvas(e, surface);
 						applyTransformDrag(node, cx, cy);
@@ -4965,6 +5054,12 @@ app.registerExtension({
 					else strokeTo(x, y);
 				});
 				const endStroke = () => {
+					if (st.jointDrag) {
+						st.jointDrag = null;
+						writeCalco(node);
+						drawTransformUI(node);
+						return;
+					}
 					if (st.transformDrag) {
 						const layers = st.transformDrag.layers;
 						st.transformDrag = null;
