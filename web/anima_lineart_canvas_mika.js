@@ -1668,7 +1668,10 @@ app.registerExtension({
 					},
 				}).catch((err) => console.error("MikaLineartCanvas:", err));
 			};
-			return { parts: [loadBtn, pasteEditBtn, traceBtn, pasteTraceBtn, posesBtn], refresh() {} };
+			const mannequinBtn = mkButton(
+				"🧍‍♂️", "Añadir un maniquí articulado editable como calco");
+			mannequinBtn.onclick = () => addMannequin(node);
+			return { parts: [loadBtn, pasteEditBtn, traceBtn, pasteTraceBtn, posesBtn, mannequinBtn], refresh() {} };
 		}
 
 		// Selector de preprocesador + ⚡ (no encola el grafo).
@@ -3034,6 +3037,16 @@ app.registerExtension({
 			return c.toDataURL("image/png");
 		}
 
+		function mannequinThumb(m) {
+			const c = document.createElement("canvas");
+			c.width = 64; c.height = 64;
+			const ctx = c.getContext("2d");
+			ctx.translate(32, 32);
+			ctx.scale(0.16, 0.16);
+			drawMannequin(ctx, m, false);
+			return c.toDataURL("image/png");
+		}
+
 		function toggleBaseVisibility(node) {
 			const st = node._mikaLineart;
 			st.underlayVisible = !st.underlayVisible;
@@ -3185,6 +3198,17 @@ app.registerExtension({
 					],
 				});
 			}
+			for (const m of st.mannequins) {
+				addItem("M:" + m.id, m.name, mannequinThumb(m), {
+					dim: m.visible === false,
+					controls: [
+						["👁", "Mostrar/ocultar maniquí", "visible", () => toggleMannequin(node, m.id)],
+						["✕", "Borrar maniquí", "delete", () => removeMannequin(node, m.id)],
+						["↑", "Subir maniquí", "up", () => moveMannequin(node, m.id, +1)],
+						["↓", "Bajar maniquí", "down", () => moveMannequin(node, m.id, -1)],
+					],
+				});
+			}
 		}
 
 		// Ajusta la resolución del nodo a la fuente más parecida: el calco o la
@@ -3225,10 +3249,55 @@ app.registerExtension({
 			const id = key.slice(2);
 			return node._mikaLineart.calcoLayers.find((l) => l.id === id) || null;
 		}
+		function mannequinByKey(node, key) {
+			if (typeof key !== "string" || !key.startsWith("M:")) return null;
+			const id = key.slice(2);
+			return node._mikaLineart.mannequins.find((m) => m.id === id) || null;
+		}
+		function addMannequin(node) {
+			const st = node._mikaLineart;
+			if (!st) return null;
+			const id = "M" + (st.layerSeq++);
+			const m = createMannequin(id, st.mannequins.length, st.paint.width, st.paint.height);
+			st.mannequins.push(m);
+			st.selection = ["M:" + m.id];
+			drawMannequins(node);
+			applyMannequinOpacity(node);
+			renderLayerPanel(node);
+			drawTransformUI(node);
+			writeCalco(node);
+			node.setDirtyCanvas(true, true);
+			return m;
+		}
+		function removeMannequin(node, id) {
+			const st = node._mikaLineart;
+			st.mannequins = st.mannequins.filter((m) => m.id !== id);
+			st.selection = st.selection.filter((k) => k !== "M:" + id);
+			drawMannequins(node); renderLayerPanel(node); drawTransformUI(node); writeCalco(node);
+		}
+		function toggleMannequin(node, id) {
+			const st = node._mikaLineart;
+			const m = mannequinByKey(node, "M:" + id);
+			if (!m) return;
+			m.visible = m.visible === false;
+			if (!m.visible) st.selection = st.selection.filter((k) => k !== "M:" + id);
+			drawMannequins(node); renderLayerPanel(node); drawTransformUI(node); writeCalco(node);
+		}
+		function moveMannequin(node, id, delta) {
+			const st = node._mikaLineart;
+			const i = st.mannequins.findIndex((m) => m.id === id);
+			const j = i + delta;
+			if (i < 0 || j < 0 || j >= st.mannequins.length) return;
+			const [m] = st.mannequins.splice(i, 1);
+			st.mannequins.splice(j, 0, m);
+			drawMannequins(node); renderLayerPanel(node); writeCalco(node);
+		}
 		function layerVisible(node, key) {
 			const st = node._mikaLineart;
 			if (key === "paint") return true;
 			if (key === "underlay") return st.underlayVisible !== false;
+			const man = mannequinByKey(node, key);
+			if (man) return man.visible !== false;
 			const l = layerByKey(node, key);
 			return !!(l && l.visible);
 		}
@@ -3241,7 +3310,8 @@ app.registerExtension({
 			CALCO_CACHE.set(calcoKey(node), {
 				underlayImg: st.underlayImg, underlayTransform: st.underlayTransform,
 				underlayVisible: st.underlayVisible !== false,
-				calcoLayers: st.calcoLayers, selection: st.selection.slice(),
+				calcoLayers: st.calcoLayers, mannequins: st.mannequins,
+				selection: st.selection.slice(),
 				layerSeq: st.layerSeq, calcoNameSeq: st.calcoNameSeq, contentSize: st.contentSize,
 			});
 		}
@@ -3271,6 +3341,11 @@ app.registerExtension({
 				const t = st.underlayTransform;
 				if (!img || !t) return null;
 				return { t, w: img.width, h: img.height };
+			}
+			const man = mannequinByKey(node, which);
+			if (man) {
+				const b = mannequinBounds(man);
+				return { t: man.tf, w: Math.max(1, b.w), h: Math.max(1, b.h) };
 			}
 			if (which === "sel") {
 				const s = st.sel;
@@ -3336,6 +3411,8 @@ app.registerExtension({
 
 		function setLayerTf(node, which, t) {
 			const st = node._mikaLineart;
+			const man = mannequinByKey(node, which);
+			if (man) { man.tf = t; return; }
 			if (which === "paint") st.paintTransform = t;
 			else if (which === "underlay") st.underlayTransform = t;
 			else if (which === "sel") { if (st.sel) st.sel.tf = t; }
