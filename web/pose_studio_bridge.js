@@ -302,12 +302,13 @@ function buildCharacter(pack, params, pose) {
 		if (!Number.isFinite(frontZ)) frontZ = heightUnits * 0.06;
 		if (!Number.isFinite(backZ)) backZ = -heightUnits * 0.06;
 		const unit = heightUnits * 0.012;
-		const add = (size, y, z, sx, sy, color = OUTLINE_COLOR) => {
+		const add = (name, size, y, z, sx, sy, color = OUTLINE_COLOR) => {
 			if (!size) return;
 			const m = new THREE.Mesh(
 				new THREE.SphereGeometry(unit * (0.6 + size), 12, 10),
 				new THREE.MeshBasicMaterial({ color }),
 			);
+			m.name = name;
 			m.position.set(0, y, z);
 			m.scale.set(sx, sy, 0.6);
 			genitals.add(m);
@@ -317,14 +318,15 @@ function buildCharacter(pack, params, pose) {
 					m.geometry,
 					new THREE.MeshBasicMaterial({ color: OUTLINE_COLOR, side: THREE.BackSide }),
 				);
+				edge.name = name + "_edge";
 				edge.position.copy(m.position);
 				edge.scale.copy(m.scale).multiplyScalar(1.09);
 				genitals.add(edge);
 			}
 		};
-		add(params.genitalMeshes.vagina, pelvisY - unit * 0.6, frontZ + unit * 0.25, 1.35, 1, BODY_COLOR);
-		add(params.genitalMeshes.opening, pelvisY - unit * 0.9, frontZ + unit * 0.5, 0.6, 0.5);
-		add(params.genitalMeshes.anus, pelvisY - unit * 2.2, backZ - unit * 0.1, 1, 1);
+		add("vagina", params.genitalMeshes.vagina, pelvisY - unit * 0.6, frontZ + unit * 0.25, 1.35, 1, BODY_COLOR);
+		add("opening", params.genitalMeshes.opening, pelvisY - unit * 0.9, frontZ + unit * 0.5, 0.6, 0.5);
+		add("anus", params.genitalMeshes.anus, pelvisY - unit * 2.2, backZ - unit * 0.3, 1, 1);
 	}
 	group.add(genitals);
 
