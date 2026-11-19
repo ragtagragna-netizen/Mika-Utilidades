@@ -7,7 +7,8 @@ import { OrbitControls } from "./vendor/three/OrbitControls.js";
 import {
 	loadMorphPack, solveMorph, buildStaticModelData,
 } from "./pose_studio/morph_runtime.mjs";
-import { applyAnatomy, deformVertices, BODY_PRESETS } from "./pose_studio_anatomy.js";
+import { applyAnatomy, BODY_PRESETS } from "./pose_studio_anatomy.js";
+import { buildCustomMorphs } from "./pose_studio_morphs.js";
 
 const CAPTURES = new Map();
 const LISTENERS = new Set();
@@ -152,10 +153,14 @@ function activeSlot(st) {
 
 function morphParams(slot) {
 	const anatomy = { ...(slot.anatomy || {}), nsfw: slot.nsfw === true };
-	return applyAnatomy(anatomy, {
+	const params = applyAnatomy(anatomy, {
 		gender: 0.5, age: 25, weight: 0.5, muscle: 0.5, height: 0.5,
 		breast_size: 0.5, firmness: 0.5,
 	});
+	// El solver acota el pecho a 0..1; el target extra necesita el valor real
+	// del slider para poder crecer por encima del morph nativo.
+	params.rawAnatomy = { ...(slot.anatomy || {}) };
+	return params;
 }
 
 function boundsY(vertices) {
@@ -241,12 +246,7 @@ function outlineWidthFor(camera, target, viewportPx, px = 1.6) {
 function buildCharacter(pack, params, pose) {
 	const solved = solveMorph(pack, params);
 	const staticData = buildStaticModelData(pack, solved.includeGenitals);
-	deformVertices(solved.vertices, null, params.localDeform || {}, {
-		...boundsY(solved.vertices),
-		skinIndices: staticData.skinIndices,
-		skinWeights: staticData.skinWeights,
-		boneNames: pack.bones.map((b) => b.name),
-	});
+	const shape = buildCustomMorphs(pack, solved, staticData, params);
 
 	const geometry = new THREE.BufferGeometry();
 	geometry.setAttribute("position", new THREE.BufferAttribute(solved.vertices, 3));
@@ -338,24 +338,9 @@ function buildCharacter(pack, params, pose) {
 		headBone.scale.setScalar(headScale);
 	}
 
-	// Grosor de extremidades: se escala SOLO el hueso raíz del miembro. Si se
-	// escala cada hueso, el factor se acumula por jerarquía (x2 en brazo, x4 en
-	// antebrazo, x8 en mano) y el miembro explota. Los hijos compensan su
-	// posición para que el escalado del padre no alargue el miembro.
-	const thickenLimb = (root, children, v) => {
-		const f = 1 + ((v ?? 0.5) - 0.5) * 0.3;
-		const bone = byName[root];
-		if (!bone || Math.abs(f - 1) < 0.001) return;
-		bone.scale.set(f, 1, f);
-		for (const n of children) {
-			const child = byName[n];
-			if (child) child.position.multiplyScalar(1 / f);
-		}
-	};
-	for (const side of ["l", "r"]) {
-		thickenLimb("upperarm_" + side, ["lowerarm_" + side, "hand_" + side], d.armThickness);
-		thickenLimb("thigh_" + side, ["calf_" + side, "foot_" + side, "ball_" + side], d.legThickness);
-	}
+	// El grosor ya viene de los targets por región (buildCustomMorphs), que
+	// desplazan los vértices en torno al eje real de cada hueso sin escalar la
+	// jerarquía ni recortar el miembro.
 
 	const genitals = new THREE.Group();
 	if (params.genitalMeshes) {
