@@ -2044,7 +2044,7 @@ app.registerExtension({
 			// Solo cuentan el calco base o las capas de calco (no el trazo) y
 			// solo las visibles: selectedLayers ya filtra por visibilidad.
 			const keys = selectedLayers(node).filter(
-				(k) => k === "underlay" || String(k).startsWith("L:"),
+				(k) => k === "underlay" || String(k).startsWith("L:") || String(k).startsWith("M:"),
 			);
 			if (!keys.length) {
 				alert("[Mika] Seleccioná una o más capas de calco para pasarlas a lineart.");
@@ -2074,6 +2074,7 @@ app.registerExtension({
 			} finally {
 				st.lineartBusy = false;
 				refreshUI(node);
+				window.__boltDone = true;
 			}
 		}
 
