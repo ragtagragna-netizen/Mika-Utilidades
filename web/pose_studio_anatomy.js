@@ -9,10 +9,11 @@
 export const ANATOMY_KEYS = [
 	"height", "bust", "firmness", "waist", "hips", "glutes",
 	"armLength", "legLength", "armThickness", "thighThickness",
-	"calfThickness", "handGrip",
+	"calfThickness", "handGripL", "handGripR",
 	"handRotX", "handRotY", "handRotZ",
 	"footRotX", "footRotY", "footRotZ",
 	"headSize", "genitalSize", "openingSize", "anusSize",
+	"penisLength", "penisGirth", "penisRotX", "penisRotY", "penisRotZ",
 ];
 
 export const BODY_PRESETS = {
@@ -20,27 +21,35 @@ export const BODY_PRESETS = {
 		gender: 0, height: 0.55, bust: 0.82, firmness: 0.5, waist: 0.3,
 		hips: 0.85, glutes: 0.8, armLength: 0.5, legLength: 0.55,
 		armThickness: 0.45, thighThickness: 0.5, calfThickness: 0.5,
-		handGrip: 0.5,
+		handGripL: 0.5, handGripR: 0.5,
 		handRotX: 0, handRotY: 0, handRotZ: 0,
 		footRotX: 0, footRotY: 0, footRotZ: 0,
 		headSize: 0.45,
 		genitalSize: 0.5, openingSize: 0.5, anusSize: 0.5,
+		penisLength: 0.5, penisGirth: 0.5,
+		penisRotX: 0, penisRotY: 0, penisRotZ: 0,
 	},
 	muscular_male: {
 		gender: 1, height: 0.72, bust: 0.45, firmness: 0.7, waist: 0.55,
 		hips: 0.4, glutes: 0.55, armLength: 0.7, legLength: 0.65,
-		armThickness: 0.75, thighThickness: 0.7, calfThickness: 0.65, handGrip: 0.5,
+		armThickness: 0.75, thighThickness: 0.7, calfThickness: 0.65,
+		handGripL: 0.5, handGripR: 0.5,
 		handRotX: 0, handRotY: 0, handRotZ: 0,
 		footRotX: 0, footRotY: 0, footRotZ: 0, headSize: 0.5,
 		genitalSize: 0.6, openingSize: 0.5, anusSize: 0.5,
+		penisLength: 0.6, penisGirth: 0.55,
+		penisRotX: 0, penisRotY: 0, penisRotZ: 0,
 	},
 	slim_female: {
 		gender: 0, height: 0.65, bust: 0.35, firmness: 0.45, waist: 0.2,
 		hips: 0.35, glutes: 0.3, armLength: 0.6, legLength: 0.7,
-		armThickness: 0.35, thighThickness: 0.35, calfThickness: 0.35, handGrip: 0.5,
+		armThickness: 0.35, thighThickness: 0.35, calfThickness: 0.35,
+		handGripL: 0.5, handGripR: 0.5,
 		handRotX: 0, handRotY: 0, handRotZ: 0,
 		footRotX: 0, footRotY: 0, footRotZ: 0, headSize: 0.5,
 		genitalSize: 0.45, openingSize: 0.45, anusSize: 0.45,
+		penisLength: 0.5, penisGirth: 0.5,
+		penisRotX: 0, penisRotY: 0, penisRotZ: 0,
 	},
 };
 
@@ -61,10 +70,10 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 	if (anatomy.height !== undefined) a.height = clamp01(anatomy.height);
 	if (anatomy.bust !== undefined) a.breast_size = clamp01(anatomy.bust);
 	if (anatomy.firmness !== undefined) a.firmness = clamp01(anatomy.firmness);
-	if (anatomy.genitalSize !== undefined) {
-		a.penis_len = clamp01(anatomy.genitalSize);
-		a.penis_circ = clamp01(anatomy.genitalSize);
-	}
+	// Largo y grosor del pene son morfs nativos independientes; genitalSize
+	// sigue controlando el volumen de las piezas procedurales femeninas.
+	if (anatomy.penisLength !== undefined) a.penis_len = clamp01(anatomy.penisLength);
+	if (anatomy.penisGirth !== undefined) a.penis_circ = clamp01(anatomy.penisGirth);
 	a.show_genitals = nsfw && !female;
 
 	const size = (key) => clampSize(anatomy[key] ?? 0.5);
@@ -77,9 +86,15 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 		armThickness: size("armThickness"),
 		thighThickness: size("thighThickness"),
 		calfThickness: size("calfThickness"),
-		handGrip: size("handGrip"),
+		handGripL: size("handGripL"),
+		handGripR: size("handGripR"),
 		genitalSize: size("genitalSize"),
 		height: size("height"),
+		// El pene gira alrededor de su ancla en la entrepierna, como un hueso:
+		// son ángulos (grados), no desplazamientos, y no van por clampSize.
+		penisRotX: Number(anatomy.penisRotX ?? 0),
+		penisRotY: Number(anatomy.penisRotY ?? 0),
+		penisRotZ: Number(anatomy.penisRotZ ?? 0),
 	};
 
 	return {

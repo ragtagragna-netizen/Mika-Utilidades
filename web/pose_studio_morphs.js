@@ -50,7 +50,7 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const gluteZ = -0.025 * span;
 
 	const keys = ["waist", "hips", "glutes", "bust", "arm", "thigh", "calf",
-		"armLength", "legLength", "pubis", "height"];
+		"armLength", "legLength", "pubis", "height", "penisRot"];
 	const targets = {};
 	for (const k of keys) targets[k] = new Float32Array(verts.length);
 	const delta = (k, i, x, y, z) => {
@@ -61,6 +61,9 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	};
 
 	const d = params.localDeform || {};
+	const rotX = (d.penisRotX ?? 0) * Math.PI / 180;
+	const rotY = (d.penisRotY ?? 0) * Math.PI / 180;
+	const rotZ = (d.penisRotZ ?? 0) * Math.PI / 180;
 	const fWaist = 1 + (0.5 - (d.waist ?? 0.5)) * 0.45;
 	const fHips = 1 + ((d.hips ?? 0.5) - 0.5) * 0.4;
 	const fGlute = 1 + ((d.glutes ?? 0.5) - 0.5) * 0.85;
@@ -111,6 +114,16 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 				// controla el target de glúteos, no este.
 				delta("hips", i, x * (fHips - 1) * fall, 0,
 					z * (fHips - 1) * 0.4 * fall);
+			}
+
+			// La cadera no termina en un óvalo: el ensanchamiento se reparte
+			// por el muslo alto y se desvanece antes de la rodilla, para que la
+			// siluera siga la forma del hueso en vez de una campana aislada.
+			if (C.thigh.includes(name) && t > 0.34 && t < 0.56 && fHips !== 1) {
+				const fall = smooth((t - 0.34) / 0.1) * smooth((0.56 - t) / 0.1) * w;
+				delta("hips", i,
+					x * (fHips - 1) * 0.65 * fall, 0,
+					z * (fHips - 1) * 0.22 * fall);
 			}
 
 			if (C.bust.includes(name) && z > 0.1 && t > 0.62 && t < 0.86 && fBust !== 1) {
@@ -227,6 +240,47 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 		}
 
 		if (fHeight !== 1) delta("height", i, 0, (y - minY) * (fHeight - 1), 0);
+	}
+
+	// El pene gira alrededor de su ancla en la entrepierna, como un hueso: la
+	// raíz (vértice más peso del pelvis) se queda fija y el resto oscila.
+	// Es un componente separado, así que no se arrastra el bajo vientre.
+	if ((rotX || rotY || rotZ) && pack.genitalIndices?.length) {
+		const pelvisIdx = names.indexOf("pelvis");
+		const gset = new Set(pack.genitalIndices);
+		let ax = 0, ay = pubisY, az = 0, best = -1;
+		for (const gi of gset) {
+			let wp = 0;
+			const o = gi * 4;
+			for (let k = 0; k < 4; k++) {
+				if (skin[o + k] === pelvisIdx) wp += weights[o + k];
+			}
+			if (wp > best) {
+				best = wp;
+				ax = verts[gi * 3];
+				ay = verts[gi * 3 + 1];
+				az = verts[gi * 3 + 2];
+			}
+		}
+		const cx = Math.cos(rotX), sx = Math.sin(rotX);
+		const cy = Math.cos(rotY), sy = Math.sin(rotY);
+		const cz = Math.cos(rotZ), sz = Math.sin(rotZ);
+		const pivot = (x, y, z) => {
+			let ny = y * cx - z * sx, nz = y * sx + z * cx;
+			y = ny; z = nz;
+			let nx2 = x * cy + z * sy; nz = -x * sy + z * cy;
+			x = nx2;
+			const nx3 = x * cz - y * sz; ny = x * sz + y * cz;
+			return [nx3, ny, nz];
+		};
+		for (const gi of gset) {
+			const i = gi * 3;
+			const r = pivot(verts[i] - ax, verts[i + 1] - ay, verts[i + 2] - az);
+			delta("penisRot", i,
+				r[0] - (verts[i] - ax),
+				r[1] - (verts[i + 1] - ay),
+				r[2] - (verts[i + 2] - az));
+		}
 	}
 
 	// Un target neutro no deforma: se descarta para no gastar slots de morph.

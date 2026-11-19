@@ -25,6 +25,9 @@ const OUTLINE_COLOR = 0x111111;
 // morph que daba un cuerpo plano y sin pecho.
 const DEFAULT_ANATOMY = {
 	gender: 0, bust: 0.75, waist: 0.35, hips: 0.65, glutes: 0.6, headSize: 0.45,
+	handGripL: 0.5, handGripR: 0.5,
+	penisLength: 0.5, penisGirth: 0.5,
+	penisRotX: 0, penisRotY: 0, penisRotZ: 0,
 };
 
 // Huesos que maneja la anatomía (rotación de muñecas/tobillos y cierre de
@@ -33,7 +36,9 @@ const DEFAULT_ANATOMY = {
 // cierra articulando huesos, no curvando vértices.
 const FINGERS = ["index", "middle", "ring", "pinky", "thumb"];
 const PHALANGES = ["01", "02", "03"];
-const PROCEDURAL_BONES = new Set(["hand_l", "hand_r", "foot_l", "foot_r"]);
+const PROCEDURAL_BONES = new Set([
+	"hand_l", "hand_r", "foot_l", "foot_r", "penis", "penis_tip",
+]);
 for (const finger of FINGERS) {
 	for (const ph of PHALANGES) {
 		PROCEDURAL_BONES.add(`${finger}_${ph}_l`);
@@ -151,7 +156,12 @@ function stateOf(node) {
 	}
 	if (!Array.isArray(st.slots) || !st.slots.length) st.slots = [defaultSlot()];
 	for (const slot of st.slots) {
+		const oldGrip = slot.anatomy?.handGrip;
 		slot.anatomy = { ...DEFAULT_ANATOMY, ...(slot.anatomy || {}) };
+		if (oldGrip !== undefined) {
+			slot.anatomy.handGripL = oldGrip;
+			slot.anatomy.handGripR = oldGrip;
+		}
 		slot.pose ||= {};
 		if (!Array.isArray(slot.offset) || slot.offset.length !== 2) slot.offset = [0, 0];
 		if (typeof slot.rotationY !== "number") slot.rotationY = 0;
@@ -333,6 +343,65 @@ function buildCharacter(pack, params, pose) {
 	mesh.bind(skeleton);
 	outline.bind(skeleton);
 
+	// El pene no tiene hueso en el pack: se crea un hueso de pivote en la
+	// entrepierna (el vértice con más peso del pelvis) y un tirador hijo en la
+	// punta. No deforma la malla por skin; la rotación la aplica el target
+	// penisRot, y estos huesos solo marcan el ancla y el asa del tirador.
+	if (solved.includeGenitals && byName.pelvis && pack.genitalIndices?.length) {
+		const vpos = geometry.attributes.position.array;
+		const sk = staticData.skinIndices;
+		const sw = staticData.skinWeights;
+		const pelvisIdx = pack.bones.findIndex((b) => b.name === "pelvis");
+		const seen = new Set(pack.genitalIndices);
+		let ax = 0, ay = height.minY + heightUnits * 0.53, az = 0, best = -1;
+		let tx = 0, ty = ay, tz = 0, far = -1;
+		for (const gi of seen) {
+			const o = gi * 4;
+			let wp = 0;
+			for (let k = 0; k < 4; k++) {
+				if (sk[o + k] === pelvisIdx) wp += sw[o + k];
+			}
+			if (wp > best) {
+				best = wp;
+				ax = vpos[gi * 3];
+				ay = vpos[gi * 3 + 1];
+				az = vpos[gi * 3 + 2];
+			}
+		}
+		for (const gi of seen) {
+			const dx = vpos[gi * 3] - ax;
+			const dy = vpos[gi * 3 + 1] - ay;
+			const dz = vpos[gi * 3 + 2] - az;
+			const d2 = dx * dx + dy * dy + dz * dz;
+			if (d2 > far) {
+				far = d2;
+				tx = vpos[gi * 3];
+				ty = vpos[gi * 3 + 1];
+				tz = vpos[gi * 3 + 2];
+			}
+		}
+		const pivot = new THREE.Bone();
+		pivot.name = "penis";
+		byName.pelvis.add(pivot);
+		pivot.position.set(
+			ax - solved.bonePositions[pelvisIdx * 6],
+			ay - solved.bonePositions[pelvisIdx * 6 + 1],
+			az - solved.bonePositions[pelvisIdx * 6 + 2],
+		);
+		const d0 = params.localDeform || {};
+		pivot.quaternion.setFromEuler(new THREE.Euler(
+			(d0.penisRotX ?? 0) * Math.PI / 180,
+			(d0.penisRotY ?? 0) * Math.PI / 180,
+			(d0.penisRotZ ?? 0) * Math.PI / 180, "XYZ"));
+		const tip = new THREE.Bone();
+		tip.name = "penis_tip";
+		pivot.add(tip);
+		tip.position.set(tx - ax, ty - ay, tz - az);
+		byName.penis = pivot;
+		byName.penis_tip = tip;
+		bones.push(pivot, tip);
+	}
+
 	// El largo de brazos y piernas ya lo hace un target de estiramiento en
 	// buildCustomMorphs: escalar posiciones de huesos después del bind no era
 	// visible y rompía los pivotes al doblar las articulaciones.
@@ -438,6 +507,7 @@ const HANDLE_BONES = [
 	"clavicle_l", "clavicle_r", "upperarm_l", "upperarm_r",
 	"lowerarm_l", "lowerarm_r", "hand_l", "hand_r",
 	"thigh_l", "thigh_r", "calf_l", "calf_r", "foot_l", "foot_r",
+	"penis_tip",
 ];
 
 function fitCamera(camera, orbit, box, margin = 1.22) {
@@ -613,6 +683,7 @@ function sliderRow(panel, label, key, state, onInput) {
 		gender: [0, 1], posX: [-8, 8], posY: [-3, 3], rotationY: [-180, 180],
 		handRotX: [-180, 180], handRotY: [-180, 180], handRotZ: [-180, 180],
 		footRotX: [-180, 180], footRotY: [-180, 180], footRotZ: [-180, 180],
+		penisRotX: [-180, 180], penisRotY: [-180, 180], penisRotZ: [-180, 180],
 	};
 	const [mn, mx] = RANGES[key] || [-1, 2.5];
 	input.min = String(mn);
@@ -815,29 +886,29 @@ export async function openPoseStudio3D(node) {
 			rotatePair("foot", anatomy.footRotX ?? 0,
 				anatomy.footRotY ?? oldFoot, anatomy.footRotZ ?? 0);
 
-			// Cerrar/abrir la mano articulando las falanges reales del asset.
-			// -1 = abierta, 0.5 = reposo, 2.5 = puño. El eje X local flexionan
-			// los dedos (apuntan en +Z); el pulgar se mueve menos y con otro eje.
-			const grip = anatomy.handGrip ?? 0.5;
-			const curl = Math.max(-12, Math.min(105, (grip - 0.5) * 55));
-			if (Math.abs(curl) > 0.1) {
-				const xAxis = new THREE.Vector3(1, 0, 0);
-				const yAxis = new THREE.Vector3(0, 1, 0);
-				const q = new THREE.Quaternion();
-				const factors = { "01": 1, "02": 0.85, "03": 0.6 };
+			// Cerrar/abrir cada mano por separado, articulando las falanges
+			// reales del asset. -1 = abierta, 0.5 = reposo, 2.5 = puño.
+			// El eje X local flexionan los dedos (apuntan en +Z); el pulgar se
+			// mueve menos y con otro eje.
+			const xAxis = new THREE.Vector3(1, 0, 0);
+			const yAxis = new THREE.Vector3(0, 1, 0);
+			const q = new THREE.Quaternion();
+			const factors = { "01": 1, "02": 0.85, "03": 0.6 };
+			for (const [side, key] of [["l", "handGripL"], ["r", "handGripR"]]) {
+				const grip = anatomy[key] ?? anatomy.handGrip ?? 0.5;
+				const curl = Math.max(-12, Math.min(105, (grip - 0.5) * 55));
+				if (Math.abs(curl) < 0.1) continue;
 				for (const finger of FINGERS) {
-					for (const side of ["l", "r"]) {
-						for (const ph of PHALANGES) {
-							const bone = built.byName[`${finger}_${ph}_${side}`];
-							if (!bone) continue;
-							const deg = finger === "thumb"
-								? curl * 0.5
-								: curl * factors[ph];
-							q.setFromAxisAngle(
-								finger === "thumb" ? yAxis : xAxis,
-								deg * Math.PI / 180);
-							bone.quaternion.multiply(q);
-						}
+					for (const ph of PHALANGES) {
+						const bone = built.byName[`${finger}_${ph}_${side}`];
+						if (!bone) continue;
+						const deg = finger === "thumb"
+							? curl * 0.5
+							: curl * factors[ph];
+						q.setFromAxisAngle(
+							finger === "thumb" ? yAxis : xAxis,
+							deg * Math.PI / 180);
+						bone.quaternion.multiply(q);
 					}
 				}
 			}
@@ -957,7 +1028,8 @@ export async function openPoseStudio3D(node) {
 		["armThickness", "Grosor brazos"],
 		["thighThickness", "Grosor muslos"],
 		["calfThickness", "Grosor pantorrillas"],
-		["handGrip", "Abrir/cerrar manos", "De -1 (mano abierta) a 2.5 (puño cerrado)"],
+		["handGripL", "Abrir mano izq.", "Mano izquierda: -1 abierta, 0.5 reposo, 2.5 puño"],
+		["handGripR", "Abrir mano der.", "Mano derecha: -1 abierta, 0.5 reposo, 2.5 puño"],
 		["handRotX", "Rotar mano X", "Inclinación de muñeca, -180°…180°"],
 		["handRotY", "Rotar mano Y", "Giro de muñeca, -180°…180°"],
 		["handRotZ", "Rotar mano Z", "Pivotar muñeca, -180°…180°"],
@@ -966,6 +1038,11 @@ export async function openPoseStudio3D(node) {
 		["footRotZ", "Rotar pie Z", "Inversión / eversión, -180°…180°"],
 		["headSize", "Cabeza"],
 		["genitalSize", "Genitales"],
+		["penisLength", "Largo pene", "Morf nativo de longitud, activo en modo NSFW masculino"],
+		["penisGirth", "Grosor pene", "Morf nativo de circunferencia, activo en modo NSFW masculino"],
+		["penisRotX", "Pivote pene X", "Ángulo alrededor de la entrepierna; arrastra el tirador de la punta"],
+		["penisRotY", "Pivote pene Y", "Ángulo alrededor de la entrepierna; arrastra el tirador de la punta"],
+		["penisRotZ", "Pivote pene Z", "Ángulo alrededor de la entrepierna"],
 		["openingSize", "Abertura"],
 		["anusSize", "Ano"],
 		["posX", "Pos X", "Desplazamiento horizontal en unidades del mundo"],
@@ -985,7 +1062,11 @@ export async function openPoseStudio3D(node) {
 				posX: slot.offset?.[0] ?? 0,
 				posY: slot.offset?.[1] ?? 0,
 				rotationY: Math.round((slot.rotationY || 0) * 180 / Math.PI),
-				handGrip: slot.anatomy?.handGrip ?? 0.5,
+				handGripL: slot.anatomy?.handGripL ?? slot.anatomy?.handGrip ?? 0.5,
+				handGripR: slot.anatomy?.handGripR ?? slot.anatomy?.handGrip ?? 0.5,
+				penisRotX: slot.anatomy?.penisRotX ?? 0,
+				penisRotY: slot.anatomy?.penisRotY ?? 0,
+				penisRotZ: slot.anatomy?.penisRotZ ?? 0,
 				handRotX: slot.anatomy?.handRotX ?? 0,
 				handRotY: slot.anatomy?.handRotY ?? 0,
 				handRotZ: slot.anatomy?.handRotZ ?? 0,
@@ -1105,7 +1186,7 @@ export async function openPoseStudio3D(node) {
 	reset.onclick = () => {
 		const slot = activeSlot(stateOf(node));
 		for (const k of Object.keys(slot.anatomy)) {
-			slot.anatomy[k] = /^(hand|foot)Rot[XYZ]$/.test(k) ? 0 : 0.5;
+			slot.anatomy[k] = /^(hand|foot|penis)Rot[XYZ]$/.test(k) ? 0 : 0.5;
 		}
 		slot.anatomy.gender = 0.5;
 		slot.pose = {};
@@ -1218,11 +1299,21 @@ export async function openPoseStudio3D(node) {
 		const world = new THREE.Vector3();
 		bone.getWorldPosition(world);
 		const normal = camera.getWorldDirection(new THREE.Vector3());
+		const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, world);
 		state.drag = {
-			handle: hit, bone, parent,
-			plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, world),
+			handle: hit, bone, parent, plane,
 			offset: world.clone(),
+			start: pointerOnPlane(event, plane),
 		};
+		if (bone.name === "penis_tip") {
+			const slot = activeSlot(stateOf(node));
+			state.drag.penis = {
+				base: [slot.anatomy.penisRotX || 0,
+					slot.anatomy.penisRotY || 0,
+					slot.anatomy.penisRotZ || 0],
+				sx: event.clientX, sy: event.clientY,
+			};
+		}
 		hit.mesh.material = hit.matActive;
 		orbit.enabled = false;
 		ui.canvas.setPointerCapture(event.pointerId);
@@ -1252,6 +1343,24 @@ export async function openPoseStudio3D(node) {
 		raycaster.setFromCamera(pointer, camera);
 		const target = new THREE.Vector3();
 		if (!raycaster.ray.intersectPlane(state.drag.plane, target)) return;
+
+		if (state.drag.penis) {
+			// El tirador gira alrededor del ancla: mover el ratón cambia los
+			// ángulos, nunca traslada el miembro. La raíz queda fija.
+			const drag = state.drag.penis;
+			// save() reemplaza node.properties con una copia: hay que tomar la
+			// ranura actual en cada paso o las actualizaciones van a un objeto
+			// huérfano y el arrastre solo registra el primer movimiento.
+			const a = activeSlot(stateOf(node)).anatomy;
+			const deg = (v) => Math.max(-180, Math.min(180, v));
+			a.penisRotY = deg(drag.base[1] + (event.clientX - drag.sx) * 0.5);
+			a.penisRotX = deg(drag.base[0] - (event.clientY - drag.sy) * 0.5);
+			a.penisRotZ = drag.base[2];
+			state.save();
+			queueRebuild();
+			requestRender();
+			return;
+		}
 
 		const { bone, parent } = state.drag;
 		const pivot = new THREE.Vector3();
