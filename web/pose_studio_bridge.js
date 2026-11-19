@@ -216,6 +216,18 @@ function buildCharacter(pack, params, pose) {
 	const height = boundsY(solved.vertices);
 	const heightUnits = Math.max(0.001, height.maxY - height.minY);
 
+	// solveMorph calcula las posiciones de huesos antes de nuestra deformación
+	// de vértices: si la altura se estira fuera de 0..1 hay aplicar el mismo
+	// escalado desde los pies, o los pivotes de pose quedan desalineados.
+	const hd = params.localDeform?.height ?? 0.5;
+	const hStretch = hd < 0 || hd > 1 ? 1 + (hd - 0.5) * 0.6 : 1;
+	if (hStretch !== 1) {
+		for (let i = 0; i < solved.bonePositions.length; i += 6) {
+			solved.bonePositions[i + 1] = height.minY + (solved.bonePositions[i + 1] - height.minY) * hStretch;
+			solved.bonePositions[i + 4] = height.minY + (solved.bonePositions[i + 4] - height.minY) * hStretch;
+		}
+	}
+
 	const bodyMaterial = new THREE.MeshBasicMaterial({
 		color: BODY_COLOR, side: THREE.DoubleSide,
 	});
@@ -303,9 +315,11 @@ function buildCharacter(pack, params, pose) {
 		if (!Number.isFinite(backZ)) backZ = -heightUnits * 0.06;
 		const unit = heightUnits * 0.012;
 		const add = (name, size, y, z, sx, sy, color = OUTLINE_COLOR) => {
-			if (!size) return;
+			// Un slider en -1 deja un tamaño negativo: sin esto se crea una
+			// esfera de radio negativo (malla degenerada).
+			if (!(size > 0)) return;
 			const m = new THREE.Mesh(
-				new THREE.SphereGeometry(unit * (0.6 + size), 12, 10),
+				new THREE.SphereGeometry(unit * Math.max(0.15, 0.6 + size), 12, 10),
 				new THREE.MeshBasicMaterial({ color }),
 			);
 			m.name = name;
@@ -328,6 +342,11 @@ function buildCharacter(pack, params, pose) {
 		add("opening", params.genitalMeshes.opening, pelvisY - unit * 0.9, frontZ + unit * 0.5, 0.6, 0.5);
 		add("anus", params.genitalMeshes.anus, pelvisY - unit * 2.2, backZ - unit * 0.3, 1, 1);
 	}
+	// El morph de pene termina en 1; el excedente del slider se aplica aquí.
+	const maleSurplus = params.localDeform?.genitalSize > 1
+		? 1 + (params.localDeform.genitalSize - 1) * 0.6
+		: 1;
+	if (maleSurplus !== 1) genitals.scale.setScalar(maleSurplus);
 	group.add(genitals);
 
 	return {
@@ -570,6 +589,16 @@ export async function openPoseStudio3D(node) {
 	const raycaster = new THREE.Raycaster();
 	const pointer = new THREE.Vector2();
 
+	// Se crean una vez por estudio: rebuild() corre en cada frame mientras se
+	// arrastra un slider, y crear geometría/materiales allí fugaba recursos.
+	const handleGeo = new THREE.SphereGeometry(0.16, 10, 8);
+	const handleMat = new THREE.MeshBasicMaterial({
+		color: 0x1e88e5, depthTest: false, depthWrite: false, transparent: true,
+	});
+	const handleMatActive = new THREE.MeshBasicMaterial({
+		color: 0xff7043, depthTest: false, depthWrite: false, transparent: true,
+	});
+
 	const state = {
 		node, ui, renderer, scene, camera, orbit,
 		charactersGroup, handlesGroup, characters: [], handles: [], params: null,
@@ -587,6 +616,7 @@ export async function openPoseStudio3D(node) {
 					state.selectionVolume.material.dispose();
 				}
 			} catch (e) { /* no-op */ }
+			try { handleGeo.dispose(); handleMat.dispose(); handleMatActive.dispose(); } catch (e) { /* no-op */ }
 			try { orbit.dispose(); } catch (e) { /* no-op */ }
 			try { renderer.dispose(); } catch (e) { /* no-op */ }
 			ui.root.remove();
@@ -705,13 +735,6 @@ export async function openPoseStudio3D(node) {
 			fitCamera(camera, orbit, sceneBox(scene));
 		}
 
-		const handleGeo = new THREE.SphereGeometry(0.16, 10, 8);
-		const handleMat = new THREE.MeshBasicMaterial({
-			color: 0x1e88e5, depthTest: false, depthWrite: false, transparent: true,
-		});
-		const handleMatActive = new THREE.MeshBasicMaterial({
-			color: 0xff7043, depthTest: false, depthWrite: false, transparent: true,
-		});
 		// Solo el personaje seleccionado expone tiradores: con 4 personajes
 		// serían 80 esferas solapadas y seleccionar se volvería imposible.
 		const activeModel = state.characters[st.selected] || state.characters[0];
@@ -945,8 +968,10 @@ export async function openPoseStudio3D(node) {
 	};
 	reset.onclick = () => {
 		for (const slot of stateOf(node).slots) slot.pose = {};
-		state.save();
+		// Primero se reconstruye: save() captura las rotaciones de las mallas
+		// vivas, así que si se guarda antes se reescriben las poses antiguas.
 		rebuild();
+		state.save();
 	};
 	mover.onclick = () => {
 		state.moveMode = !state.moveMode;
@@ -1135,9 +1160,9 @@ export async function openPoseStudio3D(node) {
 		const prevHandles = handlesGroup.visible;
 		const prevSelection = state.selectionVolume?.visible ?? false;
 
+		state.lastCaptureSelectionVisible = state.selectionVolume?.visible ?? false;
 		handlesGroup.visible = false;
 		if (state.selectionVolume) state.selectionVolume.visible = false;
-		state.lastCaptureSelectionVisible = state.selectionVolume?.visible ?? false;
 		renderer.setSize(width, height, false);
 		camera.aspect = width / height;
 		camera.updateProjectionMatrix();

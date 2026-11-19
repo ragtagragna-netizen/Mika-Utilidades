@@ -107,7 +107,7 @@ export function deformVertices(vertices, bounds, deform, metrics = {}) {
 		const glutes = gaussian(t, 0.44, 0.04) * ((deform.glutes ?? 0.5) - 0.5) * back;
 		const pubis = gaussian(t, 0.40, 0.04) * ((deform.genitalSize ?? 0.5) - 0.5) * front * 0.7;
 		const chest = gaussian(t, 0.66, 0.035) * (bustExtra * 0.5 + firmExtra * 0.3) * front;
-		const k = Math.max(0.1, 1 + waist + hips + glutes + pubis + chest);
+		const k = Math.max(0.5, 1 + waist + hips + glutes + pubis + chest);
 		vertices[i] *= k;
 		vertices[i + 2] *= k;
 		if (heightStretch !== 1) vertices[i + 1] = minY + (y - minY) * heightStretch;
