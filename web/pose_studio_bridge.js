@@ -77,24 +77,81 @@ function getPack() {
 	return packPromise;
 }
 
+function cloneSlot(slot) {
+	return JSON.parse(JSON.stringify(slot || {}));
+}
+
+function defaultSlot(anatomy, nsfw) {
+	return {
+		anatomy: { ...DEFAULT_ANATOMY, ...(anatomy || {}) },
+		preset: null,
+		pose: {},
+		offset: [0, 0],
+		rotationY: 0,
+		nsfw: !!nsfw,
+	};
+}
+
+function ensureSlots(st, count) {
+	const n = Math.max(1, Math.min(4, count));
+	while (st.slots.length < n) {
+		st.slots.push(cloneSlot(st.slots[st.slots.length - 1] || st.slots[0]));
+	}
+	if (st.slots.length > n) st.slots.length = n;
+	st.characters = n;
+	st.selected = Math.max(0, Math.min(n - 1, st.selected || 0));
+	return st.slots;
+}
+
 function stateOf(node) {
-	if (!node) return { anatomy: {}, preset: null, characters: 1 };
+	if (!node) {
+		return { version: 2, nsfw: false, characters: 1, selected: 0, slots: [defaultSlot()] };
+	}
 	if (!node.properties) node.properties = {};
 	if (!node.properties.mikaPoseStudio3D) {
 		node.properties.mikaPoseStudio3D = {
-			anatomy: {}, preset: null, characters: 1, nsfw: false, poses: [],
+			version: 2, nsfw: false, characters: 1, selected: 0,
+			slots: [defaultSlot()],
 		};
 	}
 	const st = node.properties.mikaPoseStudio3D;
-	// Los valores ausentes toman el perfil femenino; los guardados mandan.
-	st.anatomy = { ...DEFAULT_ANATOMY, ...(st.anatomy || {}) };
-	st.poses ||= [];
+	if (st.version !== 2) {
+		// v1 guardaba una anatomía global y un array de poses. Cada ranura
+		// heredaba esa anatomía para que un workflow con varios personajes no
+		// cambie de cuerpo al abrirse por primera vez.
+		const legacy = { ...DEFAULT_ANATOMY, ...(st.anatomy || {}) };
+		const nsfw = st.nsfw === true;
+		const count = Math.max(1, Math.min(4, Number(st.characters) || 1));
+		const poses = Array.isArray(st.poses) ? st.poses : [];
+		st.slots = Array.from({ length: count }, (_, i) => {
+			const slot = defaultSlot(legacy, nsfw);
+			slot.pose = poses[i] ? JSON.parse(JSON.stringify(poses[i])) : {};
+			if (i === 0) slot.preset = st.preset || null;
+			return slot;
+		});
+		st.selected = 0;
+		st.nsfw = nsfw;
+		st.characters = count;
+		st.version = 2;
+	}
+	if (!Array.isArray(st.slots) || !st.slots.length) st.slots = [defaultSlot()];
+	for (const slot of st.slots) {
+		slot.anatomy = { ...DEFAULT_ANATOMY, ...(slot.anatomy || {}) };
+		slot.pose ||= {};
+		if (!Array.isArray(slot.offset) || slot.offset.length !== 2) slot.offset = [0, 0];
+		if (typeof slot.rotationY !== "number") slot.rotationY = 0;
+	}
+	st.characters = st.slots.length;
+	st.selected = Math.max(0, Math.min(st.slots.length - 1, Number(st.selected) || 0));
 	return st;
 }
 
-function morphParams(node) {
-	const st = stateOf(node);
-	const anatomy = { ...(st.anatomy || {}), nsfw: st.nsfw === true };
+function activeSlot(st) {
+	return st.slots[st.selected] || st.slots[0];
+}
+
+function morphParams(slot) {
+	const anatomy = { ...(slot.anatomy || {}), nsfw: slot.nsfw === true };
 	return applyAnatomy(anatomy, {
 		gender: 0.5, age: 25, weight: 0.5, muscle: 0.5, height: 0.5,
 		breast_size: 0.5, firmness: 0.5,
@@ -491,7 +548,8 @@ export async function openPoseStudio3D(node) {
 
 	const rebuild = () => {
 		if (!state.pack) return;
-		state.params = morphParams(node);
+		const st0 = stateOf(node);
+		state.params = morphParams(activeSlot(st0));
 		while (charactersGroup.children.length) {
 			const c = charactersGroup.children[0];
 			charactersGroup.remove(c);
@@ -505,12 +563,13 @@ export async function openPoseStudio3D(node) {
 		state.characters = [];
 
 		const st = stateOf(node);
-		const count = Math.max(1, Math.min(4, Number(st.characters) || 1));
+		const count = st.slots.length;
 		__sceneCount = count;
-		const poses = Array.isArray(st.poses) ? st.poses : [];
+		const poses = st.slots.map((slot) => slot.pose || {});
 		const models = [];
 		for (let i = 0; i < count; i++) {
-			models.push(buildCharacter(state.pack, state.params, poses[i]));
+			const params = i === st.selected ? state.params : morphParams(st.slots[i]);
+			models.push(buildCharacter(state.pack, params, poses[i]));
 		}
 
 		// Los personajes no pueden solaparse: el espaciado sale del ancho real
@@ -582,13 +641,17 @@ export async function openPoseStudio3D(node) {
 	state.save = () => {
 		const st = stateOf(node);
 		st.characters = state.characters.length || 1;
-		st.poses = state.characters.map(capturePose);
+		st.slots.forEach((slot, i) => {
+			const c = state.characters[i];
+			if (c) slot.pose = capturePose(c);
+		});
 		node.properties.mikaPoseStudio3D = JSON.parse(JSON.stringify(st));
 	};
 	state.refresh = () => {
 		const st = stateOf(node);
+		const slot = activeSlot(st);
 		for (const input of ui.panel.querySelectorAll("input[type=range]")) {
-			const v = st.anatomy?.[input.dataset.key];
+			const v = slot.anatomy?.[input.dataset.key] ?? slot[input.dataset.key];
 			if (v !== undefined) input.value = String(v);
 		}
 		rebuild();
@@ -620,8 +683,8 @@ export async function openPoseStudio3D(node) {
 
 	const sliderRows = [];
 	for (const [key, label, title] of defs) {
-		const input = sliderRow(grid, label, key, stateOf(node), (k, v) => {
-			stateOf(node).anatomy[k] = v;
+		const input = sliderRow(grid, label, key, activeSlot(stateOf(node)), (k, v) => {
+			activeSlot(stateOf(node)).anatomy[k] = v;
 			state.save();
 			queueRebuild();
 		});
@@ -644,12 +707,12 @@ export async function openPoseStudio3D(node) {
 		b.style.cssText =
 			"padding:3px 8px;border:1px solid #999;border-radius:4px;background:#fff;cursor:pointer;";
 		b.onclick = () => {
-			const st = stateOf(node);
-			st.anatomy = { ...(st.anatomy || {}), ...BODY_PRESETS[id] };
-			st.preset = id;
+			const slot = activeSlot(stateOf(node));
+			slot.anatomy = { ...(slot.anatomy || {}), ...BODY_PRESETS[id] };
+			slot.preset = id;
 			state.save();
 			for (const row of sliderRows) {
-				const v = st.anatomy[row.key];
+				const v = slot.anatomy[row.key];
 				if (v !== undefined) row.input.value = String(v);
 			}
 			queueRebuild();
@@ -679,26 +742,25 @@ export async function openPoseStudio3D(node) {
 	send.style.borderColor = "#1b5e20";
 
 	const syncButtons = () => {
-		sfw.textContent = stateOf(node).nsfw ? "NSFW" : "SFW";
+		sfw.textContent = activeSlot(stateOf(node)).nsfw ? "NSFW" : "SFW";
 		count.textContent = "👥 " + (state.characters.length || 1);
 	};
 	sfw.onclick = () => {
-		stateOf(node).nsfw = !stateOf(node).nsfw;
+		const slot = activeSlot(stateOf(node));
+		slot.nsfw = !slot.nsfw;
 		state.save();
 		rebuild();
 		syncButtons();
 	};
 	count.onclick = () => {
 		const st = stateOf(node);
-		// Antes se guardaba antes de reconstruir: save() pisaba el valor nuevo
-		// con el número de personajes antiguo y el botón nunca cambiaba nada.
-		st.characters = ((Number(st.characters) || state.characters.length || 1) % 4) + 1;
+		ensureSlots(st, (st.slots.length % 4) + 1);
 		rebuild();
 		state.save();
 		syncButtons();
 	};
 	reset.onclick = () => {
-		stateOf(node).poses = [];
+		for (const slot of stateOf(node).slots) slot.pose = {};
 		state.save();
 		rebuild();
 	};
@@ -852,6 +914,9 @@ export function __setCaptureForTest(url) { setPoseStudioCapture(url); }
 export function __setSceneForTest(n) { __sceneCount = n; }
 export function __captureSizeForTest(node) { return captureSizeFor(node); }
 export function __activeState() { return active; }
+export function __stateOfForTest(node) { return stateOf(node); }
+export function __activeSlotForTest(node) { return activeSlot(stateOf(node)); }
+export function __ensureSlotsForTest(node, n) { return ensureSlots(stateOf(node), n); }
 
 export async function __captureProbe(w, h) {
 	const url = active?.renderCapture
