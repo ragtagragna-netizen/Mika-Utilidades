@@ -75,7 +75,7 @@ const SOFT_BRUSH_ICON =
 // herramienta, grosores, difuminado, grano, figura, fuente y color de trazo.
 const PINCEL_KEYS = [
 	"tool", "thickness", "eraseThickness", "softThickness", "softBlur", "softGrain",
-	"maskThickness", "calcoOpacity", "mannequinOpacity", "shape", "font", "fontSize", "userColor",
+	"maskThickness", "calcoOpacity", "mannequinOpacity", "mannequinNsfw", "shape", "font", "fontSize", "userColor",
 ];
 
 // Debajo de este arrastre (en píxeles de lienzo) un clic crea la figura con
@@ -1836,6 +1836,104 @@ app.registerExtension({
 			return { parts: [opacity], refresh };
 		}
 
+		// Controles del maniquí seleccionado: género, proporciones y opacidad
+		// propia (independiente del slider del calco).
+		const MANNEQUIN_LABELS = {
+			height: "Altura", bust: "Pecho", waist: "Cintura", hips: "Cadera",
+			glutes: "Glúteos", armLength: "Largo de brazos", legLength: "Largo de piernas",
+			headSize: "Tamaño de cabeza", genitalSize: "Tamaño de genitales",
+			openingSize: "Abertura", anusSize: "Ano",
+		};
+		const INTIMATE = new Set(["genitalSize", "openingSize", "anusSize"]);
+
+		function createMannequinGroup(node) {
+			const st = node._mikaLineart;
+			const wrap = document.createElement("div");
+			wrap.style.display = "flex";
+			wrap.style.flexWrap = "wrap";
+			wrap.style.gap = "4px";
+			wrap.style.alignItems = "center";
+
+			const nsfwBtn = mkButton("SFW", "SFW / NSFW: mostrar u ocultar la anatomía genital");
+			const opacity = document.createElement("input");
+			opacity.type = "range";
+			opacity.min = "0"; opacity.max = "100";
+			opacity.title = "Opacidad del maniquí";
+			opacity.style.width = "60px";
+			const gender = styleInput(document.createElement("select"));
+			gender.title = "Género del maniquí";
+			for (const g of GENDERS) {
+				const o = document.createElement("option");
+				o.value = g;
+				o.textContent = g === "female" ? "Femenino" : "Masculino";
+				gender.appendChild(o);
+			}
+			const sliders = document.createElement("div");
+			sliders.style.display = "flex";
+			sliders.style.flexWrap = "wrap";
+			sliders.style.gap = "4px";
+			wrap.append(nsfwBtn, opacity, gender, sliders);
+
+			const selected = () => {
+				const key = (st.selection || []).find((k) => String(k).startsWith("M:"));
+				return key ? mannequinByKey(node, key) : null;
+			};
+			const commit = () => {
+				writePincelState(node);
+				drawMannequins(node);
+				writeCalco(node);
+				renderLayerPanel(node);
+				node.setDirtyCanvas(true, true);
+			};
+			nsfwBtn.onclick = () => {
+				st.mannequinNsfw = !st.mannequinNsfw;
+				commit();
+				refreshUI(node);
+			};
+			opacity.addEventListener("input", () => {
+				st.mannequinOpacity = parseInt(opacity.value, 10) || 0;
+				applyMannequinOpacity(node);
+				writePincelState(node);
+			});
+			gender.onchange = () => {
+				const m = selected();
+				if (!m) return;
+				applyGender(m, gender.value);
+				commit();
+				refreshUI(node);
+			};
+			const rebuildSliders = () => {
+				sliders.replaceChildren();
+				const m = selected();
+				if (!m) return;
+				for (const key of PROPORTIONS) {
+					if (!st.mannequinNsfw && INTIMATE.has(key)) continue;
+					if (key === "openingSize" && m.gender === "male") continue;
+					const s = document.createElement("input");
+					s.type = "range";
+					s.min = "0.6"; s.max = "1.6"; s.step = "0.05";
+					s.value = String(m.proportions[key]);
+					s.title = MANNEQUIN_LABELS[key] || key;
+					s.style.width = "56px";
+					s.addEventListener("input", () => {
+						setProportion(m, key, parseFloat(s.value));
+						commit();
+					});
+					sliders.appendChild(s);
+				}
+			};
+			const refresh = () => {
+				const m = selected();
+				wrap.style.display = m ? "flex" : "none";
+				nsfwBtn.textContent = st.mannequinNsfw ? "NSFW" : "SFW";
+				opacity.value = String(st.mannequinOpacity ?? 100);
+				gender.value = m ? m.gender : "female";
+				rebuildSliders();
+			};
+			refresh();
+			return { parts: [wrap], refresh };
+		}
+
 		// Tamaño del lienzo (resolución) elegido desde la ventana: escribe el
 		// widget del nodo, así los dos lados comparten el mismo valor.
 		function createSizeGroup(node) {
@@ -2264,6 +2362,7 @@ app.registerExtension({
 			st.layerPanels.push({ el: listEl, mode: "list" });
 
 			addSection("Opacidad del calco", registerUISet(node, createOpacityGroup(node), "window"));
+			addSection("Maniquí", registerUISet(node, createMannequinGroup(node), "window"));
 			addSection("Lineart", registerUISet(node, createLineartGroup(node), "window"));
 
 			const transformSec = addSection("Transformar", registerUISet(node, createTransformGroup(node), "window"));
@@ -4469,6 +4568,8 @@ app.registerExtension({
 			window.__drawMannequins = () => drawMannequins(node);
 			window.__drawHandles = () => { drawTransformUI(node); drawMannequinHandles(node); };
 			window.__writeCalco = () => writeCalco(node);
+			window.__refreshUI = () => refreshUI(node);
+			window.__applyMannequinOpacity = () => applyMannequinOpacity(node);
 
 			// Estado guardado en el workflow (widget oculto "pincel"). Lo de la
 			// sesión (prevState) se aplica después y pisa esto si existe.
@@ -4527,6 +4628,7 @@ app.registerExtension({
 			append(registerUISet(node, createTransformGroup(node)));
 			append(registerUISet(node, createCopyGroup(node)));
 			append(registerUISet(node, createOpacityGroup(node)));
+			append(registerUISet(node, createMannequinGroup(node)));
 			append(registerUISet(node, createMergeGroup(node)));
 			wireDomDrop(node, root);
 			wireCanvasNav(root);
