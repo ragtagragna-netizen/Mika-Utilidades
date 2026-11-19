@@ -30,7 +30,7 @@ function rot(x, y, a) {
 }
 
 const BASE = {
-	female: { shoulder: 26, bust: 21, waist: 15, hips: 25, glute: 22 },
+	female: { shoulder: 25, bust: 23, waist: 13, hips: 28, glute: 24 },
 	male: { shoulder: 34, bust: 17, waist: 19, hips: 21, glute: 19 },
 };
 
@@ -133,17 +133,21 @@ function fillStroke(ctx, width = 2.2) {
 }
 
 // Segmento cónico con contorno (muslo, pantorrilla, brazo, antebrazo).
-function tapered(ctx, a, b, wa, wb) {
+function tapered(ctx, a, b, wa, wb, bulge = 1) {
 	const dx = b[0] - a[0], dy = b[1] - a[1];
 	const len = Math.hypot(dx, dy) || 1;
 	const nx = -dy / len, ny = dx / len;
-	const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
-	const wm = (wa + wb) / 2;
+	const c1x = a[0] + dx * 0.28, c1y = a[1] + dy * 0.28;
+	const c2x = a[0] + dx * 0.72, c2y = a[1] + dy * 0.72;
+	const w1 = (wa * 0.72 + wb * 0.28) * bulge;
+	const w2 = (wa * 0.3 + wb * 0.7) * bulge;
 	ctx.beginPath();
 	ctx.moveTo(a[0] + nx * wa, a[1] + ny * wa);
-	ctx.quadraticCurveTo(mx + nx * wm * 1.08, my + ny * wm * 1.08, b[0] + nx * wb, b[1] + ny * wb);
+	ctx.bezierCurveTo(c1x + nx * w1, c1y + ny * w1, c2x + nx * w2, c2y + ny * w2,
+		b[0] + nx * wb, b[1] + ny * wb);
 	ctx.lineTo(b[0] - nx * wb, b[1] - ny * wb);
-	ctx.quadraticCurveTo(mx - nx * wm * 1.08, my - ny * wm * 1.08, a[0] - nx * wa, a[1] - ny * wa);
+	ctx.bezierCurveTo(c2x - nx * w2, c2y - ny * w2, c1x - nx * w1, c1y - ny * w1,
+		a[0] - nx * wa, a[1] - ny * wa);
 	ctx.closePath();
 	fillStroke(ctx);
 }
@@ -157,7 +161,11 @@ function ellipse(ctx, c, r, stroke = 2.2) {
 function joint(ctx, p, r) {
 	ctx.beginPath();
 	ctx.arc(p[0], p[1], r, 0, Math.PI * 2);
-	fillStroke(ctx, 1.8);
+	ctx.fillStyle = FILL;
+	ctx.fill();
+	ctx.lineWidth = 1.1;
+	ctx.strokeStyle = GUIDE;
+	ctx.stroke();
 }
 
 function guideLine(ctx, a, b) {
@@ -172,7 +180,7 @@ function guideLine(ctx, a, b) {
 function drawHead(ctx, pt) {
 	const [x, y] = pt.head;
 	const r = pt.headRadius;
-	tapered(ctx, pt.neck, [x, y + r * 0.7], 11, 9);
+	tapered(ctx, pt.neck, [x, y + r * 0.7], 13, 10);
 	ellipse(ctx, [x, y], [r * 0.82, r]);
 	guideLine(ctx, [x, y - r + 2], [x, y + r - 2]);
 	ctx.beginPath();
@@ -186,32 +194,33 @@ function drawTorso(ctx, pt, base, m) {
 	const p = m.proportions;
 	const female = m.gender === "female";
 	const sy = pt.shoulderL[1];
-	const sw = base.shoulder * 0.92;
+	const ny = pt.neck[1];
+	const sw = base.shoulder * 0.9;
 	const bust = base.bust * p.bust;
 	const waist = base.waist * p.waist;
 	const hip = base.hips * p.hips;
 	const cy = pt.chest[1], wy = pt.waist[1], hy = pt.pelvis[1];
 
 	ctx.beginPath();
-	ctx.moveTo(-sw, sy);
-	ctx.bezierCurveTo(-sw - 2, sy + 18, -bust - 12, cy - 8, -bust, cy + 2);
-	ctx.bezierCurveTo(-bust + 2, cy + 16, -waist, wy - 16, -waist, wy);
-	ctx.bezierCurveTo(-waist, wy + 18, -hip + 2, hy - 14, -hip, hy);
-	ctx.bezierCurveTo(-hip * 0.55, hy + 16, hip * 0.55, hy + 16, hip, hy);
-	ctx.bezierCurveTo(hip + 2, hy - 14, waist, wy + 18, waist, wy);
-	ctx.bezierCurveTo(waist, wy - 16, bust - 2, cy + 16, bust, cy + 2);
-	ctx.bezierCurveTo(bust + 12, cy - 8, sw + 2, sy + 18, sw, sy);
-	ctx.quadraticCurveTo(0, sy - 12, -sw, sy);
+	ctx.moveTo(-5, ny);
+	ctx.bezierCurveTo(-10, ny + 2, -sw * 0.7, sy - 6, -sw, sy + 4);
+	ctx.bezierCurveTo(-sw - 2, sy + 20, -bust - 6, cy - 10, -bust, cy + 2);
+	ctx.bezierCurveTo(-bust + 1, cy + 18, -waist - 1, wy - 18, -waist, wy);
+	ctx.bezierCurveTo(-waist, wy + 20, -hip + 3, hy - 16, -hip, hy + 2);
+	ctx.bezierCurveTo(-hip * 0.7, hy + 14, hip * 0.7, hy + 14, hip, hy + 2);
+	ctx.bezierCurveTo(hip - 3, hy - 16, waist, wy + 20, waist, wy);
+	ctx.bezierCurveTo(waist + 1, wy - 18, bust - 1, cy + 18, bust, cy + 2);
+	ctx.bezierCurveTo(bust + 6, cy - 10, sw + 2, sy + 20, sw, sy + 4);
+	ctx.bezierCurveTo(sw * 0.7, sy - 6, 10, ny + 2, 5, ny);
 	ctx.closePath();
 	fillStroke(ctx, 2.4);
 
-	guideLine(ctx, [0, sy + 2], [0, hy - 2]);
-	guideLine(ctx, [-waist + 3, wy], [waist - 3, wy]);
+	guideLine(ctx, [0, ny + 4], [0, hy - 4]);
+	guideLine(ctx, [-waist + 2, wy], [waist - 2, wy]);
 
 	if (female) {
-		ellipse(ctx, [-bust * 0.52, cy + 5], [bust * 0.6, bust * 0.5]);
-		ellipse(ctx, [bust * 0.52, cy + 5], [bust * 0.6, bust * 0.5]);
-		ellipse(ctx, [0, hy + 7], [base.glute * p.glutes, 13 * p.glutes]);
+		ellipse(ctx, [-bust * 0.5, cy + 6], [bust * 0.55, bust * 0.46]);
+		ellipse(ctx, [bust * 0.5, cy + 6], [bust * 0.55, bust * 0.46]);
 	} else {
 		guideLine(ctx, [-bust * 0.7, cy + 2], [bust * 0.7, cy + 2]);
 	}
@@ -227,15 +236,15 @@ function drawHand(ctx, wrist, angle, side) {
 	ctx.strokeStyle = LINE;
 	ctx.lineWidth = 1.4;
 	for (let i = 0; i < 4; i++) {
-		const x = -4.5 + i * 3;
+		const x = -3.6 + i * 2.4;
 		ctx.beginPath();
-		ctx.moveTo(x, 16);
-		ctx.lineTo(x, 25 + (i === 1 || i === 2 ? 2 : 0));
+		ctx.moveTo(x, 15);
+		ctx.lineTo(x, 20 + (i === 1 || i === 2 ? 1 : 0));
 		ctx.stroke();
 	}
 	ctx.beginPath();
-	ctx.moveTo(side === "L" ? -6 : 6, 8);
-	ctx.lineTo(side === "L" ? -12 : 12, 16);
+	ctx.moveTo(side === "L" ? -5 : 5, 8);
+	ctx.lineTo(side === "L" ? -9 : 9, 14);
 	ctx.stroke();
 	ctx.restore();
 }
@@ -283,27 +292,26 @@ export function drawMannequin(ctx, m, nsfw = false) {
 	ctx.lineJoin = "round";
 
 	for (const side of ["L", "R"]) {
-		tapered(ctx, pt["hip" + side], pt["knee" + side], 17, 11);
-		tapered(ctx, pt["knee" + side], pt["ankle" + side], 10, 6.5);
+		tapered(ctx, pt["hip" + side], pt["knee" + side], 15.5, 6.5, 1.04);
+		tapered(ctx, pt["knee" + side], pt["ankle" + side], 6.5, 4.8, 1.08);
 		drawFoot(ctx, pt["ankle" + side], side);
 	}
 	for (const side of ["L", "R"]) {
-		tapered(ctx, pt["shoulder" + side], pt["elbow" + side], 11, 8);
-		tapered(ctx, pt["elbow" + side], pt["wrist" + side], 7.5, 5.5);
+		tapered(ctx, pt["shoulder" + side], pt["elbow" + side], 11.5, 7.5, 1.1);
+		tapered(ctx, pt["elbow" + side], pt["wrist" + side], 7, 5, 1.15);
 		drawHand(ctx, pt["wrist" + side], pt["wristAngle" + side], side);
 	}
 
 	drawTorso(ctx, pt, base, m);
 	drawHead(ctx, pt);
 
-	const r = Math.max(3, handleSizeFallback(m) * 0.1);
 	for (const side of ["L", "R"]) {
-		joint(ctx, pt["shoulder" + side], r + 3);
-		joint(ctx, pt["elbow" + side], r + 2);
-		joint(ctx, pt["knee" + side], r + 4);
-		joint(ctx, pt["ankle" + side], r + 2);
+		joint(ctx, pt["shoulder" + side], 3.6);
+		joint(ctx, pt["elbow" + side], 3);
+		joint(ctx, pt["knee" + side], 2);
+		joint(ctx, pt["ankle" + side], 3);
 	}
-	joint(ctx, pt.neck, r + 1);
+	joint(ctx, pt.neck, 2.6);
 
 	if (nsfw) anatomy(ctx, m, m.proportions, pt);
 	ctx.restore();
