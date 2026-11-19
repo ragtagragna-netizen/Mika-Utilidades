@@ -9480,10 +9480,39 @@ class ImageSaverPcMika:
 
 
 # ======================================================================
+# Pose Studio 3D — stub minimo para que el frontend vendorizado de VNCCS
+# pueda enganchar su editor al tipo "VNCCS_PoseStudio". No tiene backend
+# propio: la captura se consume en el navegador desde el nodo de lineart.
+# ======================================================================
+
+
+class VNCCS_PoseStudioStub:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {"pose_image": ("IMAGE",)},
+            "hidden": {
+                "pose_data": ("STRING", {"default": "{}"}),
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images", "lighting_prompt")
+    FUNCTION = "render"
+    CATEGORY = "VNCCS/pose"
+
+    def render(self, pose_data="{}", pose_image=None, unique_id=""):
+        return ([], [])
+
+
+# ======================================================================
 # MAPPINGS
 # ======================================================================
 
 NODE_CLASS_MAPPINGS = {
+    "VNCCS_PoseStudio": VNCCS_PoseStudioStub,
     "LoadLoraMika": LoadLoraMika,
     "LoadLoraMikaNoClip": LoadLoraMikaNoClip,
     "LoadLoraStackMika": LoadLoraStackMika,
@@ -9570,6 +9599,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "VNCCS_PoseStudio": "Pose Studio 3D (Mika)",
     "LoadLoraMika": "Load Lora-Mika",
     "LoadLoraMikaNoClip": "Load Lora (no CLIP)-Mika",
     "LoadLoraStackMika": "Load Lora Stack-Mika",
