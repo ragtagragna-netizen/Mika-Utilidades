@@ -240,8 +240,13 @@ function outlineWidthFor(camera, target, viewportPx, px = 1.6) {
 
 function buildCharacter(pack, params, pose) {
 	const solved = solveMorph(pack, params);
-	deformVertices(solved.vertices, null, params.localDeform || {}, boundsY(solved.vertices));
 	const staticData = buildStaticModelData(pack, solved.includeGenitals);
+	deformVertices(solved.vertices, null, params.localDeform || {}, {
+		...boundsY(solved.vertices),
+		skinIndices: staticData.skinIndices,
+		skinWeights: staticData.skinWeights,
+		boneNames: pack.bones.map((b) => b.name),
+	});
 
 	const geometry = new THREE.BufferGeometry();
 	geometry.setAttribute("position", new THREE.BufferAttribute(solved.vertices, 3));
@@ -331,6 +336,25 @@ function buildCharacter(pack, params, pose) {
 	const headScale = limbFactor(d.headSize);
 	if (headBone && Math.abs(headScale - 1) > 0.001) {
 		headBone.scale.setScalar(headScale);
+	}
+
+	// Grosor de extremidades: se escala SOLO el hueso raíz del miembro. Si se
+	// escala cada hueso, el factor se acumula por jerarquía (x2 en brazo, x4 en
+	// antebrazo, x8 en mano) y el miembro explota. Los hijos compensan su
+	// posición para que el escalado del padre no alargue el miembro.
+	const thickenLimb = (root, children, v) => {
+		const f = 1 + ((v ?? 0.5) - 0.5) * 0.3;
+		const bone = byName[root];
+		if (!bone || Math.abs(f - 1) < 0.001) return;
+		bone.scale.set(f, 1, f);
+		for (const n of children) {
+			const child = byName[n];
+			if (child) child.position.multiplyScalar(1 / f);
+		}
+	};
+	for (const side of ["l", "r"]) {
+		thickenLimb("upperarm_" + side, ["lowerarm_" + side, "hand_" + side], d.armThickness);
+		thickenLimb("thigh_" + side, ["calf_" + side, "foot_" + side, "ball_" + side], d.legThickness);
 	}
 
 	const genitals = new THREE.Group();
@@ -882,8 +906,10 @@ export async function openPoseStudio3D(node) {
 		["waist", "Cintura"],
 		["hips", "Cadera"],
 		["glutes", "Glúteos"],
-		["armLength", "Brazos"],
-		["legLength", "Piernas"],
+		["armLength", "Largo brazos"],
+		["legLength", "Largo piernas"],
+		["armThickness", "Grosor brazos"],
+		["legThickness", "Grosor piernas"],
 		["headSize", "Cabeza"],
 		["genitalSize", "Genitales"],
 		["openingSize", "Abertura"],
