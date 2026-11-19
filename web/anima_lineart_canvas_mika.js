@@ -1843,8 +1843,8 @@ app.registerExtension({
 		}
 
 
-		// Presets y sliders de anatomía del maniquí 3D. Los valores viven en
-		// node.properties.mikaPoseStudio3D y se pasan al bridge al abrirlo.
+		// Preset del maniquí 3D. Los sliders de anatomía están solo en la
+		// ventana del Pose Studio; aquí se elige el tipo de cuerpo inicial.
 		function createPose3DGroup(node) {
 			const st = node._mikaLineart;
 			const wrap = document.createElement("div");
@@ -1871,34 +1871,15 @@ app.registerExtension({
 				refreshUI(node);
 			};
 			wrap.appendChild(preset);
-			const labels = {
-				height: "Altura", bust: "Pecho", firmness: "Firmeza", waist: "Cintura",
-				hips: "Cadera", glutes: "Glúteos", armLength: "Brazos", legLength: "Piernas",
-				headSize: "Cabeza", genitalSize: "Genitales 3D", openingSize: "Abertura 3D", anusSize: "Ano 3D",
-			};
-			for (const key of Object.keys(labels)) {
-				const s = document.createElement("input");
-				s.type = "range"; s.min = "0"; s.max = "1"; s.step = "0.01";
-				s.title = labels[key];
-				s.style.width = "48px";
-				s.addEventListener("input", () => {
-					const v = parseFloat(s.value);
-					(state().anatomy ||= {})[key] = v;
-					savePoseStudio(node);
-				});
-				wrap.appendChild(s);
-				(preset._sliders ||= {})[key] = s;
-			}
+			// Los sliders de anatomía viven solo en la ventana Pose Studio 3D:
+			// duplicarlos aquí hacía que el nodo quedara lleno de controles.
 			const hint = document.createElement("span");
 			hint.style.cssText = "font-size:10px;opacity:.7;display:none;";
 			hint.textContent = "Re-enviar al calco";
 			wrap.appendChild(hint);
 			const refresh = () => {
-				const a = state().anatomy || {};
 				preset.value = state().preset || "curvy_female";
-				for (const [k, s] of Object.entries(preset._sliders || {})) {
-					if (a[k] !== undefined) s.value = String(a[k]);
-				}
+				const a = state().anatomy || {};
 				const hasPose = (st?.calcoLayers || []).some((l) => l.name === "Pose 3D");
 				hint.style.display = Object.keys(a).length && !hasPose ? "" : "none";
 			};

@@ -88,85 +88,82 @@ export function deformVertices(vertices, bounds, deform, metrics = {}) {
 	const minY = metrics.minY ?? 0;
 	const maxY = metrics.maxY ?? 10;
 	const span = Math.max(0.001, maxY - minY);
-	let mz = 0;
-	let mx = 0;
-	if (metrics.maxZ === undefined || metrics.maxX === undefined) {
-		for (let i = 0; i < vertices.length; i += 3) {
-			mz = Math.max(mz, Math.abs(vertices[i + 2]));
-			mx = Math.max(mx, Math.abs(vertices[i]));
-		}
-	}
-	const maxZ = Math.max(0.001, metrics.maxZ ?? mz);
-	const maxX = Math.max(0.001, metrics.maxX ?? mx);
+	const g = (v, c, s) => Math.exp(-0.5 * ((v - c) / s) ** 2);
 
-	const window = (t, center, halfWidth) => {
-		const d = Math.abs(t - center) / halfWidth;
-		return d >= 1 ? 0 : (1 - d * d) * (1 - d * d);
-	};
-	const unit = (v) => Math.min(1, Math.max(0, v));
-	const gate = (v) => unit(v * 3);
 	// 0 = plano, 0.5 = medio, 1 = grande, 1.75 = enorme, 2.5 = gigante.
-	const level = (v) => (v <= 0.5 ? 0.4 + (Math.max(0, v) / 0.5) * 0.6 : 1 + (v - 0.5) * 0.8);
-
-	// El torso central termina mucho antes que los brazos caídos (|x|≈3.5).
-	const bodyLimit = Math.min(maxX * 0.35, 1.35);
-	const core = (x) => unit((bodyLimit - Math.abs(x)) / 0.5);
+	const level = (v) => (
+		v <= 0.5 ? 0.5 + (Math.max(0, v) / 0.5) * 0.5 : 1 + (v - 0.5) * 0.55
+	);
 	const bustF = level(deform.bust ?? 0.5);
 	const gluteF = level(deform.glutes ?? 0.5);
-	const hipF = level(deform.hips ?? 0.5);
-	const pubisF = 1 + (level(deform.genitalSize ?? 0.5) - 1) * 0.45;
-	const waistF = 1 + (0.5 - (deform.waist ?? 0.5)) * 0.2;
+	// La cadera ensancha menos que el pecho: un factor alto forma una falda.
+	const hipF = 1 + (level(deform.hips ?? 0.5) - 1) * 0.6;
+	const pubisF = 1 + (level(deform.genitalSize ?? 0.5) - 1) * 0.5;
+	const waistF = 1 + (0.5 - (deform.waist ?? 0.5)) * 0.16;
 	const firmExtra = Math.max(0, (deform.firmness ?? 0.5) - 1);
 	const h = deform.height ?? 0.5;
 	const heightStretch = h < 0 || h > 1 ? 1 + (h - 0.5) * 0.6 : 1;
 
 	for (let i = 0; i < vertices.length; i += 3) {
-		const x = vertices[i];
-		const y = vertices[i + 1];
-		const z = vertices[i + 2];
+		let x = vertices[i];
+		let y = vertices[i + 1];
+		let z = vertices[i + 2];
 		const t = (y - minY) / span;
-		const front = gate(z / maxZ);
-		const back = gate(-z / maxZ);
-		const torso = core(x);
+		const nx = x / span;
+		const nz = z / span;
 
-		const bustMask = window(t, 0.73, 0.05) * front * torso;
-		const waistMask = window(t, 0.63, 0.035) * torso;
-		const hipMask = window(t, 0.54, 0.045) * torso;
-		const gluteMask = window(t, 0.55, 0.04) * back * torso;
-		const pubisMask = window(t, 0.545, 0.025) * front
-			* unit((1.2 - Math.abs(x)) / 0.5);
+		// Dos senos: campanas 3D suaves, sin bordes duros ni cortes. El bulto
+		// crece desde su propio centro en X, Y y Z, así no aparecen puntas.
+		for (const side of [-1, 1]) {
+			const cx = side * 0.045;
+			const cz = 0.08;
+			const w = g(nx, cx, 0.05) * g(t, 0.73, 0.04) * g(nz, cz, 0.09);
+			if (w < 0.001) continue;
+			const k = 1 + (bustF - 1) * w;
+			x = cx * span + (x - cx * span) * k;
+			y = (minY + 0.73 * span) + (y - (minY + 0.73 * span)) * (1 + (bustF - 1) * w * 0.45);
+			z = cz * span + (z - cz * span) * k;
+		}
 
-		// El pecho y los gluteos crecen como bultos redondeados alrededor de
-		// su propio centro, no como una losa que ensancha todo el torso.
-		const breastX = x >= 0 ? 0.5 : -0.5;
-		const chestY = minY + 0.73 * span;
-		const gluteY = minY + 0.55 * span;
-		const kb = 1 + (bustF - 1) * bustMask;
-		const kg = 1 + (gluteF - 1) * gluteMask;
-		const f = 1
-			+ (waistF - 1) * waistMask
-			+ (hipF - 1) * hipMask
-			+ (pubisF - 1) * pubisMask;
+		// Glúteos: mismo modelo en la cara posterior.
+		for (const side of [-1, 1]) {
+			const cx = side * 0.03;
+			const cz = -0.07;
+			const w = g(nx, cx, 0.055) * g(t, 0.55, 0.045) * g(nz, cz, 0.06);
+			if (w < 0.001) continue;
+			const k = 1 + (gluteF - 1) * w;
+			x = cx * span + (x - cx * span) * k;
+			y = (minY + 0.55 * span) + (y - (minY + 0.55 * span)) * (1 + (gluteF - 1) * w * 0.4);
+			z = cz * span + (z - cz * span) * k;
+		}
 
-		let nx = x;
-		let ny = y;
-		let nz = z;
-		if (kb !== 1) {
-			nx = breastX + (x - breastX) * kb;
-			ny = chestY + (y - chestY) * (1 + (kb - 1) * 0.5);
-			nz *= kb;
+		// Caderas: ensanchamiento suave alrededor de la pelvis.
+		const wh = g(t, 0.54, 0.03) * g(nx, 0, 0.12);
+		if (wh > 0.001) {
+			const k = 1 + (hipF - 1) * wh;
+			x *= k;
+			z *= k;
 		}
-		if (kg !== 1) {
-			nx = breastX + (nx - breastX) * kg;
-			ny = gluteY + (ny - gluteY) * (1 + (kg - 1) * 0.5);
-			nz *= kg;
+
+		// Cintura: estrechamiento suave.
+		const ww = g(t, 0.63, 0.045) * g(nx, 0, 0.11);
+		if (ww > 0.001) {
+			const k = 1 + (waistF - 1) * ww;
+			x *= k;
+			z *= k;
 		}
-		vertices[i] = nx * f;
-		vertices[i + 1] = ny;
-		vertices[i + 2] = nz * f + firmExtra * bustMask * 0.25;
-		if (heightStretch !== 1) {
-			vertices[i + 1] = minY + (vertices[i + 1] - minY) * heightStretch;
+
+		// Pubis: volumen frontal pequeño.
+		const wp = g(t, 0.545, 0.03) * g(nx, 0, 0.07) * g(nz, 0.07, 0.05);
+		if (wp > 0.001) {
+			const k = 1 + (pubisF - 1) * wp;
+			x *= k;
+			z *= k;
 		}
+
+		vertices[i] = x;
+		vertices[i + 1] = heightStretch === 1 ? y : minY + (y - minY) * heightStretch;
+		vertices[i + 2] = z + firmExtra * g(t, 0.73, 0.04) * g(nz, 0.08, 0.09) * 0.25 * span;
 	}
 	return vertices;
 }
