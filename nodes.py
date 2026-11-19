@@ -690,6 +690,17 @@ if PromptServer is not None and PromptServer.instance is not None:
         payload = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
         return web.json_response({"image": payload})
 
+    # El Pose Studio vendorizado sube sus capturas a esta ruta. El bridge JS
+    # ya las reenvía al nodo de lineart; acá solo se acepta el POST para no
+    # dejar 404s en consola.
+    @PromptServer.instance.routes.post("/vnccs/pose_captures_upload")
+    async def _mika_pose_captures_upload(request):
+        try:
+            await request.json()
+        except Exception:
+            pass
+        return web.json_response({"ok": True})
+
 
 # ======================================================================
 # SAMPLER NAMES — detección multi-fuente + fallback
@@ -9504,7 +9515,8 @@ class VNCCS_PoseStudioStub:
     CATEGORY = "VNCCS/pose"
 
     def render(self, pose_data="{}", pose_image=None, unique_id=""):
-        return ([], [])
+        blank = np.zeros((1, 1, 1, 3), dtype=np.float32)
+        return (blank, "")
 
 
 # ======================================================================

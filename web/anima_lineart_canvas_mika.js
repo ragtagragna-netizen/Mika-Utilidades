@@ -4010,10 +4010,9 @@ app.registerExtension({
 			if (s) node.properties.mikaPoseStudio3D = JSON.parse(JSON.stringify(s));
 		}
 
-		async function sendPoseToCalco(node) {
+		async function sendPoseToCalco(node, urlArg = null) {
 			const bridge = await import("./pose_studio_bridge.js");
-			let url = bridge.getPoseStudioCapture(node.id);
-			if (!url) url = bridge.getPoseStudioCapture();
+			const url = urlArg || bridge.getPoseStudioCapture(String(node.id));
 			if (!url) return false;
 			const img = new Image();
 			await new Promise((res, rej) => {
@@ -4748,7 +4747,10 @@ app.registerExtension({
 			window.__sendPoseToCalco = () => sendPoseToCalco(node);
 			window.__savePoseStudio = () => savePoseStudio(node);
 			import("./pose_studio_bridge.js")
-				.then((b) => b.onPoseCapture(() => sendPoseToCalco(node)))
+				.then((b) => b.onPoseCapture((url, id) => {
+					if (id != null && String(id) !== String(node.id)) return;
+					sendPoseToCalco(node, url);
+				}))
 				.catch(() => {});
 
 			// Estado guardado en el workflow (widget oculto "pincel"). Lo de la
