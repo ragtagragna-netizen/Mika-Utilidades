@@ -2019,7 +2019,7 @@ app.registerExtension({
 			const labels = {
 				height: "Altura", bust: "Pecho", firmness: "Firmeza", waist: "Cintura",
 				hips: "Cadera", glutes: "Glúteos", armLength: "Brazos", legLength: "Piernas",
-				headSize: "Cabeza", genitalSize: "Genitales", openingSize: "Abertura", anusSize: "Ano",
+				headSize: "Cabeza", genitalSize: "Genitales 3D", openingSize: "Abertura 3D", anusSize: "Ano 3D",
 			};
 			for (const key of Object.keys(labels)) {
 				const s = document.createElement("input");
@@ -2034,12 +2034,18 @@ app.registerExtension({
 				wrap.appendChild(s);
 				(preset._sliders ||= {})[key] = s;
 			}
+			const hint = document.createElement("span");
+			hint.style.cssText = "font-size:10px;opacity:.7;display:none;";
+			hint.textContent = "Re-enviar al calco";
+			wrap.appendChild(hint);
 			const refresh = () => {
 				const a = state().anatomy || {};
 				preset.value = state().preset || "curvy_female";
 				for (const [k, s] of Object.entries(preset._sliders || {})) {
 					if (a[k] !== undefined) s.value = String(a[k]);
 				}
+				const hasPose = (st?.calcoLayers || []).some((l) => l.name === "Pose 3D");
+				hint.style.display = Object.keys(a).length && !hasPose ? "" : "none";
 			};
 			refresh();
 			return { parts: [wrap], refresh };
@@ -4740,6 +4746,7 @@ app.registerExtension({
 			window.__pushUndo = () => pushUndo(node);
 			window.__undoOnce = () => undoOnce(node);
 			window.__sendPoseToCalco = () => sendPoseToCalco(node);
+			window.__savePoseStudio = () => savePoseStudio(node);
 			import("./pose_studio_bridge.js")
 				.then((b) => b.onPoseCapture(() => sendPoseToCalco(node)))
 				.catch(() => {});
