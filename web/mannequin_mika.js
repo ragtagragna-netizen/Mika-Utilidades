@@ -160,7 +160,7 @@ function anatomy(ctx, m, p, pt) {
 	ellipse(ctx, [pt.pelvis[0], y + 37], [4 * p.anusSize, 3 * p.anusSize]);
 }
 
-export function drawMannequin(ctx, m) {
+export function drawMannequin(ctx, m, nsfw = false) {
 	if (!m || !ctx) return;
 	const pt = skeleton(m);
 	ctx.save();
@@ -183,7 +183,7 @@ export function drawMannequin(ctx, m) {
 	ellipse(ctx, pt.chest, pt.chestR);
 	ellipse(ctx, pt.head, [pt.headRadius, pt.headRadius]);
 
-	anatomy(ctx, m, m.proportions, pt);
+	if (nsfw) anatomy(ctx, m, m.proportions, pt);
 	ctx.restore();
 }
 

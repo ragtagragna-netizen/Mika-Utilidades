@@ -1,6 +1,11 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { openPoseGallery, poseImageUrl } from "./pose_gallery_mika.js";
+import {
+	createMannequin, drawMannequin, serializeMannequins, deserializeMannequins,
+	mannequinBounds, jointHit, localPoint, setJoint, setProportion, applyGender,
+	PROPORTIONS, GENDERS, JOINTS,
+} from "./mannequin_mika.js";
 
 // -----------------------------------------------------------------------
 // Mika · Anima Lineart Canvas
@@ -70,7 +75,7 @@ const SOFT_BRUSH_ICON =
 // herramienta, grosores, difuminado, grano, figura, fuente y color de trazo.
 const PINCEL_KEYS = [
 	"tool", "thickness", "eraseThickness", "softThickness", "softBlur", "softGrain",
-	"maskThickness", "calcoOpacity", "shape", "font", "fontSize", "userColor",
+	"maskThickness", "calcoOpacity", "mannequinOpacity", "shape", "font", "fontSize", "userColor",
 ];
 
 // Debajo de este arrastre (en píxeles de lienzo) un clic crea la figura con
@@ -775,7 +780,7 @@ app.registerExtension({
 			st.softScratch.width = nw;
 			st.softScratch.height = nh;
 			forEachSurface(node, (s) => {
-				for (const c of [s.preview, s.underlay, s.calcoLayersCanvas, s.overlay, s.handles, s.baseLayer, s.maskLayer]) {
+				for (const c of [s.preview, s.underlay, s.calcoLayersCanvas, s.mannequinCanvas, s.overlay, s.handles, s.baseLayer, s.maskLayer]) {
 					if (!c) continue;
 					c.width = nw;
 					c.height = nh;
@@ -2279,6 +2284,8 @@ app.registerExtension({
 			// Los controles se montaron antes de que existiera esta superficie:
 			// reaplicar la opacidad del calco sobre ella.
 			applyCalcoOpacity(node);
+			applyMannequinOpacity(node);
+			drawMannequins(node);
 
 			document.body.appendChild(root);
 			root.addEventListener("pointerdown", () => { sink.focus(); focusEditor(node); });
@@ -2605,6 +2612,37 @@ app.registerExtension({
 					ctx.restore();
 				}
 			});
+			drawMannequins(node);
+		}
+
+		// Dibuja los maniquíes visibles en el canvas propio de cada superficie.
+		function drawMannequins(node) {
+			const st = node._mikaLineart;
+			if (!st) return;
+			forEachSurface(node, (s) => {
+				const c = s.mannequinCanvas;
+				if (!c) return;
+				const ctx = c.getContext("2d");
+				ctx.setTransform(1, 0, 0, 1, 0, 0);
+				ctx.clearRect(0, 0, c.width, c.height);
+				for (const m of st.mannequins) {
+					if (m.visible === false) continue;
+					const t = m.tf;
+					ctx.save();
+					ctx.translate(t.cx, t.cy);
+					ctx.rotate(t.rot);
+					ctx.scale(t.sx, t.sy);
+					drawMannequin(ctx, m, st.mannequinNsfw);
+					ctx.restore();
+				}
+			});
+		}
+
+		function applyMannequinOpacity(node) {
+			const st = node._mikaLineart;
+			if (!st) return;
+			const v = String((st.mannequinOpacity ?? 100) / 100);
+			forEachSurface(node, (s) => { if (s.mannequinCanvas) s.mannequinCanvas.style.opacity = v; });
 		}
 
 		// Composición del calco (fondo blanco + calco base + capas visibles),
@@ -2639,6 +2677,17 @@ app.registerExtension({
 				ctx.rotate(l.tf.rot);
 				ctx.scale(l.tf.sx, l.tf.sy);
 				ctx.drawImage(l.src, -l.w / 2, -l.h / 2);
+				ctx.restore();
+			}
+			for (const m of st.mannequins) {
+				if (m.visible === false) continue;
+				if (allow && !allow.has("M:" + m.id)) continue;
+				const mt = m.tf;
+				ctx.save();
+				ctx.translate(mt.cx, mt.cy);
+				ctx.rotate(mt.rot);
+				ctx.scale(mt.sx, mt.sy);
+				drawMannequin(ctx, m, st.mannequinNsfw);
 				ctx.restore();
 			}
 			return tmp;
@@ -3430,6 +3479,7 @@ app.registerExtension({
 			const baseLayer = isInpaint ? mkLayer(null) : null;
 			const underlay = mkLayer(0.4);
 			const calcoLayersCanvas = mkLayer(0.4);
+			const mannequinCanvas = mkLayer(1);
 			const preview = mkLayer(null);
 			preview.style.cursor = CURSOR_CROSS;
 			preview.style.pointerEvents = "auto";
@@ -3454,6 +3504,7 @@ app.registerExtension({
 			if (baseLayer) stage.appendChild(baseLayer);
 			stage.appendChild(underlay);
 			stage.appendChild(calcoLayersCanvas);
+			stage.appendChild(mannequinCanvas);
 			stage.appendChild(preview);
 			if (maskLayer) stage.appendChild(maskLayer);
 			stage.appendChild(overlay);
@@ -3461,7 +3512,7 @@ app.registerExtension({
 			stage.appendChild(brushCursor);
 
 			const surface = {
-				id, host, stage, preview, underlay, calcoLayersCanvas, overlay,
+				id, host, stage, preview, underlay, calcoLayersCanvas, mannequinCanvas, overlay,
 				handles, brushCursor, baseLayer, maskLayer,
 				cursorPos: null, lastClient: null,
 				view: host ? { zoom: 1, x: 0, y: 0 } : null,
@@ -4247,7 +4298,7 @@ app.registerExtension({
 				underlayImg: null,
 				baseCanvas, baseLayer: nodeSurface.baseLayer, baseImg: null, baseSrc: null,
 				maskCanvas, maskLayer: nodeSurface.maskLayer, maskThickness: 30,
-				calcoLayers: [], selection: [], layerSeq: 0, calcoNameSeq: 0, layerPanel,
+				calcoLayers: [], mannequins: [], selection: [], layerSeq: 0, calcoNameSeq: 0, layerPanel,
 				layerPanels: [{ el: layerPanel, mode: "strip", refit: true }],
 				editorChip, editorRoot: null, editorSurface: null, editorTitle: null, uiWindow: null,
 				undo: [], redo: [], lineartBusy: false,
@@ -4255,6 +4306,8 @@ app.registerExtension({
 				tool: "soft", shape: "rect", font: "Arial", fontSize: 48, text: "", thickness: 1, eraseThickness: 40,
 				softScratch, softThickness: 2, softBlur: 1, softGrain: 80, softPts: null, grainTile: null, grainRand: null, _grainFor: null, _grainPat: null,
 				calcoOpacity: 40,
+				mannequinOpacity: 100,
+				mannequinNsfw: false,
 				userColor: "#000",
 				color: modeStroke(node), dirty: false, erasePoints: null,
 				eraseContentPts: null,
@@ -4273,6 +4326,10 @@ app.registerExtension({
 				node.setDirtyCanvas(true, true);
 				return layer;
 			};
+
+			// Ganchos para los tests del editor (mismo patrón que el puente de calco).
+			window.__drawMannequins = () => drawMannequins(node);
+			window.__writeCalco = () => writeCalco(node);
 
 			// Estado guardado en el workflow (widget oculto "pincel"). Lo de la
 			// sesión (prevState) se aplica después y pisa esto si existe.
@@ -4335,8 +4392,10 @@ app.registerExtension({
 			wireDomDrop(node, root);
 			wireCanvasNav(root);
 			drawCalcoLayers(node);
+			applyMannequinOpacity(node);
+			drawMannequins(node);
 			renderLayerPanel(node);
-			if (st.underlayImg || st.calcoLayers.length) writeCalco(node);
+			if (st.underlayImg || st.calcoLayers.length || st.mannequins.length) writeCalco(node);
 
 			// --- Dibujo ---
 			let drawing = false;
