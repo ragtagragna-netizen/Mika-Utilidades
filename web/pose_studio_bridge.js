@@ -266,7 +266,7 @@ function buildCharacter(pack, params, pose) {
 	// Largo de brazos/piernas y tamaño de cabeza: se aplica después del bind
 	// para que las posiciones de hueso estiren la malla.
 	const d = params.localDeform || {};
-	const limbFactor = (v) => 0.8 + 0.4 * (v ?? 0.5);
+	const limbFactor = (v) => 1 + ((v ?? 0.5) - 0.5) * 0.5;
 	const stretch = (names, factor) => {
 		if (Math.abs(factor - 1) < 0.001) return;
 		for (const n of names) {
@@ -445,10 +445,13 @@ function sliderRow(panel, label, key, state, onInput) {
 		"width:70px;flex:none;color:#222;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
 	const input = document.createElement("input");
 	input.type = "range";
-	input.min = "0"; input.max = "1"; input.step = "0.01";
+	const extended = key !== "gender" && key !== "posX" && key !== "posY" && key !== "rotationY";
+	input.min = extended ? "-1" : "0";
+	input.max = extended ? "2.5" : "1";
+	input.step = "0.01";
 	input.style.cssText = "flex:1;min-width:0;height:14px;";
 	input.dataset.key = key;
-	input.value = String(state.anatomy?.[key] ?? 0.5);
+	input.value = String(state.anatomy?.[key] ?? state[key] ?? 0.5);
 	input.oninput = () => onInput(key, parseFloat(input.value));
 	wrap.append(name, input);
 	panel.appendChild(wrap);
