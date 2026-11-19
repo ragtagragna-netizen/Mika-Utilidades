@@ -465,6 +465,7 @@ app.registerExtension({
 				paint: st.paint.toDataURL("image/png"),
 				mask: st.maskCanvas ? st.maskCanvas.toDataURL("image/png") : null,
 				calco: null,
+				mannequins: serializeMannequins(st.mannequins),
 			};
 			if (withCalco && st.calcoLayers.length) {
 				snap.calco = st.calcoLayers.map((l) => ({
@@ -476,6 +477,13 @@ app.registerExtension({
 
 		function restore(node, snap) {
 			const st = node._mikaLineart;
+			if (snap.mannequins) {
+				st.mannequins = deserializeMannequins(snap.mannequins, st.paint.width, st.paint.height);
+				st.selection = st.selection.filter((k) => !String(k).startsWith("M:") || mannequinByKey(node, k));
+				drawMannequins(node);
+				renderLayerPanel(node);
+				saveMannequins(node);
+			}
 			// Las capas de calco que el borrador vació vuelven si el snapshot
 			// las trae (operaciones de calco sin deshacer no).
 			if (snap.calco) {
@@ -832,7 +840,10 @@ app.registerExtension({
 					l.tf = mapTf(l.tf);
 					l.tf0 = mapTf(l.tf0);
 				}
+				for (const m of st.mannequins) m.tf = mapTf(m.tf);
 			}
+			drawMannequins(node);
+			saveMannequins(node);
 			// La base se redibuja "contain" en el tamaño nuevo y la máscara usa
 			// el mismo mapeo que el trazo.
 			drawBase(node);
@@ -1880,6 +1891,7 @@ app.registerExtension({
 			};
 			const commit = () => {
 				writePincelState(node);
+				saveMannequins(node);
 				drawMannequins(node);
 				writeCalco(node);
 				renderLayerPanel(node);
@@ -3366,6 +3378,7 @@ app.registerExtension({
 			renderLayerPanel(node);
 			drawTransformUI(node);
 			writeCalco(node);
+			saveMannequins(node);
 			node.setDirtyCanvas(true, true);
 			return m;
 		}
@@ -3374,6 +3387,7 @@ app.registerExtension({
 			st.mannequins = st.mannequins.filter((m) => m.id !== id);
 			st.selection = st.selection.filter((k) => k !== "M:" + id);
 			drawMannequins(node); renderLayerPanel(node); drawTransformUI(node); writeCalco(node);
+			saveMannequins(node);
 		}
 		function toggleMannequin(node, id) {
 			const st = node._mikaLineart;
@@ -3382,6 +3396,7 @@ app.registerExtension({
 			m.visible = m.visible === false;
 			if (!m.visible) st.selection = st.selection.filter((k) => k !== "M:" + id);
 			drawMannequins(node); renderLayerPanel(node); drawTransformUI(node); writeCalco(node);
+			saveMannequins(node);
 		}
 		function moveMannequin(node, id, delta) {
 			const st = node._mikaLineart;
@@ -3391,6 +3406,7 @@ app.registerExtension({
 			const [m] = st.mannequins.splice(i, 1);
 			st.mannequins.splice(j, 0, m);
 			drawMannequins(node); renderLayerPanel(node); writeCalco(node);
+			saveMannequins(node);
 		}
 		function layerVisible(node, key) {
 			const st = node._mikaLineart;
@@ -3876,6 +3892,12 @@ app.registerExtension({
 		// Hornea la transformación viva del trazo en el canvas fuente y la
 		// deja en identidad. Sin esto, al dibujar sobre un trazo movido/escalado
 		// el punto del lienzo cae fuera del canvas fuente y el trazo se pierde.
+		function saveMannequins(node) {
+			const st = node._mikaLineart;
+			if (!st || !node.properties) return;
+			node.properties.mikaMannequins = serializeMannequins(st.mannequins);
+		}
+
 		function bakePaintTf(node) {
 			const st = node._mikaLineart;
 			const t = st.paintTransform;
@@ -4571,6 +4593,9 @@ app.registerExtension({
 			window.__writeCalco = () => writeCalco(node);
 			window.__refreshUI = () => refreshUI(node);
 			window.__applyMannequinOpacity = () => applyMannequinOpacity(node);
+			window.__saveMannequins = () => saveMannequins(node);
+			window.__pushUndo = () => pushUndo(node);
+			window.__undoOnce = () => undoOnce(node);
 
 			// Estado guardado en el workflow (widget oculto "pincel"). Lo de la
 			// sesión (prevState) se aplica después y pisa esto si existe.
@@ -4578,9 +4603,13 @@ app.registerExtension({
 			if (savedState) {
 				for (const k of PINCEL_KEYS) if (savedState[k] !== undefined) st[k] = savedState[k];
 			}
+			const savedMannequins = node.properties?.mikaMannequins;
+			if (Array.isArray(savedMannequins) && savedMannequins.length) {
+				st.mannequins = deserializeMannequins(savedMannequins, st.paint.width, st.paint.height);
+			}
 
 			if (prevState) {
-				for (const k of ["underlayImg", "underlayTransform", "underlayVisible", "transformMode", "freeResize", "tool", "shape", "font", "fontSize", "thickness", "eraseThickness", "softThickness", "softBlur", "softGrain", "calcoOpacity", "userColor", "contentSize", "calcoLayers", "selection", "layerSeq", "calcoNameSeq", "baseImg", "baseSrc", "maskThickness"]) {
+				for (const k of ["underlayImg", "underlayTransform", "underlayVisible", "transformMode", "freeResize", "tool", "shape", "font", "fontSize", "thickness", "eraseThickness", "softThickness", "softBlur", "softGrain", "calcoOpacity", "mannequinOpacity", "mannequinNsfw", "userColor", "contentSize", "calcoLayers", "mannequins", "selection", "layerSeq", "calcoNameSeq", "baseImg", "baseSrc", "maskThickness"]) {
 					if (prevState[k] !== undefined) st[k] = prevState[k];
 				}
 				const ow = prevState.paint?.width;
@@ -5160,6 +5189,7 @@ app.registerExtension({
 					if (st.jointDrag) {
 						st.jointDrag = null;
 						writeCalco(node);
+						saveMannequins(node);
 						drawTransformUI(node);
 						return;
 					}
