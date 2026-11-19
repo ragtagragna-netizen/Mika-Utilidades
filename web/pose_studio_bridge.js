@@ -318,22 +318,12 @@ function buildCharacter(pack, params, pose) {
 	mesh.bind(skeleton);
 	outline.bind(skeleton);
 
-	// Largo de brazos/piernas y tamaño de cabeza: se aplica después del bind
-	// para que las posiciones de hueso estiren la malla.
+	// El largo de brazos y piernas ya lo hace un target de estiramiento en
+	// buildCustomMorphs: escalar posiciones de huesos después del bind no era
+	// visible y rompía los pivotes al doblar las articulaciones.
 	const d = params.localDeform || {};
-	// 2.5 antes doblaba el antebrazo y parecia un ala; ahora el maximo es 1.5.
-	const limbFactor = (v) => 1 + ((v ?? 0.5) - 0.5) * 0.25;
-	const stretch = (names, factor) => {
-		if (Math.abs(factor - 1) < 0.001) return;
-		for (const n of names) {
-			const bone = byName[n];
-			if (bone) bone.position.multiplyScalar(factor);
-		}
-	};
-	stretch(["lowerarm_l", "lowerarm_r", "hand_l", "hand_r"], limbFactor(d.armLength));
-	stretch(["calf_l", "calf_r", "foot_l", "foot_r", "ball_l", "ball_r"], limbFactor(d.legLength));
 	const headBone = byName.head;
-	const headScale = limbFactor(d.headSize);
+	const headScale = 1 + ((d.headSize ?? 0.5) - 0.5) * 0.25;
 	if (headBone && Math.abs(headScale - 1) > 0.001) {
 		headBone.scale.setScalar(headScale);
 	}
@@ -894,7 +884,8 @@ export async function openPoseStudio3D(node) {
 		["armLength", "Largo brazos"],
 		["legLength", "Largo piernas"],
 		["armThickness", "Grosor brazos"],
-		["legThickness", "Grosor piernas"],
+		["thighThickness", "Grosor muslos"],
+		["calfThickness", "Grosor pantorrillas"],
 		["headSize", "Cabeza"],
 		["genitalSize", "Genitales"],
 		["openingSize", "Abertura"],

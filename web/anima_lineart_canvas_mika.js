@@ -1843,49 +1843,6 @@ app.registerExtension({
 		}
 
 
-		// Preset del maniquí 3D. Los sliders de anatomía están solo en la
-		// ventana del Pose Studio; aquí se elige el tipo de cuerpo inicial.
-		function createPose3DGroup(node) {
-			const st = node._mikaLineart;
-			const wrap = document.createElement("div");
-			wrap.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;align-items:center;max-width:280px;";
-			const state = () => (node.properties.mikaPoseStudio3D ||= {
-				anatomy: {}, preset: "curvy_female", characters: 1,
-			});
-			const preset = styleInput(document.createElement("select"));
-			preset.title = "Tipo de cuerpo 3D";
-			for (const [id, label] of [
-				["curvy_female", "Femenina curvilínea"],
-				["muscular_male", "Masculina musculosa"],
-				["slim_female", "Femenina estilizada"],
-			]) {
-				const o = document.createElement("option");
-				o.value = id; o.textContent = label; preset.appendChild(o);
-			}
-			preset.value = state().preset || "curvy_female";
-			preset.onchange = async () => {
-				const a = await import("./pose_studio_anatomy.js");
-				state().preset = preset.value;
-				state().anatomy = { ...a.BODY_PRESETS[preset.value] };
-				savePoseStudio(node);
-				refreshUI(node);
-			};
-			wrap.appendChild(preset);
-			// Los sliders de anatomía viven solo en la ventana Pose Studio 3D:
-			// duplicarlos aquí hacía que el nodo quedara lleno de controles.
-			const hint = document.createElement("span");
-			hint.style.cssText = "font-size:10px;opacity:.7;display:none;";
-			hint.textContent = "Re-enviar al calco";
-			wrap.appendChild(hint);
-			const refresh = () => {
-				preset.value = state().preset || "curvy_female";
-				const a = state().anatomy || {};
-				const hasPose = (st?.calcoLayers || []).some((l) => l.name === "Pose 3D");
-				hint.style.display = Object.keys(a).length && !hasPose ? "" : "none";
-			};
-			refresh();
-			return { parts: [wrap], refresh };
-		}
 
 		// Tamaño del lienzo (resolución) elegido desde la ventana: escribe el
 		// widget del nodo, así los dos lados comparten el mismo valor.
@@ -2316,7 +2273,6 @@ app.registerExtension({
 			st.layerPanels.push({ el: listEl, mode: "list" });
 
 			addSection("Opacidad del calco", registerUISet(node, createOpacityGroup(node), "window"));
-			addSection("Pose 3D", registerUISet(node, createPose3DGroup(node), "window"));
 			addSection("Lineart", registerUISet(node, createLineartGroup(node), "window"));
 
 			const transformSec = addSection("Transformar", registerUISet(node, createTransformGroup(node), "window"));
@@ -4454,7 +4410,6 @@ app.registerExtension({
 			append(registerUISet(node, createTransformGroup(node)));
 			append(registerUISet(node, createCopyGroup(node)));
 			append(registerUISet(node, createOpacityGroup(node)));
-			append(registerUISet(node, createPose3DGroup(node)));
 			append(registerUISet(node, createMergeGroup(node)));
 			wireDomDrop(node, root);
 			wireCanvasNav(root);

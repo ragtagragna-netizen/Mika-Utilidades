@@ -10,7 +10,10 @@ const C = {
 	glutes: ["pelvis", "thigh_l", "thigh_r"],
 	bust: ["spine_03", "clavicle_l", "clavicle_r"],
 	arm: ["upperarm_l", "upperarm_r", "lowerarm_l", "lowerarm_r", "hand_l", "hand_r"],
-	leg: ["thigh_l", "thigh_r", "calf_l", "calf_r", "foot_l", "foot_r"],
+	thigh: ["thigh_l", "thigh_r"],
+	calf: ["calf_l", "calf_r", "foot_l", "foot_r"],
+	armLength: ["lowerarm_l", "lowerarm_r", "hand_l", "hand_r"],
+	legLength: ["calf_l", "calf_r", "foot_l", "foot_r"],
 	pubis: ["pelvis"],
 };
 
@@ -39,7 +42,8 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const hipY = minY + 0.54 * span;
 	const pubisY = minY + 0.53 * span;
 
-	const keys = ["waist", "hips", "glutes", "bust", "arm", "leg", "pubis", "height"];
+	const keys = ["waist", "hips", "glutes", "bust", "arm", "thigh", "calf",
+		"armLength", "legLength", "pubis", "height"];
 	const targets = {};
 	for (const k of keys) targets[k] = new Float32Array(verts.length);
 	const delta = (k, i, x, y, z) => {
@@ -54,9 +58,12 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const fHips = 1 + ((d.hips ?? 0.5) - 0.5) * 0.4;
 	const fGlute = 1 + ((d.glutes ?? 0.5) - 0.5) * 0.5;
 	const raw = params.rawAnatomy || {};
-	const fBust = 1 + Math.min(0.8, Math.max(0, (raw.bust ?? 0.5) - 1) * 0.45);
+	const fBust = 1 + Math.min(1.6, Math.max(0, (raw.bust ?? 0.5) - 1) * 0.75);
 	const fArm = 1 + ((d.armThickness ?? 0.5) - 0.5) * 0.5;
-	const fLeg = 1 + ((d.legThickness ?? 0.5) - 0.5) * 0.5;
+	const fThigh = 1 + ((d.thighThickness ?? 0.5) - 0.5) * 0.5;
+	const fCalf = 1 + ((d.calfThickness ?? 0.5) - 0.5) * 0.5;
+	const fArmLen = 1 + ((d.armLength ?? 0.5) - 0.5) * 0.55;
+	const fLegLen = 1 + ((d.legLength ?? 0.5) - 0.5) * 0.55;
 	const fPubis = 1 + ((d.genitalSize ?? 0.5) - 0.5) * 0.35;
 	const h = d.height ?? 0.5;
 	const fHeight = h < 0 || h > 1 ? 1 + (h - 0.5) * 0.6 : 1;
@@ -69,7 +76,8 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 			tx: bonePos[o + 3], ty: bonePos[o + 4], tz: bonePos[o + 5],
 		};
 	};
-	const sideOf = (name) => (name.endsWith("_l") ? -1 : name.endsWith("_r") ? 1 : 0);
+	// En este pack los huesos "_l" están en X POSITIVO (upperarm_l head x=+1.24).
+	const sideOf = (name) => (name.endsWith("_l") ? 1 : name.endsWith("_r") ? -1 : 0);
 
 	for (let v = 0; v < count; v++) {
 		const i = v * 3;
@@ -95,11 +103,11 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 				const fall = smooth((Math.abs(t - 0.54) - 0.02) / 0.08) * w;
 				delta("hips", i, x * (fHips - 1) * fall, 0, z * (fHips - 1) * fall);
 				if (z < 0) {
-					const cx = s || (x >= 0 ? 0.4 : -0.4);
+					// Crecimiento hacia ATRAS: el eje Z manda; X apenas se toca.
 					delta("glutes", i,
-						(x - cx) * (fGlute - 1) * fall,
-						(y - hipY) * (fGlute - 1) * 0.35 * fall,
-						(z + 0.65) * (fGlute - 1) * fall);
+						x * (fGlute - 1) * 0.18 * fall,
+						(y - hipY) * (fGlute - 1) * 0.2 * fall,
+						z * (fGlute - 1) * 1.3 * fall);
 				}
 			}
 
@@ -136,20 +144,55 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 				delta("arm", i, rx * (fArm - 1) * w, ry * (fArm - 1) * w, rz * (fArm - 1) * w);
 			}
 
-			if (C.leg.includes(name) && fLeg !== 1) {
+			if (C.thigh.includes(name) && fThigh !== 1) {
 				const a = axis(skin[o + k]);
-				let dx = a.tx - a.hx;
-				let dy = a.ty - a.hy;
-				let dz = a.tz - a.hz;
+				let dx = a.tx - a.hx, dy = a.ty - a.hy, dz = a.tz - a.hz;
 				const len = Math.hypot(dx, dy, dz) || 1;
 				dx /= len; dy /= len; dz /= len;
 				const px = x - a.hx, py = y - a.hy, pz = z - a.hz;
 				const along = px * dx + py * dy + pz * dz;
-				const rx = px - dx * along;
-				const ry = py - dy * along;
-				const rz = pz - dz * along;
-				delta("leg", i, rx * (fLeg - 1) * w, ry * (fLeg - 1) * w, rz * (fLeg - 1) * w);
+				delta("thigh", i,
+					(px - dx * along) * (fThigh - 1) * w,
+					(py - dy * along) * (fThigh - 1) * w,
+					(pz - dz * along) * (fThigh - 1) * w);
 			}
+
+			if (C.calf.includes(name) && fCalf !== 1) {
+				const a = axis(skin[o + k]);
+				let dx = a.tx - a.hx, dy = a.ty - a.hy, dz = a.tz - a.hz;
+				const len = Math.hypot(dx, dy, dz) || 1;
+				dx /= len; dy /= len; dz /= len;
+				const px = x - a.hx, py = y - a.hy, pz = z - a.hz;
+				const along = px * dx + py * dy + pz * dz;
+				delta("calf", i,
+					(px - dx * along) * (fCalf - 1) * w,
+					(py - dy * along) * (fCalf - 1) * w,
+					(pz - dz * along) * (fCalf - 1) * w);
+			}
+		}
+
+		// Largo de miembros: estiramiento desde el hombro / la cadera a lo
+		// largo del eje del hueso raíz de CADA miembro (target, no huesos).
+		if (fArmLen !== 1 || fLegLen !== 1) {
+			const limbSide = x >= 0 ? "l" : "r";
+			const stretchLimb = (target, rootPrefix, factor, partNames) => {
+				if (Math.abs(factor - 1) < 0.001) return;
+				const idx = names.indexOf(rootPrefix + limbSide);
+				if (idx < 0) return;
+				const a = axis(idx);
+				let dx = a.tx - a.hx, dy = a.ty - a.hy, dz = a.tz - a.hz;
+				const len = Math.hypot(dx, dy, dz) || 1;
+				dx /= len; dy /= len; dz /= len;
+				const along = (x - a.hx) * dx + (y - a.hy) * dy + (z - a.hz) * dz;
+				if (along <= 0) return;
+				for (let k = 0; k < 4; k++) {
+					if (!partNames.includes(byName.get(skin[o + k]))) continue;
+					const f = (factor - 1) * weights[o + k] * along;
+					delta(target, i, dx * f, dy * f, dz * f);
+				}
+			};
+			stretchLimb("armLength", "upperarm_", fArmLen, C.arm);
+			stretchLimb("legLength", "thigh_", fLegLen, [...C.thigh, ...C.calf]);
 		}
 
 		if (fHeight !== 1) delta("height", i, 0, (y - minY) * (fHeight - 1), 0);
@@ -194,7 +237,7 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 
 	const order = keys.filter((k) => targets[k]);
 	for (const k of order) {
-		smoothTarget(targets[k]);
+		// Sin suavizado global: propagaba el target a todo el cuerpo.
 		const a = targets[k];
 		for (let j = 0; j < a.length; j++) verts[j] += a[j];
 	}

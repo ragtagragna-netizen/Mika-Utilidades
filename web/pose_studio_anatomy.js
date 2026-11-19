@@ -8,7 +8,8 @@
 
 export const ANATOMY_KEYS = [
 	"height", "bust", "firmness", "waist", "hips", "glutes",
-	"armLength", "legLength", "armThickness", "legThickness", "headSize",
+	"armLength", "legLength", "armThickness", "thighThickness",
+	"calfThickness", "headSize",
 	"genitalSize", "openingSize", "anusSize",
 ];
 
@@ -16,19 +17,19 @@ export const BODY_PRESETS = {
 	curvy_female: {
 		gender: 0, height: 0.55, bust: 0.82, firmness: 0.5, waist: 0.3,
 		hips: 0.85, glutes: 0.8, armLength: 0.5, legLength: 0.55,
-		armThickness: 0.45, legThickness: 0.5, headSize: 0.45,
+		armThickness: 0.45, thighThickness: 0.5, calfThickness: 0.5, headSize: 0.45,
 		genitalSize: 0.5, openingSize: 0.5, anusSize: 0.5,
 	},
 	muscular_male: {
 		gender: 1, height: 0.72, bust: 0.45, firmness: 0.7, waist: 0.55,
 		hips: 0.4, glutes: 0.55, armLength: 0.7, legLength: 0.65,
-		armThickness: 0.75, legThickness: 0.7, headSize: 0.5,
+		armThickness: 0.75, thighThickness: 0.7, calfThickness: 0.65, headSize: 0.5,
 		genitalSize: 0.6, openingSize: 0.5, anusSize: 0.5,
 	},
 	slim_female: {
 		gender: 0, height: 0.65, bust: 0.35, firmness: 0.45, waist: 0.2,
 		hips: 0.35, glutes: 0.3, armLength: 0.6, legLength: 0.7,
-		armThickness: 0.35, legThickness: 0.35, headSize: 0.5,
+		armThickness: 0.35, thighThickness: 0.35, calfThickness: 0.35, headSize: 0.5,
 		genitalSize: 0.45, openingSize: 0.45, anusSize: 0.45,
 	},
 };
@@ -61,8 +62,11 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 		waist: size("waist"),
 		hips: size("hips"),
 		glutes: size("glutes"),
+		armLength: size("armLength"),
+		legLength: size("legLength"),
 		armThickness: size("armThickness"),
-		legThickness: size("legThickness"),
+		thighThickness: size("thighThickness"),
+		calfThickness: size("calfThickness"),
 		genitalSize: size("genitalSize"),
 		height: size("height"),
 	};
