@@ -1988,6 +1988,63 @@ app.registerExtension({
 			return { parts: [wrap], refresh };
 		}
 
+		// Presets y sliders de anatomía del maniquí 3D. Los valores viven en
+		// node.properties.mikaPoseStudio3D y se pasan al bridge al abrirlo.
+		function createPose3DGroup(node) {
+			const st = node._mikaLineart;
+			const wrap = document.createElement("div");
+			wrap.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;align-items:center;max-width:280px;";
+			const state = () => (node.properties.mikaPoseStudio3D ||= {
+				anatomy: {}, preset: "curvy_female", characters: 1,
+			});
+			const preset = styleInput(document.createElement("select"));
+			preset.title = "Tipo de cuerpo 3D";
+			for (const [id, label] of [
+				["curvy_female", "Femenina curvilínea"],
+				["muscular_male", "Masculina musculosa"],
+				["slim_female", "Femenina estilizada"],
+			]) {
+				const o = document.createElement("option");
+				o.value = id; o.textContent = label; preset.appendChild(o);
+			}
+			preset.value = state().preset || "curvy_female";
+			preset.onchange = async () => {
+				const a = await import("./pose_studio_anatomy.js");
+				state().preset = preset.value;
+				state().anatomy = { ...a.BODY_PRESETS[preset.value] };
+				savePoseStudio(node);
+				refreshUI(node);
+			};
+			wrap.appendChild(preset);
+			const labels = {
+				height: "Altura", bust: "Pecho", firmness: "Firmeza", waist: "Cintura",
+				hips: "Cadera", glutes: "Glúteos", armLength: "Brazos", legLength: "Piernas",
+				headSize: "Cabeza", genitalSize: "Genitales", openingSize: "Abertura", anusSize: "Ano",
+			};
+			for (const key of Object.keys(labels)) {
+				const s = document.createElement("input");
+				s.type = "range"; s.min = "0"; s.max = "1"; s.step = "0.01";
+				s.title = labels[key];
+				s.style.width = "48px";
+				s.addEventListener("input", () => {
+					const v = parseFloat(s.value);
+					(state().anatomy ||= {})[key] = v;
+					savePoseStudio(node);
+				});
+				wrap.appendChild(s);
+				(preset._sliders ||= {})[key] = s;
+			}
+			const refresh = () => {
+				const a = state().anatomy || {};
+				preset.value = state().preset || "curvy_female";
+				for (const [k, s] of Object.entries(preset._sliders || {})) {
+					if (a[k] !== undefined) s.value = String(a[k]);
+				}
+			};
+			refresh();
+			return { parts: [wrap], refresh };
+		}
+
 		// Tamaño del lienzo (resolución) elegido desde la ventana: escribe el
 		// widget del nodo, así los dos lados comparten el mismo valor.
 		function createSizeGroup(node) {
@@ -2418,6 +2475,7 @@ app.registerExtension({
 
 			addSection("Opacidad del calco", registerUISet(node, createOpacityGroup(node), "window"));
 			addSection("Maniquí", registerUISet(node, createMannequinGroup(node), "window"));
+			addSection("Pose 3D", registerUISet(node, createPose3DGroup(node), "window"));
 			addSection("Lineart", registerUISet(node, createLineartGroup(node), "window"));
 
 			const transformSec = addSection("Transformar", registerUISet(node, createTransformGroup(node), "window"));
@@ -3940,6 +3998,12 @@ app.registerExtension({
 			node.properties.mikaMannequins = serializeMannequins(st.mannequins);
 		}
 
+		function savePoseStudio(node) {
+			if (!node.properties) return;
+			const s = node.properties.mikaPoseStudio3D;
+			if (s) node.properties.mikaPoseStudio3D = JSON.parse(JSON.stringify(s));
+		}
+
 		function bakePaintTf(node) {
 			const st = node._mikaLineart;
 			const t = st.paintTransform;
@@ -4702,6 +4766,7 @@ app.registerExtension({
 			append(registerUISet(node, createCopyGroup(node)));
 			append(registerUISet(node, createOpacityGroup(node)));
 			append(registerUISet(node, createMannequinGroup(node)));
+			append(registerUISet(node, createPose3DGroup(node)));
 			append(registerUISet(node, createMergeGroup(node)));
 			wireDomDrop(node, root);
 			wireCanvasNav(root);
