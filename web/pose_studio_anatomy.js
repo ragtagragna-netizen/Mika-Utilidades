@@ -57,7 +57,8 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 		...a,
 		localDeform,
 		genitalMeshes: nsfw ? {
-			vagina: female ? clamp01(anatomy.openingSize ?? 0.5) : 0,
+			vagina: female ? clamp01(anatomy.genitalSize ?? 0.5) : 0,
+			opening: female ? clamp01(anatomy.openingSize ?? 0.5) : 0,
 			anus: clamp01(anatomy.anusSize ?? 0.5),
 		} : null,
 		nsfw,

@@ -1,11 +1,6 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { openPoseGallery, poseImageUrl } from "./pose_gallery_mika.js";
-import {
-	createMannequin, drawMannequin, serializeMannequins, deserializeMannequins,
-	mannequinBounds, jointHit, localPoint, setJoint, setProportion, applyGender, skeleton,
-	PROPORTIONS, GENDERS, JOINTS,
-} from "./mannequin_mika.js";
 
 // -----------------------------------------------------------------------
 // Mika · Anima Lineart Canvas
@@ -75,7 +70,7 @@ const SOFT_BRUSH_ICON =
 // herramienta, grosores, difuminado, grano, figura, fuente y color de trazo.
 const PINCEL_KEYS = [
 	"tool", "thickness", "eraseThickness", "softThickness", "softBlur", "softGrain",
-	"maskThickness", "calcoOpacity", "mannequinOpacity", "mannequinNsfw", "shape", "font", "fontSize", "userColor",
+	"maskThickness", "calcoOpacity", "shape", "font", "fontSize", "userColor",
 ];
 
 // Debajo de este arrastre (en píxeles de lienzo) un clic crea la figura con
@@ -465,7 +460,6 @@ app.registerExtension({
 				paint: st.paint.toDataURL("image/png"),
 				mask: st.maskCanvas ? st.maskCanvas.toDataURL("image/png") : null,
 				calco: null,
-				mannequins: serializeMannequins(st.mannequins),
 			};
 			if (withCalco && st.calcoLayers.length) {
 				snap.calco = st.calcoLayers.map((l) => ({
@@ -477,13 +471,6 @@ app.registerExtension({
 
 		function restore(node, snap) {
 			const st = node._mikaLineart;
-			if (snap.mannequins) {
-				st.mannequins = deserializeMannequins(snap.mannequins, st.paint.width, st.paint.height);
-				st.selection = st.selection.filter((k) => !String(k).startsWith("M:") || mannequinByKey(node, k));
-				drawMannequins(node);
-				renderLayerPanel(node);
-				saveMannequins(node);
-			}
 			// Las capas de calco que el borrador vació vuelven si el snapshot
 			// las trae (operaciones de calco sin deshacer no).
 			if (snap.calco) {
@@ -769,7 +756,6 @@ app.registerExtension({
 			st.lasso = null;
 			st.softPts = null;
 			const oldW = st.paint.width, oldH = st.paint.height;
-			const oldMannequinTfs = st.mannequins.map((m) => ({ ...m.tf }));
 			const shot = document.createElement("canvas");
 			shot.width = oldW;
 			shot.height = oldH;
@@ -781,22 +767,9 @@ app.registerExtension({
 			// La caja a reencajar es la unión del trazo, el calco base y las
 			// capas, para que nada quede recortado.
 			const paintBounds = boundsOf(shot);
-			const mannequinOnly = !paintBounds && !st.baseImg && !st.underlayImg && !st.calcoLayers.length;
 			let bounds = paintBounds;
 			if (st.underlayImg && st.underlayTransform) bounds = unionRect(bounds, cornersBounds(layerCorners(node, "underlay")));
 			for (const l of st.calcoLayers) if (l.visible) bounds = unionRect(bounds, cornersBounds(cornersOfTf(l.tf, l.w, l.h)));
-			for (const m of st.mannequins) {
-				if (m.visible === false) continue;
-				const b = mannequinBounds(m);
-				const t = m.tf;
-				const cos = Math.cos(t.rot), sin = Math.sin(t.rot);
-				const cs = [[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h]]
-					.map(([lx, ly]) => {
-						const px = lx * t.sx, py = ly * t.sy;
-						return [t.cx + px * cos - py * sin, t.cy + px * sin + py * cos];
-					});
-				bounds = unionRect(bounds, cornersBounds(cs));
-			}
 
 			st.paint.width = nw;
 			st.paint.height = nh;
@@ -805,7 +778,7 @@ app.registerExtension({
 			st.softScratch.width = nw;
 			st.softScratch.height = nh;
 			forEachSurface(node, (s) => {
-				for (const c of [s.preview, s.underlay, s.calcoLayersCanvas, s.mannequinCanvas, s.overlay, s.handles, s.baseLayer, s.maskLayer]) {
+				for (const c of [s.preview, s.underlay, s.calcoLayersCanvas, s.overlay, s.handles, s.baseLayer, s.maskLayer]) {
 					if (!c) continue;
 					c.width = nw;
 					c.height = nh;
@@ -857,22 +830,7 @@ app.registerExtension({
 					l.tf = mapTf(l.tf);
 					l.tf0 = mapTf(l.tf0);
 				}
-				if (mannequinOnly) {
-					const k = Math.min(nw / oldW, nh / oldH);
-					st.mannequins.forEach((m, i) => {
-						const o = oldMannequinTfs[i];
-						m.tf = {
-							cx: nw / 2 + (o.cx - oldW / 2) * k,
-							cy: nh / 2 + (o.cy - oldH / 2) * k,
-							sx: o.sx * k, sy: o.sy * k, rot: o.rot,
-						};
-					});
-				} else {
-					for (const m of st.mannequins) m.tf = mapTf(m.tf);
-				}
 			}
-			drawMannequins(node);
-			saveMannequins(node);
 			// La base se redibuja "contain" en el tamaño nuevo y la máscara usa
 			// el mismo mapeo que el trazo.
 			drawBase(node);
@@ -1708,9 +1666,6 @@ app.registerExtension({
 					},
 				}).catch((err) => console.error("MikaLineartCanvas:", err));
 			};
-			const mannequinBtn = mkButton(
-				"🧍‍♂️", "Añadir un maniquí articulado editable como calco");
-			mannequinBtn.onclick = () => addMannequin(node);
 			const pose3dBtn = mkButton(
 				"🧊", "Abrir Pose Studio 3D: maniquí anatómico, articulaciones y cámara");
 			pose3dBtn.onclick = async () => {
@@ -1722,7 +1677,7 @@ app.registerExtension({
 					alert("No se pudo abrir Pose Studio 3D: " + (err?.message || err));
 				}
 			};
-			return { parts: [loadBtn, pasteEditBtn, traceBtn, pasteTraceBtn, posesBtn, mannequinBtn, pose3dBtn], refresh() {} };
+			return { parts: [loadBtn, pasteEditBtn, traceBtn, pasteTraceBtn, posesBtn, pose3dBtn], refresh() {} };
 		}
 
 		// Selector de preprocesador + ⚡ (no encola el grafo).
@@ -1887,106 +1842,6 @@ app.registerExtension({
 			return { parts: [opacity], refresh };
 		}
 
-		// Controles del maniquí seleccionado: género, proporciones y opacidad
-		// propia (independiente del slider del calco).
-		const MANNEQUIN_LABELS = {
-			height: "Altura", bust: "Pecho", waist: "Cintura", hips: "Cadera",
-			glutes: "Glúteos", armLength: "Largo de brazos", legLength: "Largo de piernas",
-			headSize: "Tamaño de cabeza", genitalSize: "Tamaño de genitales",
-			openingSize: "Abertura", anusSize: "Ano",
-		};
-		const INTIMATE = new Set(["genitalSize", "openingSize", "anusSize"]);
-
-		function createMannequinGroup(node) {
-			const st = node._mikaLineart;
-			const wrap = document.createElement("div");
-			wrap.style.display = "flex";
-			wrap.style.flexWrap = "wrap";
-			wrap.style.gap = "4px";
-			wrap.style.alignItems = "center";
-
-			const nsfwBtn = mkButton("SFW", "SFW / NSFW: mostrar u ocultar la anatomía genital");
-			const opacity = document.createElement("input");
-			opacity.type = "range";
-			opacity.min = "0"; opacity.max = "100";
-			opacity.title = "Opacidad del maniquí";
-			opacity.style.width = "60px";
-			const gender = styleInput(document.createElement("select"));
-			gender.title = "Género del maniquí";
-			for (const g of GENDERS) {
-				const o = document.createElement("option");
-				o.value = g;
-				o.textContent = g === "female" ? "Femenino" : "Masculino";
-				gender.appendChild(o);
-			}
-			const sliders = document.createElement("div");
-			sliders.style.display = "flex";
-			sliders.style.flexWrap = "wrap";
-			sliders.style.gap = "4px";
-			wrap.append(nsfwBtn, opacity, gender, sliders);
-
-			const selected = () => {
-				const key = (st.selection || []).find((k) => String(k).startsWith("M:"));
-				return key ? mannequinByKey(node, key) : null;
-			};
-			const commit = () => {
-				writePincelState(node);
-				saveMannequins(node);
-				drawMannequins(node);
-				writeCalco(node);
-				renderLayerPanel(node);
-				node.setDirtyCanvas(true, true);
-			};
-			nsfwBtn.onclick = () => {
-				st.mannequinNsfw = !st.mannequinNsfw;
-				commit();
-				refreshUI(node);
-			};
-			opacity.addEventListener("input", () => {
-				st.mannequinOpacity = parseInt(opacity.value, 10) || 0;
-				applyMannequinOpacity(node);
-				writePincelState(node);
-			});
-			gender.onchange = () => {
-				const m = selected();
-				if (!m) return;
-				applyGender(m, gender.value);
-				commit();
-				refreshUI(node);
-			};
-			const rebuildSliders = () => {
-				sliders.replaceChildren();
-				const m = selected();
-				if (!m) return;
-				for (const key of PROPORTIONS) {
-					if (!st.mannequinNsfw && INTIMATE.has(key)) continue;
-					if (key === "openingSize" && m.gender === "male") continue;
-					const s = document.createElement("input");
-					s.type = "range";
-					s.min = "0.6"; s.max = "1.6"; s.step = "0.05";
-					s.value = String(m.proportions[key]);
-					s.title = MANNEQUIN_LABELS[key] || key;
-					s.style.width = "56px";
-					s.addEventListener("pointerdown", () => pushUndo(node));
-					s.addEventListener("keydown", () => pushUndo(node));
-					s.addEventListener("input", () => {
-						setProportion(m, key, parseFloat(s.value));
-						commit();
-					});
-					sliders.appendChild(s);
-				}
-			};
-			const refresh = () => {
-				const m = selected();
-				wrap.style.display = m ? "flex" : "none";
-				nsfwBtn.textContent = st.mannequinNsfw ? "NSFW" : "SFW";
-				opacity.value = String(st.mannequinOpacity ?? 100);
-				gender.value = m ? m.gender : "female";
-				rebuildSliders();
-			};
-			refresh();
-			return { parts: [wrap], refresh };
-		}
 
 		// Presets y sliders de anatomía del maniquí 3D. Los valores viven en
 		// node.properties.mikaPoseStudio3D y se pasan al bridge al abrirlo.
@@ -2161,7 +2016,7 @@ app.registerExtension({
 			// Solo cuentan el calco base o las capas de calco (no el trazo) y
 			// solo las visibles: selectedLayers ya filtra por visibilidad.
 			const keys = selectedLayers(node).filter(
-				(k) => k === "underlay" || String(k).startsWith("L:") || String(k).startsWith("M:"),
+				(k) => k === "underlay" || String(k).startsWith("L:"),
 			);
 			if (!keys.length) {
 				alert("[Mika] Seleccioná una o más capas de calco para pasarlas a lineart.");
@@ -2480,7 +2335,6 @@ app.registerExtension({
 			st.layerPanels.push({ el: listEl, mode: "list" });
 
 			addSection("Opacidad del calco", registerUISet(node, createOpacityGroup(node), "window"));
-			addSection("Maniquí", registerUISet(node, createMannequinGroup(node), "window"));
 			addSection("Pose 3D", registerUISet(node, createPose3DGroup(node), "window"));
 			addSection("Lineart", registerUISet(node, createLineartGroup(node), "window"));
 
@@ -2505,8 +2359,6 @@ app.registerExtension({
 			// Los controles se montaron antes de que existiera esta superficie:
 			// reaplicar la opacidad del calco sobre ella.
 			applyCalcoOpacity(node);
-			applyMannequinOpacity(node);
-			drawMannequins(node);
 
 			document.body.appendChild(root);
 			root.addEventListener("pointerdown", () => { sink.focus(); focusEditor(node); });
@@ -2833,38 +2685,9 @@ app.registerExtension({
 					ctx.restore();
 				}
 			});
-			drawMannequins(node);
 		}
 
-		// Dibuja los maniquíes visibles en el canvas propio de cada superficie.
-		function drawMannequins(node) {
-			const st = node._mikaLineart;
-			if (!st) return;
-			forEachSurface(node, (s) => {
-				const c = s.mannequinCanvas;
-				if (!c) return;
-				const ctx = c.getContext("2d");
-				ctx.setTransform(1, 0, 0, 1, 0, 0);
-				ctx.clearRect(0, 0, c.width, c.height);
-				for (const m of st.mannequins) {
-					if (m.visible === false) continue;
-					const t = m.tf;
-					ctx.save();
-					ctx.translate(t.cx, t.cy);
-					ctx.rotate(t.rot);
-					ctx.scale(t.sx, t.sy);
-					drawMannequin(ctx, m, st.mannequinNsfw);
-					ctx.restore();
-				}
-			});
-		}
 
-		function applyMannequinOpacity(node) {
-			const st = node._mikaLineart;
-			if (!st) return;
-			const v = String((st.mannequinOpacity ?? 100) / 100);
-			forEachSurface(node, (s) => { if (s.mannequinCanvas) s.mannequinCanvas.style.opacity = v; });
-		}
 
 		// Composición del calco (fondo blanco + calco base + capas visibles),
 		// igual que la salida "calco" del nodo.
@@ -2898,17 +2721,6 @@ app.registerExtension({
 				ctx.rotate(l.tf.rot);
 				ctx.scale(l.tf.sx, l.tf.sy);
 				ctx.drawImage(l.src, -l.w / 2, -l.h / 2);
-				ctx.restore();
-			}
-			for (const m of st.mannequins) {
-				if (m.visible === false) continue;
-				if (allow && !allow.has("M:" + m.id)) continue;
-				const mt = m.tf;
-				ctx.save();
-				ctx.translate(mt.cx, mt.cy);
-				ctx.rotate(mt.rot);
-				ctx.scale(mt.sx, mt.sy);
-				drawMannequin(ctx, m, st.mannequinNsfw);
 				ctx.restore();
 			}
 			return tmp;
@@ -3255,15 +3067,6 @@ app.registerExtension({
 			return c.toDataURL("image/png");
 		}
 
-		function mannequinThumb(m) {
-			const c = document.createElement("canvas");
-			c.width = 64; c.height = 64;
-			const ctx = c.getContext("2d");
-			ctx.translate(32, 32);
-			ctx.scale(0.16, 0.16);
-			drawMannequin(ctx, m, false);
-			return c.toDataURL("image/png");
-		}
 
 		function toggleBaseVisibility(node) {
 			const st = node._mikaLineart;
@@ -3416,17 +3219,6 @@ app.registerExtension({
 					],
 				});
 			}
-			for (const m of st.mannequins) {
-				addItem("M:" + m.id, m.name, mannequinThumb(m), {
-					dim: m.visible === false,
-					controls: [
-						["👁", "Mostrar/ocultar maniquí", "visible", () => toggleMannequin(node, m.id)],
-						["✕", "Borrar maniquí", "delete", () => removeMannequin(node, m.id)],
-						["↑", "Subir maniquí", "up", () => moveMannequin(node, m.id, +1)],
-						["↓", "Bajar maniquí", "down", () => moveMannequin(node, m.id, -1)],
-					],
-				});
-			}
 		}
 
 		// Ajusta la resolución del nodo a la fuente más parecida: el calco o la
@@ -3467,59 +3259,10 @@ app.registerExtension({
 			const id = key.slice(2);
 			return node._mikaLineart.calcoLayers.find((l) => l.id === id) || null;
 		}
-		function mannequinByKey(node, key) {
-			if (typeof key !== "string" || !key.startsWith("M:")) return null;
-			const id = key.slice(2);
-			return node._mikaLineart.mannequins.find((m) => m.id === id) || null;
-		}
-		function addMannequin(node) {
-			const st = node._mikaLineart;
-			if (!st) return null;
-			const id = "M" + (st.layerSeq++);
-			const m = createMannequin(id, st.mannequins.length, st.paint.width, st.paint.height);
-			st.mannequins.push(m);
-			st.selection = ["M:" + m.id];
-			drawMannequins(node);
-			applyMannequinOpacity(node);
-			renderLayerPanel(node);
-			drawTransformUI(node);
-			writeCalco(node);
-			saveMannequins(node);
-			node.setDirtyCanvas(true, true);
-			return m;
-		}
-		function removeMannequin(node, id) {
-			const st = node._mikaLineart;
-			st.mannequins = st.mannequins.filter((m) => m.id !== id);
-			st.selection = st.selection.filter((k) => k !== "M:" + id);
-			drawMannequins(node); renderLayerPanel(node); drawTransformUI(node); writeCalco(node);
-			saveMannequins(node);
-		}
-		function toggleMannequin(node, id) {
-			const st = node._mikaLineart;
-			const m = mannequinByKey(node, "M:" + id);
-			if (!m) return;
-			m.visible = m.visible === false;
-			if (!m.visible) st.selection = st.selection.filter((k) => k !== "M:" + id);
-			drawMannequins(node); renderLayerPanel(node); drawTransformUI(node); writeCalco(node);
-			saveMannequins(node);
-		}
-		function moveMannequin(node, id, delta) {
-			const st = node._mikaLineart;
-			const i = st.mannequins.findIndex((m) => m.id === id);
-			const j = i + delta;
-			if (i < 0 || j < 0 || j >= st.mannequins.length) return;
-			const [m] = st.mannequins.splice(i, 1);
-			st.mannequins.splice(j, 0, m);
-			drawMannequins(node); renderLayerPanel(node); writeCalco(node);
-			saveMannequins(node);
-		}
 		function layerVisible(node, key) {
 			const st = node._mikaLineart;
 			if (key === "paint") return true;
 			if (key === "underlay") return st.underlayVisible !== false;
-			const man = mannequinByKey(node, key);
-			if (man) return man.visible !== false;
 			const l = layerByKey(node, key);
 			return !!(l && l.visible);
 		}
@@ -3532,7 +3275,7 @@ app.registerExtension({
 			CALCO_CACHE.set(calcoKey(node), {
 				underlayImg: st.underlayImg, underlayTransform: st.underlayTransform,
 				underlayVisible: st.underlayVisible !== false,
-				calcoLayers: st.calcoLayers, mannequins: st.mannequins,
+				calcoLayers: st.calcoLayers,
 				selection: st.selection.slice(),
 				layerSeq: st.layerSeq, calcoNameSeq: st.calcoNameSeq, contentSize: st.contentSize,
 			});
@@ -3563,11 +3306,6 @@ app.registerExtension({
 				const t = st.underlayTransform;
 				if (!img || !t) return null;
 				return { t, w: img.width, h: img.height };
-			}
-			const man = mannequinByKey(node, which);
-			if (man) {
-				const b = mannequinBounds(man);
-				return { t: man.tf, w: Math.max(1, b.w), h: Math.max(1, b.h) };
 			}
 			if (which === "sel") {
 				const s = st.sel;
@@ -3633,8 +3371,6 @@ app.registerExtension({
 
 		function setLayerTf(node, which, t) {
 			const st = node._mikaLineart;
-			const man = mannequinByKey(node, which);
-			if (man) { man.tf = t; return; }
 			if (which === "paint") st.paintTransform = t;
 			else if (which === "underlay") st.underlayTransform = t;
 			else if (which === "sel") { if (st.sel) st.sel.tf = t; }
@@ -3721,68 +3457,8 @@ app.registerExtension({
 					ctx.fill();
 				}
 			});
-			drawMannequinHandles(node);
 		}
 
-		const JOINT_PARENT = {
-			shoulderL: "shoulderL", shoulderR: "shoulderR",
-			elbowL: "elbowL", elbowR: "elbowR",
-			hipL: "hipL", hipR: "hipR",
-			kneeL: "kneeL", kneeR: "kneeR",
-			neck: "neck", wristL: "elbowL", wristR: "elbowR",
-			ankleL: "kneeL", ankleR: "kneeR",
-		};
-		const JOINT_BASE = {
-			shoulderL: [-8, 68], shoulderR: [8, 68],
-			elbowL: [-6, 62], elbowR: [6, 62],
-			hipL: [-4, 74], hipR: [4, 74],
-			kneeL: [-2, 72], kneeR: [2, 72],
-		};
-
-		function jointAngleFrom(m, joint, lx, ly) {
-			const pt = skeleton(m);
-			const key = JOINT_PARENT[joint];
-			const anchor = pt[key] || pt.pelvis;
-			const dx = lx - anchor[0], dy = ly - anchor[1];
-			if (joint === "neck") return Math.atan2(dx, -dy);
-			const base = JOINT_BASE[joint];
-			if (!base) return Math.atan2(dx, dy);
-			let a = Math.atan2(dx, dy) - Math.atan2(base[0], base[1]);
-			const side = joint.endsWith("L") ? "L" : "R";
-			if (joint.startsWith("elbow")) a -= m.pose["shoulder" + side];
-			if (joint.startsWith("knee")) a -= m.pose["hip" + side];
-			return a;
-		}
-
-		function drawMannequinHandles(node) {
-			const st = node._mikaLineart;
-			if (!st) return;
-			forEachSurface(node, (s) => {
-				const ctx = s.handles.getContext("2d");
-				const key = (st.selection || []).find((k) => String(k).startsWith("M:"));
-				const m = key && mannequinByKey(node, key);
-				if (!m) return;
-				const t = m.tf;
-				const pt = skeleton(m);
-				const hs = handleSize(node) / Math.max(0.1, (Math.abs(t.sx) + Math.abs(t.sy)) / 2);
-				ctx.save();
-				ctx.translate(t.cx, t.cy);
-				ctx.rotate(t.rot);
-				ctx.scale(t.sx, t.sy);
-				for (const j of JOINTS) {
-					const q = pt[j];
-					if (!q) continue;
-					ctx.beginPath();
-					ctx.arc(q[0], q[1], hs, 0, Math.PI * 2);
-					ctx.fillStyle = "rgba(0, 220, 255, 0.85)";
-					ctx.fill();
-					ctx.lineWidth = hs * 0.4;
-					ctx.strokeStyle = "#fff";
-					ctx.stroke();
-				}
-				ctx.restore();
-			});
-		}
 
 		function transformHit(node, x, y) {
 			const st = node._mikaLineart;
@@ -3839,7 +3515,6 @@ app.registerExtension({
 			const baseLayer = isInpaint ? mkLayer(null) : null;
 			const underlay = mkLayer(0.4);
 			const calcoLayersCanvas = mkLayer(0.4);
-			const mannequinCanvas = mkLayer(1);
 			const preview = mkLayer(null);
 			preview.style.cursor = CURSOR_CROSS;
 			preview.style.pointerEvents = "auto";
@@ -3864,7 +3539,6 @@ app.registerExtension({
 			if (baseLayer) stage.appendChild(baseLayer);
 			stage.appendChild(underlay);
 			stage.appendChild(calcoLayersCanvas);
-			stage.appendChild(mannequinCanvas);
 			stage.appendChild(preview);
 			if (maskLayer) stage.appendChild(maskLayer);
 			stage.appendChild(overlay);
@@ -3872,7 +3546,7 @@ app.registerExtension({
 			stage.appendChild(brushCursor);
 
 			const surface = {
-				id, host, stage, preview, underlay, calcoLayersCanvas, mannequinCanvas, overlay,
+				id, host, stage, preview, underlay, calcoLayersCanvas, overlay,
 				handles, brushCursor, baseLayer, maskLayer,
 				cursorPos: null, lastClient: null,
 				view: host ? { zoom: 1, x: 0, y: 0 } : null,
@@ -3998,11 +3672,6 @@ app.registerExtension({
 		// Hornea la transformación viva del trazo en el canvas fuente y la
 		// deja en identidad. Sin esto, al dibujar sobre un trazo movido/escalado
 		// el punto del lienzo cae fuera del canvas fuente y el trazo se pierde.
-		function saveMannequins(node) {
-			const st = node._mikaLineart;
-			if (!st || !node.properties) return;
-			node.properties.mikaMannequins = serializeMannequins(st.mannequins);
-		}
 
 		function savePoseStudio(node) {
 			if (!node.properties) return;
@@ -4465,8 +4134,7 @@ app.registerExtension({
 			if (st.sel) drawSel(node);
 			drawTransformUI(node);
 			if (touched.includes("paint")) write(node);
-			if (touched.includes("underlay") || touched.some((k) => /^[ML]:/.test(k))) writeCalco(node);
-			if (touched.some((k) => String(k).startsWith("M:"))) saveMannequins(node);
+			if (touched.includes("underlay") || touched.some((k) => /^L:/.test(k))) writeCalco(node);
 		}
 
 		// Punto del lienzo -> coordenadas fuente de la capa de trazo.
@@ -4706,7 +4374,7 @@ app.registerExtension({
 				underlayImg: null,
 				baseCanvas, baseLayer: nodeSurface.baseLayer, baseImg: null, baseSrc: null,
 				maskCanvas, maskLayer: nodeSurface.maskLayer, maskThickness: 30,
-				calcoLayers: [], mannequins: [], selection: [], layerSeq: 0, calcoNameSeq: 0, layerPanel,
+				calcoLayers: [], selection: [], layerSeq: 0, calcoNameSeq: 0, layerPanel,
 				layerPanels: [{ el: layerPanel, mode: "strip", refit: true }],
 				editorChip, editorRoot: null, editorSurface: null, editorTitle: null, uiWindow: null,
 				undo: [], redo: [], lineartBusy: false,
@@ -4714,8 +4382,6 @@ app.registerExtension({
 				tool: "soft", shape: "rect", font: "Arial", fontSize: 48, text: "", thickness: 1, eraseThickness: 40,
 				softScratch, softThickness: 2, softBlur: 1, softGrain: 80, softPts: null, grainTile: null, grainRand: null, _grainFor: null, _grainPat: null,
 				calcoOpacity: 40,
-				mannequinOpacity: 100,
-				mannequinNsfw: false,
 				userColor: "#000",
 				color: modeStroke(node), dirty: false, erasePoints: null,
 				eraseContentPts: null,
@@ -4736,12 +4402,9 @@ app.registerExtension({
 			};
 
 			// Ganchos para los tests del editor (mismo patrón que el puente de calco).
-			window.__drawMannequins = () => drawMannequins(node);
-			window.__drawHandles = () => { drawTransformUI(node); drawMannequinHandles(node); };
+			window.__drawHandles = () => { drawTransformUI(node); };
 			window.__writeCalco = () => writeCalco(node);
 			window.__refreshUI = () => refreshUI(node);
-			window.__applyMannequinOpacity = () => applyMannequinOpacity(node);
-			window.__saveMannequins = () => saveMannequins(node);
 			window.__pushUndo = () => pushUndo(node);
 			window.__undoOnce = () => undoOnce(node);
 			window.__sendPoseToCalco = () => sendPoseToCalco(node);
@@ -4759,13 +4422,9 @@ app.registerExtension({
 			if (savedState) {
 				for (const k of PINCEL_KEYS) if (savedState[k] !== undefined) st[k] = savedState[k];
 			}
-			const savedMannequins = node.properties?.mikaMannequins;
-			if (Array.isArray(savedMannequins) && savedMannequins.length) {
-				st.mannequins = deserializeMannequins(savedMannequins, st.paint.width, st.paint.height);
-			}
 
 			if (prevState) {
-				for (const k of ["underlayImg", "underlayTransform", "underlayVisible", "transformMode", "freeResize", "tool", "shape", "font", "fontSize", "thickness", "eraseThickness", "softThickness", "softBlur", "softGrain", "calcoOpacity", "mannequinOpacity", "mannequinNsfw", "userColor", "contentSize", "calcoLayers", "mannequins", "selection", "layerSeq", "calcoNameSeq", "baseImg", "baseSrc", "maskThickness"]) {
+				for (const k of ["underlayImg", "underlayTransform", "underlayVisible", "transformMode", "freeResize", "tool", "shape", "font", "fontSize", "thickness", "eraseThickness", "softThickness", "softBlur", "softGrain", "calcoOpacity", "userColor", "contentSize", "calcoLayers", "selection", "layerSeq", "calcoNameSeq", "baseImg", "baseSrc", "maskThickness"]) {
 					if (prevState[k] !== undefined) st[k] = prevState[k];
 				}
 				const ow = prevState.paint?.width;
@@ -4814,16 +4473,12 @@ app.registerExtension({
 			append(registerUISet(node, createTransformGroup(node)));
 			append(registerUISet(node, createCopyGroup(node)));
 			append(registerUISet(node, createOpacityGroup(node)));
-			append(registerUISet(node, createMannequinGroup(node)));
 			append(registerUISet(node, createPose3DGroup(node)));
 			append(registerUISet(node, createMergeGroup(node)));
 			wireDomDrop(node, root);
 			wireCanvasNav(root);
 			drawCalcoLayers(node);
-			applyMannequinOpacity(node);
-			drawMannequins(node);
 			renderLayerPanel(node);
-			if (st.underlayImg || st.calcoLayers.length || st.mannequins.length) writeCalco(node);
 
 			// --- Dibujo ---
 			let drawing = false;
@@ -5172,22 +4827,6 @@ app.registerExtension({
 						return;
 					}
 
-					// Articulación de un maniquí seleccionado: manda antes que el marco.
-					{
-						const mkey = (st.selection || []).find((k) => String(k).startsWith("M:"));
-						const m = mkey && mannequinByKey(node, mkey);
-						if (m) {
-							const [tx, ty] = posCanvas(e, surface);
-							const [lx, ly] = localPoint(m, tx, ty);
-							const joint = jointHit(m, lx, ly, handleSize(node) * 1.5);
-							if (joint) {
-								pushUndo(node);
-								st.jointDrag = { id: m.id, joint };
-								hideCursor(node);
-								return;
-							}
-						}
-					}
 
 					// Selección flotante: si se toca el marco se edita; si no, se fija.
 					if (st.sel) {
@@ -5306,17 +4945,6 @@ app.registerExtension({
 						}
 						return;
 					}
-					if (st.jointDrag) {
-						const [cx, cy] = posCanvas(e, surface);
-						const m = mannequinByKey(node, "M:" + st.jointDrag.id);
-						if (m) {
-							const [lx, ly] = localPoint(m, cx, cy);
-							setJoint(m, st.jointDrag.joint, jointAngleFrom(m, st.jointDrag.joint, lx, ly));
-							drawMannequins(node);
-							drawTransformUI(node);
-						}
-						return;
-					}
 					if (st.transformDrag) {
 						const [cx, cy] = posCanvas(e, surface);
 						applyTransformDrag(node, cx, cy);
@@ -5344,19 +4972,11 @@ app.registerExtension({
 					else strokeTo(x, y);
 				});
 				const endStroke = () => {
-					if (st.jointDrag) {
-						st.jointDrag = null;
-						writeCalco(node);
-						saveMannequins(node);
-						drawTransformUI(node);
-						return;
-					}
 					if (st.transformDrag) {
 						const layers = st.transformDrag.layers;
 						st.transformDrag = null;
 						if (layers.includes("paint")) write(node);
-						if (layers.includes("underlay") || layers.some((k) => /^[ML]:/.test(k))) writeCalco(node);
-						if (layers.some((k) => String(k).startsWith("M:"))) saveMannequins(node);
+						if (layers.includes("underlay") || layers.some((k) => /^L:/.test(k))) writeCalco(node);
 						drawTransformUI(node);
 						return;
 					}
