@@ -526,9 +526,10 @@ function sliderRow(panel, label, key, state, onInput) {
 		"width:70px;flex:none;color:#222;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
 	const input = document.createElement("input");
 	input.type = "range";
-	const extended = key !== "gender" && key !== "posX" && key !== "posY" && key !== "rotationY";
-	input.min = extended ? "-1" : "0";
-	input.max = extended ? "2.5" : "1";
+	const RANGES = { gender: [0, 1], posX: [-8, 8], posY: [-3, 3], rotationY: [-180, 180] };
+	const [mn, mx] = RANGES[key] || [-1, 2.5];
+	input.min = String(mn);
+	input.max = String(mx);
 	input.step = "0.01";
 	input.style.cssText = "flex:1;min-width:0;height:14px;";
 	input.dataset.key = key;
@@ -572,6 +573,7 @@ export async function openPoseStudio3D(node) {
 	const state = {
 		node, ui, renderer, scene, camera, orbit,
 		charactersGroup, handlesGroup, characters: [], handles: [], params: null,
+		selected: stateOf(node).selected, moveMode: false, selectionVolume: null,
 		drag: null, pack: null, dirty: true, anim: null,
 		dispose() {
 			if (state.anim) cancelAnimationFrame(state.anim);
@@ -675,9 +677,13 @@ export async function openPoseStudio3D(node) {
 			spacing = Math.max(6, bb.max.x - bb.min.x) + 1.4;
 		}
 		models.forEach((built, i) => {
-			built.group.position.x = (i - (count - 1) / 2) * spacing;
+			const slot = st.slots[i];
+			built.group.position.x = (i - (count - 1) / 2) * spacing + (slot.offset?.[0] || 0);
+			built.group.position.y = slot.offset?.[1] || 0;
+			built.group.rotation.y = slot.rotationY || 0;
 			built.mesh.userData.mikaCharacter = true;
 			built.outline.userData.mikaCharacter = true;
+			built.mesh.userData.slot = i;
 			charactersGroup.add(built.group);
 			applyPose(built, poses[i]);
 			state.characters.push(built);
@@ -698,13 +704,16 @@ export async function openPoseStudio3D(node) {
 		const handleMatActive = new THREE.MeshBasicMaterial({
 			color: 0xff7043, depthTest: false, depthWrite: false, transparent: true,
 		});
-		for (const c of state.characters) {
+		// Solo el personaje seleccionado expone tiradores: con 4 personajes
+		// serían 80 esferas solapadas y seleccionar se volvería imposible.
+		const activeModel = state.characters[st.selected] || state.characters[0];
+		if (activeModel) {
 			for (const name of HANDLE_BONES) {
-				const bone = c.byName[name];
+				const bone = activeModel.byName[name];
 				if (!bone) continue;
 				const mesh = new THREE.Mesh(handleGeo, handleMat);
 				mesh.userData.bone = bone;
-				mesh.userData.character = c;
+				mesh.userData.character = activeModel;
 				mesh.renderOrder = 10;
 				mesh.visible = false;
 				handlesGroup.add(mesh);
@@ -743,15 +752,34 @@ export async function openPoseStudio3D(node) {
 	};
 	state.refresh = () => {
 		const st = stateOf(node);
-		const slot = activeSlot(st);
 		for (const input of ui.panel.querySelectorAll("input[type=range]")) {
-			const v = slot.anatomy?.[input.dataset.key] ?? slot[input.dataset.key];
+			const v = sliderState().anatomy[input.dataset.key];
 			if (v !== undefined) input.value = String(v);
 		}
 		rebuild();
 		syncButtons();
 	};
 	window.__mikaPoseStudioRefresh = state.refresh;
+
+	// --- Selector de personaje ---
+	const selector = document.createElement("div");
+	selector.style.cssText = "display:flex;gap:4px;width:100%;flex-wrap:wrap;align-items:center;";
+	const selectorLabel = document.createElement("span");
+	selectorLabel.textContent = "Personaje:";
+	selectorLabel.style.cssText = "color:#222;font-size:11px;";
+	selector.appendChild(selectorLabel);
+	const selectorButtons = [];
+	for (let i = 0; i < 4; i++) {
+		const b = document.createElement("button");
+		b.textContent = String(i + 1);
+		b.title = "Seleccionar personaje " + (i + 1);
+		b.style.cssText =
+			"padding:2px 9px;border:1px solid #888;border-radius:4px;background:#fff;cursor:pointer;";
+		b.onclick = () => selectSlot(i);
+		selectorButtons.push(b);
+		selector.appendChild(b);
+	}
+	ui.panel.appendChild(selector);
 
 	// --- Controles de anatomía ---
 	// Se agrupan en dos columnas; el panel hace scroll si no entra todo.
@@ -769,16 +797,35 @@ export async function openPoseStudio3D(node) {
 		["genitalSize", "Genitales"],
 		["openingSize", "Abertura"],
 		["anusSize", "Ano"],
+		["posX", "Pos X", "Desplazamiento horizontal en unidades del mundo"],
+		["posY", "Pos Y", "Desplazamiento vertical"],
+		["rotationY", "Giro", "Rotación en grados"],
 	];
 	const grid = document.createElement("div");
 	grid.style.cssText =
 		"display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;width:100%;";
 	ui.panel.appendChild(grid);
 
+	const sliderState = () => {
+		const slot = activeSlot(stateOf(node));
+		return {
+			anatomy: {
+				...slot.anatomy,
+				posX: slot.offset?.[0] ?? 0,
+				posY: slot.offset?.[1] ?? 0,
+				rotationY: Math.round((slot.rotationY || 0) * 180 / Math.PI),
+			},
+		};
+	};
+
 	const sliderRows = [];
 	for (const [key, label, title] of defs) {
-		const input = sliderRow(grid, label, key, activeSlot(stateOf(node)), (k, v) => {
-			activeSlot(stateOf(node)).anatomy[k] = v;
+		const input = sliderRow(grid, label, key, sliderState(), (k, v) => {
+			const slot = activeSlot(stateOf(node));
+			if (k === "posX") slot.offset[0] = v;
+			else if (k === "posY") slot.offset[1] = v;
+			else if (k === "rotationY") slot.rotationY = (v * Math.PI) / 180;
+			else slot.anatomy[k] = v;
 			state.save();
 			queueRebuild();
 		});
@@ -820,6 +867,7 @@ export async function openPoseStudio3D(node) {
 	const sfw = document.createElement("button");
 	const count = document.createElement("button");
 	const reset = document.createElement("button");
+	const mover = document.createElement("button");
 	const send = document.createElement("button");
 	const btn = (b, text, title) => {
 		b.textContent = text;
@@ -830,6 +878,7 @@ export async function openPoseStudio3D(node) {
 	btn(sfw, "SFW", "Alternar SFW / NSFW");
 	btn(count, "👥 1", "Cantidad de personajes (1-4)");
 	btn(reset, "Reiniciar pose", "Volver a la pose de reposo");
+	btn(mover, "Mover", "Activar: arrastra el cuerpo para mover al personaje seleccionado");
 	btn(send, "Enviar al calco", "Enviar la escena 3D al calco del nodo lineart");
 	send.style.background = "#2e7d32";
 	send.style.color = "#fff";
@@ -838,7 +887,27 @@ export async function openPoseStudio3D(node) {
 	const syncButtons = () => {
 		sfw.textContent = activeSlot(stateOf(node)).nsfw ? "NSFW" : "SFW";
 		count.textContent = "👥 " + (state.characters.length || 1);
+		selectorButtons.forEach((b, i) => {
+			b.style.background = i === state.selected ? "#90caf9" : "#fff";
+			b.disabled = i >= state.characters.length;
+		});
+		mover.style.background = state.moveMode ? "#ffcc80" : "#fff";
 	};
+
+	const selectSlot = (i) => {
+		const st = stateOf(node);
+		const idx = Math.max(0, Math.min(st.slots.length - 1, Number(i) || 0));
+		st.selected = idx;
+		state.selected = idx;
+		state.save();
+		rebuild();
+		for (const row of sliderRows) {
+			const v = sliderState().anatomy[row.key];
+			if (v !== undefined) row.input.value = String(v);
+		}
+		syncButtons();
+	};
+	state.select = selectSlot;
 	sfw.onclick = () => {
 		const slot = activeSlot(stateOf(node));
 		slot.nsfw = !slot.nsfw;
@@ -858,11 +927,15 @@ export async function openPoseStudio3D(node) {
 		state.save();
 		rebuild();
 	};
+	mover.onclick = () => {
+		state.moveMode = !state.moveMode;
+		syncButtons();
+	};
 	send.onclick = () => {
 		const [w, h] = captureSizeFor(node);
 		setPoseStudioCapture(renderCapture(w, h), node.id);
 	};
-	tools.append(sfw, count, reset, send);
+	tools.append(sfw, count, reset, mover, send);
 	ui.panel.appendChild(tools);
 
 	// --- Articulaciones ---
@@ -889,9 +962,52 @@ export async function openPoseStudio3D(node) {
 		return best;
 	};
 
+	const pickBody = (event) => {
+		const rect = ui.canvas.getBoundingClientRect();
+		pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+		pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+		raycaster.setFromCamera(pointer, camera);
+		const hits = raycaster.intersectObjects(state.characters.map((c) => c.mesh), false);
+		return hits.length ? hits[0].object.userData.slot ?? null : null;
+	};
+
+	const pointerOnPlane = (event, plane) => {
+		const rect = ui.canvas.getBoundingClientRect();
+		pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+		pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+		raycaster.setFromCamera(pointer, camera);
+		const target = new THREE.Vector3();
+		return raycaster.ray.intersectPlane(plane, target) ? target : null;
+	};
+
 	ui.canvas.addEventListener("pointerdown", (event) => {
 		const hit = pickHandle(event);
-		if (!hit) return;
+		if (!hit) {
+			if (state.moveMode) {
+				const index = pickBody(event);
+				if (index === null) return;
+				if (index !== state.selected) selectSlot(index);
+				const model = state.characters[index];
+				const world = new THREE.Vector3();
+				model.group.getWorldPosition(world);
+				const normal = camera.getWorldDirection(new THREE.Vector3());
+				const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, world);
+				const start = pointerOnPlane(event, plane);
+				if (!start) return;
+				const slot = stateOf(node).slots[index];
+				state.moveDrag = {
+					index, slot, plane, start, baseX: model.group.position.x,
+					offset: [...slot.offset],
+				};
+				orbit.enabled = false;
+				ui.canvas.setPointerCapture(event.pointerId);
+				event.preventDefault();
+			} else {
+				state.pendingSelect = { x: event.clientX, y: event.clientY };
+			}
+			return;
+		}
+		state.pendingSelect = null;
 		const bone = hit.bone;
 		const parent = bone.parent;
 		if (!parent || !parent.isBone) return;
@@ -910,6 +1026,21 @@ export async function openPoseStudio3D(node) {
 	});
 
 	ui.canvas.addEventListener("pointermove", (event) => {
+		if (state.moveDrag) {
+			const target = pointerOnPlane(event, state.moveDrag.plane);
+			if (!target) return;
+			const d = target.clone().sub(state.moveDrag.start);
+			const slot = state.moveDrag.slot;
+			slot.offset[0] = state.moveDrag.offset[0] + d.x;
+			slot.offset[1] = state.moveDrag.offset[1] + d.y;
+			const model = state.characters[state.moveDrag.index];
+			if (model) {
+				model.group.position.x = state.moveDrag.baseX + d.x;
+				model.group.position.y = slot.offset[1];
+			}
+			requestRender();
+			return;
+		}
 		if (!state.drag) return;
 		const rect = ui.canvas.getBoundingClientRect();
 		pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -937,7 +1068,24 @@ export async function openPoseStudio3D(node) {
 		requestRender();
 	});
 
-	const endDrag = () => {
+	const endDrag = (event) => {
+		if (state.moveDrag) {
+			state.moveDrag = null;
+			state.moveMode = false;
+			orbit.enabled = true;
+			state.save();
+			syncButtons();
+			requestRender();
+			return;
+		}
+		if (state.pendingSelect) {
+			const click = state.pendingSelect;
+			state.pendingSelect = null;
+			if (event && Math.hypot(event.clientX - click.x, event.clientY - click.y) < 4) {
+				const index = pickBody(event);
+				if (index !== null && index !== state.selected) selectSlot(index);
+			}
+		}
 		if (!state.drag) return;
 		state.drag.handle.mesh.material = state.drag.handle.mat;
 		state.drag = null;
@@ -1011,6 +1159,7 @@ export function __activeState() { return active; }
 export function __stateOfForTest(node) { return stateOf(node); }
 export function __activeSlotForTest(node) { return activeSlot(stateOf(node)); }
 export function __ensureSlotsForTest(node, n) { return ensureSlots(stateOf(node), n); }
+export function __selectSlotForTest(i) { return active?.select ? active.select(i) : null; }
 
 export async function __captureProbe(w, h) {
 	const url = active?.renderCapture
