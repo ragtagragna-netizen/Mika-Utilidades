@@ -513,6 +513,7 @@ app.registerExtension({
 				clearOverlay(node);
 				renderPreview(node);
 				write(node);
+				writeCalco(node);
 			};
 			img.src = snap.paint;
 			if (!st.maskCanvas) return;
@@ -767,9 +768,11 @@ app.registerExtension({
 			st.sel = null;
 			st.lasso = null;
 			st.softPts = null;
+			const oldW = st.paint.width, oldH = st.paint.height;
+			const oldMannequinTfs = st.mannequins.map((m) => ({ ...m.tf }));
 			const shot = document.createElement("canvas");
-			shot.width = st.paint.width;
-			shot.height = st.paint.height;
+			shot.width = oldW;
+			shot.height = oldH;
 			if (st.paint.width && st.paint.height) shot.getContext("2d").drawImage(st.surfaceNode?.preview || st.preview, 0, 0);
 			// La máscara acompaña a la imagen de entrada (si hay) o al lienzo, así
 			// queda alineada con lo que compone el nodo Python.
@@ -777,9 +780,23 @@ app.registerExtension({
 			const baseRectBefore = baseRectOf(st);
 			// La caja a reencajar es la unión del trazo, el calco base y las
 			// capas, para que nada quede recortado.
-			let bounds = boundsOf(shot);
+			const paintBounds = boundsOf(shot);
+			const mannequinOnly = !paintBounds && !st.baseImg && !st.underlayImg && !st.calcoLayers.length;
+			let bounds = paintBounds;
 			if (st.underlayImg && st.underlayTransform) bounds = unionRect(bounds, cornersBounds(layerCorners(node, "underlay")));
 			for (const l of st.calcoLayers) if (l.visible) bounds = unionRect(bounds, cornersBounds(cornersOfTf(l.tf, l.w, l.h)));
+			for (const m of st.mannequins) {
+				if (m.visible === false) continue;
+				const b = mannequinBounds(m);
+				const t = m.tf;
+				const cos = Math.cos(t.rot), sin = Math.sin(t.rot);
+				const cs = [[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h]]
+					.map(([lx, ly]) => {
+						const px = lx * t.sx, py = ly * t.sy;
+						return [t.cx + px * cos - py * sin, t.cy + px * sin + py * cos];
+					});
+				bounds = unionRect(bounds, cornersBounds(cs));
+			}
 
 			st.paint.width = nw;
 			st.paint.height = nh;
@@ -840,7 +857,19 @@ app.registerExtension({
 					l.tf = mapTf(l.tf);
 					l.tf0 = mapTf(l.tf0);
 				}
-				for (const m of st.mannequins) m.tf = mapTf(m.tf);
+				if (mannequinOnly) {
+					const k = Math.min(nw / oldW, nh / oldH);
+					st.mannequins.forEach((m, i) => {
+						const o = oldMannequinTfs[i];
+						m.tf = {
+							cx: nw / 2 + (o.cx - oldW / 2) * k,
+							cy: nh / 2 + (o.cy - oldH / 2) * k,
+							sx: o.sx * k, sy: o.sy * k, rot: o.rot,
+						};
+					});
+				} else {
+					for (const m of st.mannequins) m.tf = mapTf(m.tf);
+				}
 			}
 			drawMannequins(node);
 			saveMannequins(node);
@@ -1927,6 +1956,8 @@ app.registerExtension({
 					s.value = String(m.proportions[key]);
 					s.title = MANNEQUIN_LABELS[key] || key;
 					s.style.width = "56px";
+					s.addEventListener("pointerdown", () => pushUndo(node));
+					s.addEventListener("keydown", () => pushUndo(node));
 					s.addEventListener("input", () => {
 						setProportion(m, key, parseFloat(s.value));
 						commit();
@@ -4318,7 +4349,8 @@ app.registerExtension({
 			if (st.sel) drawSel(node);
 			drawTransformUI(node);
 			if (touched.includes("paint")) write(node);
-			if (touched.includes("underlay") || touched.some((k) => String(k).startsWith("L:"))) writeCalco(node);
+			if (touched.includes("underlay") || touched.some((k) => /^[ML]:/.test(k))) writeCalco(node);
+			if (touched.some((k) => String(k).startsWith("M:"))) saveMannequins(node);
 		}
 
 		// Punto del lienzo -> coordenadas fuente de la capa de trazo.
@@ -5024,6 +5056,7 @@ app.registerExtension({
 							const [lx, ly] = localPoint(m, tx, ty);
 							const joint = jointHit(m, lx, ly, handleSize(node) * 1.5);
 							if (joint) {
+								pushUndo(node);
 								st.jointDrag = { id: m.id, joint };
 								hideCursor(node);
 								return;
@@ -5197,7 +5230,8 @@ app.registerExtension({
 						const layers = st.transformDrag.layers;
 						st.transformDrag = null;
 						if (layers.includes("paint")) write(node);
-						if (layers.includes("underlay") || layers.some((k) => String(k).startsWith("L:"))) writeCalco(node);
+						if (layers.includes("underlay") || layers.some((k) => /^[ML]:/.test(k))) writeCalco(node);
+						if (layers.some((k) => String(k).startsWith("M:"))) saveMannequins(node);
 						drawTransformUI(node);
 						return;
 					}
