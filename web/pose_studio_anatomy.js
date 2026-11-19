@@ -79,26 +79,38 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 // (pies) a 1 (cabeza) y el peso de profundidad separa la cara anterior de la
 // posterior, para que los glúteos no ensanchen el vientre y el pubis no toque
 // la espalda. Solo la altura modifica Y, escalando desde los pies.
+// Landmarks medidos del pack MakeHuman (t normalizado 0=pies, 1=cabeza):
+//   pelvis 0.553, spine_02 0.610, spine_03 0.654, clavicula 0.795,
+//   pecho ~0.73, cintura ~0.63, cadera ~0.54, gluteo ~0.55 (cara trasera).
+// Los brazos caen hasta t≈0.55 con |x|≈3.5, asi que ademas se excluyen con
+// una mascara horizontal: antes se interpretaban como caderas.
 export function deformVertices(vertices, bounds, deform, metrics = {}) {
 	const minY = metrics.minY ?? 0;
 	const maxY = metrics.maxY ?? 10;
 	const span = Math.max(0.001, maxY - minY);
 	let mz = 0;
-	if (metrics.maxZ === undefined) {
-		for (let i = 2; i < vertices.length; i += 3) mz = Math.max(mz, Math.abs(vertices[i]));
+	let mx = 0;
+	if (metrics.maxZ === undefined || metrics.maxX === undefined) {
+		for (let i = 0; i < vertices.length; i += 3) {
+			mz = Math.max(mz, Math.abs(vertices[i + 2]));
+			mx = Math.max(mx, Math.abs(vertices[i]));
+		}
 	}
 	const maxZ = Math.max(0.001, metrics.maxZ ?? mz);
+	const maxX = Math.max(0.001, metrics.maxX ?? mx);
 
-	// Cada zona tiene una ventana Compacta que vale EXACTAMENTE 0 fuera de su
-	// rango: un slider nunca puede tocar vertices de otra parte del cuerpo.
 	const window = (t, center, halfWidth) => {
 		const d = Math.abs(t - center) / halfWidth;
 		return d >= 1 ? 0 : (1 - d * d) * (1 - d * d);
 	};
 	const unit = (v) => Math.min(1, Math.max(0, v));
+	const gate = (v) => unit(v * 3);
 	// 0 = plano, 0.5 = medio, 1 = grande, 1.75 = enorme, 2.5 = gigante.
-	const level = (v) => (v <= 0.5 ? 0.4 + (Math.max(0, v) / 0.5) * 0.6 : 1 + (v - 0.5) * 0.7);
+	const level = (v) => (v <= 0.5 ? 0.4 + (Math.max(0, v) / 0.5) * 0.6 : 1 + (v - 0.5) * 0.8);
 
+	// El torso central termina mucho antes que los brazos caídos (|x|≈3.5).
+	const bodyLimit = Math.min(maxX * 0.35, 1.35);
+	const core = (x) => unit((bodyLimit - Math.abs(x)) / 0.5);
 	const bustF = level(deform.bust ?? 0.5);
 	const gluteF = level(deform.glutes ?? 0.5);
 	const hipF = level(deform.hips ?? 0.5);
@@ -109,28 +121,52 @@ export function deformVertices(vertices, bounds, deform, metrics = {}) {
 	const heightStretch = h < 0 || h > 1 ? 1 + (h - 0.5) * 0.6 : 1;
 
 	for (let i = 0; i < vertices.length; i += 3) {
+		const x = vertices[i];
 		const y = vertices[i + 1];
 		const z = vertices[i + 2];
 		const t = (y - minY) / span;
-		const front = unit((z / maxZ) * 1.5);
-		const back = unit((-z / maxZ) * 1.5);
+		const front = gate(z / maxZ);
+		const back = gate(-z / maxZ);
+		const torso = core(x);
 
-		const bustMask = window(t, 0.66, 0.075) * front;
-		const gluteMask = window(t, 0.45, 0.06) * back;
-		const hipMask = window(t, 0.46, 0.055);
-		const waistMask = window(t, 0.56, 0.045);
-		const pubisMask = window(t, 0.40, 0.04) * front;
+		const bustMask = window(t, 0.73, 0.05) * front * torso;
+		const waistMask = window(t, 0.63, 0.035) * torso;
+		const hipMask = window(t, 0.54, 0.045) * torso;
+		const gluteMask = window(t, 0.55, 0.04) * back * torso;
+		const pubisMask = window(t, 0.545, 0.025) * front
+			* unit((1.2 - Math.abs(x)) / 0.5);
 
+		// El pecho y los gluteos crecen como bultos redondeados alrededor de
+		// su propio centro, no como una losa que ensancha todo el torso.
+		const breastX = x >= 0 ? 0.5 : -0.5;
+		const chestY = minY + 0.73 * span;
+		const gluteY = minY + 0.55 * span;
+		const kb = 1 + (bustF - 1) * bustMask;
+		const kg = 1 + (gluteF - 1) * gluteMask;
 		const f = 1
-			+ (bustF - 1) * bustMask
-			+ (gluteF - 1) * gluteMask
-			+ (hipF - 1) * hipMask
 			+ (waistF - 1) * waistMask
+			+ (hipF - 1) * hipMask
 			+ (pubisF - 1) * pubisMask;
 
-		vertices[i] *= f;
-		vertices[i + 2] *= f + firmExtra * bustMask * 0.25;
-		if (heightStretch !== 1) vertices[i + 1] = minY + (y - minY) * heightStretch;
+		let nx = x;
+		let ny = y;
+		let nz = z;
+		if (kb !== 1) {
+			nx = breastX + (x - breastX) * kb;
+			ny = chestY + (y - chestY) * (1 + (kb - 1) * 0.5);
+			nz *= kb;
+		}
+		if (kg !== 1) {
+			nx = breastX + (nx - breastX) * kg;
+			ny = gluteY + (ny - gluteY) * (1 + (kg - 1) * 0.5);
+			nz *= kg;
+		}
+		vertices[i] = nx * f;
+		vertices[i + 1] = ny;
+		vertices[i + 2] = nz * f + firmExtra * bustMask * 0.25;
+		if (heightStretch !== 1) {
+			vertices[i + 1] = minY + (vertices[i + 1] - minY) * heightStretch;
+		}
 	}
 	return vertices;
 }

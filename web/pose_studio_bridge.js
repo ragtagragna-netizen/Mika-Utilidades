@@ -316,7 +316,8 @@ function buildCharacter(pack, params, pose) {
 	// Largo de brazos/piernas y tamaño de cabeza: se aplica después del bind
 	// para que las posiciones de hueso estiren la malla.
 	const d = params.localDeform || {};
-	const limbFactor = (v) => 1 + ((v ?? 0.5) - 0.5) * 0.5;
+	// 2.5 antes doblaba el antebrazo y parecia un ala; ahora el maximo es 1.5.
+	const limbFactor = (v) => 1 + ((v ?? 0.5) - 0.5) * 0.25;
 	const stretch = (names, factor) => {
 		if (Math.abs(factor - 1) < 0.001) return;
 		for (const n of names) {
