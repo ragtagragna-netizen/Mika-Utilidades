@@ -580,6 +580,13 @@ export async function openPoseStudio3D(node) {
 			try { state.resizeObserver?.disconnect(); } catch (e) { /* no-op */ }
 			try { state.geoObserver?.disconnect(); } catch (e) { /* no-op */ }
 			if (state.geoSaveTimer) clearTimeout(state.geoSaveTimer);
+			try {
+				if (state.selectionVolume) {
+					scene.remove(state.selectionVolume);
+					state.selectionVolume.geometry.dispose();
+					state.selectionVolume.material.dispose();
+				}
+			} catch (e) { /* no-op */ }
 			try { orbit.dispose(); } catch (e) { /* no-op */ }
 			try { renderer.dispose(); } catch (e) { /* no-op */ }
 			ui.root.remove();
@@ -628,6 +635,7 @@ export async function openPoseStudio3D(node) {
 
 	const render = () => {
 		refreshHandles();
+		if (state.selectionVolume?.visible) state.selectionVolume.update();
 		renderer.render(scene, camera);
 	};
 
@@ -721,6 +729,19 @@ export async function openPoseStudio3D(node) {
 			}
 		}
 		handlesGroup.updateMatrixWorld(true);
+		if (state.selectionVolume) {
+			scene.remove(state.selectionVolume);
+			state.selectionVolume.geometry.dispose();
+			state.selectionVolume.material.dispose();
+			state.selectionVolume = null;
+		}
+		if (activeModel) {
+			const box = new THREE.BoxHelper(activeModel.mesh, 0x1e88e5);
+			box.material.depthTest = false;
+			box.renderOrder = 9;
+			scene.add(box);
+			state.selectionVolume = box;
+		}
 		refreshHandles();
 		applyOutlineWidth(Math.max(1, ui.viewport.clientHeight));
 		state.dirty = true;
@@ -1112,8 +1133,11 @@ export async function openPoseStudio3D(node) {
 		const prevPos = camera.position.clone();
 		const prevTarget = orbit.target.clone();
 		const prevHandles = handlesGroup.visible;
+		const prevSelection = state.selectionVolume?.visible ?? false;
 
 		handlesGroup.visible = false;
+		if (state.selectionVolume) state.selectionVolume.visible = false;
+		state.lastCaptureSelectionVisible = state.selectionVolume?.visible ?? false;
 		renderer.setSize(width, height, false);
 		camera.aspect = width / height;
 		camera.updateProjectionMatrix();
@@ -1134,6 +1158,7 @@ export async function openPoseStudio3D(node) {
 		orbit.update();
 		applyOutlineWidth(Math.max(1, ui.viewport.clientHeight));
 		handlesGroup.visible = prevHandles;
+		if (state.selectionVolume) state.selectionVolume.visible = prevSelection;
 		return off.toDataURL("image/png");
 	}
 	state.renderCapture = renderCapture;
