@@ -1711,7 +1711,18 @@ app.registerExtension({
 			const mannequinBtn = mkButton(
 				"🧍‍♂️", "Añadir un maniquí articulado editable como calco");
 			mannequinBtn.onclick = () => addMannequin(node);
-			return { parts: [loadBtn, pasteEditBtn, traceBtn, pasteTraceBtn, posesBtn, mannequinBtn], refresh() {} };
+			const pose3dBtn = mkButton(
+				"🧊", "Abrir Pose Studio 3D: maniquí anatómico, articulaciones y cámara");
+			pose3dBtn.onclick = async () => {
+				try {
+					const bridge = await import("./pose_studio_bridge.js");
+					await bridge.openPoseStudio3D(node);
+				} catch (err) {
+					console.error("Mika Pose Studio 3D:", err);
+					alert("No se pudo abrir Pose Studio 3D: " + (err?.message || err));
+				}
+			};
+			return { parts: [loadBtn, pasteEditBtn, traceBtn, pasteTraceBtn, posesBtn, mannequinBtn, pose3dBtn], refresh() {} };
 		}
 
 		// Selector de preprocesador + ⚡ (no encola el grafo).
