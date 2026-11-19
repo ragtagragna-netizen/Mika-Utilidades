@@ -88,10 +88,22 @@ export function deformVertices(vertices, bounds, deform, metrics = {}) {
 		for (let i = 2; i < vertices.length; i += 3) mz = Math.max(mz, Math.abs(vertices[i]));
 	}
 	const maxZ = Math.max(0.001, metrics.maxZ ?? mz);
-	const gaussian = (t, c, w) => Math.exp(-((t - c) ** 2) / (2 * w * w));
-	const unit = (v) => Math.min(1, Math.max(0, v));
 
-	const bustExtra = Math.max(0, (deform.bust ?? 0.5) - 1);
+	// Cada zona tiene una ventana Compacta que vale EXACTAMENTE 0 fuera de su
+	// rango: un slider nunca puede tocar vertices de otra parte del cuerpo.
+	const window = (t, center, halfWidth) => {
+		const d = Math.abs(t - center) / halfWidth;
+		return d >= 1 ? 0 : (1 - d * d) * (1 - d * d);
+	};
+	const unit = (v) => Math.min(1, Math.max(0, v));
+	// 0 = plano, 0.5 = medio, 1 = grande, 1.75 = enorme, 2.5 = gigante.
+	const level = (v) => (v <= 0.5 ? 0.4 + (Math.max(0, v) / 0.5) * 0.6 : 1 + (v - 0.5) * 0.7);
+
+	const bustF = level(deform.bust ?? 0.5);
+	const gluteF = level(deform.glutes ?? 0.5);
+	const hipF = level(deform.hips ?? 0.5);
+	const pubisF = 1 + (level(deform.genitalSize ?? 0.5) - 1) * 0.45;
+	const waistF = 1 + (0.5 - (deform.waist ?? 0.5)) * 0.2;
 	const firmExtra = Math.max(0, (deform.firmness ?? 0.5) - 1);
 	const h = deform.height ?? 0.5;
 	const heightStretch = h < 0 || h > 1 ? 1 + (h - 0.5) * 0.6 : 1;
@@ -100,16 +112,24 @@ export function deformVertices(vertices, bounds, deform, metrics = {}) {
 		const y = vertices[i + 1];
 		const z = vertices[i + 2];
 		const t = (y - minY) / span;
-		const front = unit(z / maxZ);
-		const back = unit(-z / maxZ);
-		const waist = gaussian(t, 0.56, 0.035) * (0.5 - (deform.waist ?? 0.5)) * 1.1;
-		const hips = gaussian(t, 0.46, 0.045) * ((deform.hips ?? 0.5) - 0.5) * 0.8;
-		const glutes = gaussian(t, 0.44, 0.04) * ((deform.glutes ?? 0.5) - 0.5) * back;
-		const pubis = gaussian(t, 0.40, 0.04) * ((deform.genitalSize ?? 0.5) - 0.5) * front * 0.7;
-		const chest = gaussian(t, 0.66, 0.035) * (bustExtra * 0.5 + firmExtra * 0.3) * front;
-		const k = Math.max(0.5, 1 + waist + hips + glutes + pubis + chest);
-		vertices[i] *= k;
-		vertices[i + 2] *= k;
+		const front = unit((z / maxZ) * 1.5);
+		const back = unit((-z / maxZ) * 1.5);
+
+		const bustMask = window(t, 0.66, 0.075) * front;
+		const gluteMask = window(t, 0.45, 0.06) * back;
+		const hipMask = window(t, 0.46, 0.055);
+		const waistMask = window(t, 0.56, 0.045);
+		const pubisMask = window(t, 0.40, 0.04) * front;
+
+		const f = 1
+			+ (bustF - 1) * bustMask
+			+ (gluteF - 1) * gluteMask
+			+ (hipF - 1) * hipMask
+			+ (waistF - 1) * waistMask
+			+ (pubisF - 1) * pubisMask;
+
+		vertices[i] *= f;
+		vertices[i + 2] *= f + firmExtra * bustMask * 0.25;
 		if (heightStretch !== 1) vertices[i + 1] = minY + (y - minY) * heightStretch;
 	}
 	return vertices;

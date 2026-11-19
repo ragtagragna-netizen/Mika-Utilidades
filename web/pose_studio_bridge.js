@@ -167,6 +167,44 @@ function boundsY(vertices) {
 	return { minY, maxY };
 }
 
+// Textura de lineart para los volúmenes íntimos: sobre fondo blanco, trazos
+// negros finos que repiten el lenguaje del resto del maniquí.
+function makeDetailTexture(kind) {
+	const canvas = document.createElement("canvas");
+	canvas.width = 128;
+	canvas.height = 128;
+	const ctx = canvas.getContext("2d");
+	ctx.fillStyle = "#ffffff";
+	ctx.fillRect(0, 0, 128, 128);
+	ctx.strokeStyle = "#111111";
+	ctx.lineWidth = 1.1;
+	if (kind === "anus") {
+		for (let r = 12; r <= 60; r += 12) {
+			ctx.beginPath();
+			ctx.arc(64, 64, r, 0, Math.PI * 2);
+			ctx.stroke();
+		}
+		for (let i = 0; i < 12; i++) {
+			const a = (i * Math.PI) / 6;
+			ctx.beginPath();
+			ctx.moveTo(64 + Math.cos(a) * 12, 64 + Math.sin(a) * 12);
+			ctx.lineTo(64 + Math.cos(a) * 58, 64 + Math.sin(a) * 58);
+			ctx.stroke();
+		}
+	} else {
+		for (let i = 0; i < 7; i++) {
+			const y = 20 + i * 14;
+			ctx.beginPath();
+			ctx.moveTo(10, y);
+			ctx.bezierCurveTo(38, y + 7, 90, y - 7, 118, y);
+			ctx.stroke();
+		}
+	}
+	const tex = new THREE.CanvasTexture(canvas);
+	if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+	return tex;
+}
+
 // Contorno por casco invertido: la malla se empuja a lo largo de sus normales
 // un ancho en unidades de mundo que se recalcula según el tamaño en píxeles,
 // de modo que la línea mida siempre lo mismo en pantalla (y sobreviva a una
@@ -314,13 +352,18 @@ function buildCharacter(pack, params, pose) {
 		if (!Number.isFinite(frontZ)) frontZ = heightUnits * 0.06;
 		if (!Number.isFinite(backZ)) backZ = -heightUnits * 0.06;
 		const unit = heightUnits * 0.012;
+		const details = {
+			vagina: makeDetailTexture("vagina"),
+			opening: makeDetailTexture("opening"),
+			anus: makeDetailTexture("anus"),
+		};
 		const add = (name, size, y, z, sx, sy, color = OUTLINE_COLOR) => {
 			// Un slider en -1 deja un tamaño negativo: sin esto se crea una
 			// esfera de radio negativo (malla degenerada).
 			if (!(size > 0)) return;
 			const m = new THREE.Mesh(
 				new THREE.SphereGeometry(unit * Math.max(0.15, 0.6 + size), 12, 10),
-				new THREE.MeshBasicMaterial({ color }),
+				new THREE.MeshBasicMaterial({ color, map: details[name] || null }),
 			);
 			m.name = name;
 			m.position.set(0, y, z);
@@ -608,6 +651,9 @@ export async function openPoseStudio3D(node) {
 			if (state.anim) cancelAnimationFrame(state.anim);
 			try { state.resizeObserver?.disconnect(); } catch (e) { /* no-op */ }
 			try { state.geoObserver?.disconnect(); } catch (e) { /* no-op */ }
+			// El último resize puede estar dentro del debounce: se vuelca al
+			// cerrar, o el tamaño nuevo se pierde al reabrir.
+			try { writeStudioGeom(ui.root); } catch (e) { /* no-op */ }
 			if (state.geoSaveTimer) clearTimeout(state.geoSaveTimer);
 			try {
 				if (state.selectionVolume) {
@@ -911,6 +957,7 @@ export async function openPoseStudio3D(node) {
 	const sfw = document.createElement("button");
 	const count = document.createElement("button");
 	const reset = document.createElement("button");
+	const del = document.createElement("button");
 	const mover = document.createElement("button");
 	const send = document.createElement("button");
 	const btn = (b, text, title) => {
@@ -921,7 +968,8 @@ export async function openPoseStudio3D(node) {
 	};
 	btn(sfw, "SFW", "Alternar SFW / NSFW");
 	btn(count, "👥 1", "Cantidad de personajes (1-4)");
-	btn(reset, "Reiniciar pose", "Volver a la pose de reposo");
+	btn(reset, "Reiniciar", "Volver a la pose de reposo, sliders al punto medio y posición central");
+	btn(del, "🗑 Eliminar", "Eliminar el personaje seleccionado");
 	btn(mover, "Mover", "Activar: arrastra el cuerpo para mover al personaje seleccionado");
 	btn(send, "Enviar al calco", "Enviar la escena 3D al calco del nodo lineart");
 	send.style.background = "#2e7d32";
@@ -967,11 +1015,31 @@ export async function openPoseStudio3D(node) {
 		syncButtons();
 	};
 	reset.onclick = () => {
-		for (const slot of stateOf(node).slots) slot.pose = {};
+		const slot = activeSlot(stateOf(node));
+		for (const k of Object.keys(slot.anatomy)) slot.anatomy[k] = 0.5;
+		slot.anatomy.gender = 0.5;
+		slot.pose = {};
+		slot.offset = [0, 0];
+		slot.rotationY = 0;
 		// Primero se reconstruye: save() captura las rotaciones de las mallas
 		// vivas, así que si se guarda antes se reescriben las poses antiguas.
 		rebuild();
 		state.save();
+		for (const row of sliderRows) {
+			const v = sliderState().anatomy[row.key];
+			if (v !== undefined) row.input.value = String(v);
+		}
+		syncButtons();
+	};
+	del.onclick = () => {
+		const st = stateOf(node);
+		if (st.slots.length <= 1) return;
+		st.slots.splice(st.selected, 1);
+		st.selected = Math.min(st.selected, st.slots.length - 1);
+		state.selected = st.selected;
+		rebuild();
+		state.save();
+		syncButtons();
 	};
 	mover.onclick = () => {
 		state.moveMode = !state.moveMode;
@@ -981,7 +1049,7 @@ export async function openPoseStudio3D(node) {
 		const [w, h] = captureSizeFor(node);
 		setPoseStudioCapture(renderCapture(w, h), node.id);
 	};
-	tools.append(sfw, count, reset, mover, send);
+	tools.append(sfw, count, reset, del, mover, send);
 	ui.panel.appendChild(tools);
 
 	// --- Articulaciones ---
