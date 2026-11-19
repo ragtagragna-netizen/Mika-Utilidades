@@ -467,18 +467,18 @@ const STUDIO_GEOM_KEY = "mikaPoseStudio3D.window";
 
 function defaultStudioGeom() {
 	return {
-		x: Math.max(8, window.innerWidth - 576),
+		x: Math.max(8, window.innerWidth - 796),
 		y: 56,
-		w: Math.min(560, window.innerWidth - 32),
+		w: Math.min(780, window.innerWidth - 32),
 		h: Math.min(780, window.innerHeight - 72),
 	};
 }
 
 function clampStudioGeom(g) {
-	const w = Math.min(Math.max(420, Number(g?.w) || 560), window.innerWidth - 16);
+	const w = Math.min(Math.max(560, Number(g?.w) || 780), window.innerWidth - 16);
 	const h = Math.min(Math.max(520, Number(g?.h) || 700), window.innerHeight - 60);
 	return {
-		x: Math.min(Math.max(80 - w, Number(g?.x) || 0), window.innerWidth - 80),
+		x: Math.min(Math.max(8, Number(g?.x) || 0), Math.max(8, window.innerWidth - w - 8)),
 		y: Math.min(Math.max(0, Number(g?.y) || 0), window.innerHeight - 40),
 		w, h,
 	};
@@ -512,7 +512,7 @@ function makeWindow(node) {
 	const root = document.createElement("div");
 	root.dataset.mika = "pose-studio-3d-root";
 	root.style.cssText =
-		"position:fixed;z-index:9000;box-sizing:border-box;resize:both;min-width:420px;min-height:520px;" +
+		"position:fixed;z-index:9000;box-sizing:border-box;resize:both;min-width:560px;min-height:520px;" +
 		"background:#f4f4f4;color:#222;border:1px solid #888;border-radius:8px;display:flex;flex-direction:column;" +
 		"box-shadow:0 8px 28px rgba(0,0,0,.35);font:12px sans-serif;overflow:hidden;";
 
@@ -528,18 +528,23 @@ function makeWindow(node) {
 	close.onclick = () => closePoseStudio3D();
 	bar.append(title, close);
 
+	// Fila inferior: vista 3D a la izquierda y panel de controles a la derecha.
+	const body = document.createElement("div");
+	body.style.cssText = "display:flex;flex:1;min-height:0;";
+
 	const viewport = document.createElement("div");
-	viewport.style.cssText = "position:relative;flex:1;min-height:0;background:#fff;";
+	viewport.style.cssText = "position:relative;flex:1;min-width:0;min-height:0;background:#fff;";
 	const canvas = document.createElement("canvas");
 	canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;";
 	viewport.appendChild(canvas);
 
 	const panel = document.createElement("div");
 	panel.style.cssText =
-		"flex:none;max-height:236px;overflow:auto;padding:6px 8px;display:flex;flex-direction:column;" +
-		"gap:4px;border-top:1px solid #ccc;background:#f4f4f4;color:#222;";
+		"flex:none;width:252px;overflow-y:auto;overflow-x:hidden;padding:8px;display:flex;flex-direction:column;" +
+		"gap:6px;border-left:1px solid #ccc;background:#f4f4f4;color:#222;box-sizing:border-box;";
 
-	root.append(bar, viewport, panel);
+	body.append(viewport, panel);
+	root.append(bar, body);
 	document.body.appendChild(root);
 	applyStudioGeom(root, readStudioGeom());
 
@@ -896,7 +901,7 @@ export async function openPoseStudio3D(node) {
 	];
 	const grid = document.createElement("div");
 	grid.style.cssText =
-		"display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;width:100%;";
+		"display:grid;grid-template-columns:1fr;gap:3px;width:100%;";
 	ui.panel.appendChild(grid);
 
 	const sliderState = () => {
