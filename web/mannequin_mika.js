@@ -122,40 +122,154 @@ export function skeleton(m) {
 
 const LINE = "#111";
 const FILL = "#ddd";
+const GUIDE = "rgba(17, 17, 17, 0.42)";
 
-function limb(ctx, a, b, width) {
-	ctx.beginPath();
-	ctx.moveTo(a[0], a[1]);
-	ctx.lineTo(b[0], b[1]);
-	ctx.lineWidth = width + 3;
-	ctx.strokeStyle = LINE;
-	ctx.stroke();
+function fillStroke(ctx, width = 2.2) {
+	ctx.fillStyle = FILL;
+	ctx.fill();
 	ctx.lineWidth = width;
-	ctx.strokeStyle = FILL;
+	ctx.strokeStyle = LINE;
 	ctx.stroke();
 }
 
-function ellipse(ctx, c, r) {
+// Segmento cónico con contorno (muslo, pantorrilla, brazo, antebrazo).
+function tapered(ctx, a, b, wa, wb) {
+	const dx = b[0] - a[0], dy = b[1] - a[1];
+	const len = Math.hypot(dx, dy) || 1;
+	const nx = -dy / len, ny = dx / len;
+	const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+	const wm = (wa + wb) / 2;
+	ctx.beginPath();
+	ctx.moveTo(a[0] + nx * wa, a[1] + ny * wa);
+	ctx.quadraticCurveTo(mx + nx * wm * 1.08, my + ny * wm * 1.08, b[0] + nx * wb, b[1] + ny * wb);
+	ctx.lineTo(b[0] - nx * wb, b[1] - ny * wb);
+	ctx.quadraticCurveTo(mx - nx * wm * 1.08, my - ny * wm * 1.08, a[0] - nx * wa, a[1] - ny * wa);
+	ctx.closePath();
+	fillStroke(ctx);
+}
+
+function ellipse(ctx, c, r, stroke = 2.2) {
 	ctx.beginPath();
 	ctx.ellipse(c[0], c[1], Math.max(1, r[0]), Math.max(1, r[1]), 0, 0, Math.PI * 2);
-	ctx.fillStyle = FILL;
-	ctx.fill();
-	ctx.lineWidth = 2.5;
-	ctx.strokeStyle = LINE;
+	fillStroke(ctx, stroke);
+}
+
+function joint(ctx, p, r) {
+	ctx.beginPath();
+	ctx.arc(p[0], p[1], r, 0, Math.PI * 2);
+	fillStroke(ctx, 1.8);
+}
+
+function guideLine(ctx, a, b) {
+	ctx.beginPath();
+	ctx.moveTo(a[0], a[1]);
+	ctx.lineTo(b[0], b[1]);
+	ctx.strokeStyle = GUIDE;
+	ctx.lineWidth = 1;
 	ctx.stroke();
+}
+
+function drawHead(ctx, pt) {
+	const [x, y] = pt.head;
+	const r = pt.headRadius;
+	tapered(ctx, pt.neck, [x, y + r * 0.7], 11, 9);
+	ellipse(ctx, [x, y], [r * 0.82, r]);
+	guideLine(ctx, [x, y - r + 2], [x, y + r - 2]);
+	ctx.beginPath();
+	ctx.ellipse(x, y, r * 0.82, r * 0.28, 0, 0, Math.PI);
+	ctx.strokeStyle = GUIDE;
+	ctx.lineWidth = 1;
+	ctx.stroke();
+}
+
+function drawTorso(ctx, pt, base, m) {
+	const p = m.proportions;
+	const female = m.gender === "female";
+	const sy = pt.shoulderL[1];
+	const sw = base.shoulder * 0.92;
+	const bust = base.bust * p.bust;
+	const waist = base.waist * p.waist;
+	const hip = base.hips * p.hips;
+	const cy = pt.chest[1], wy = pt.waist[1], hy = pt.pelvis[1];
+
+	ctx.beginPath();
+	ctx.moveTo(-sw, sy);
+	ctx.bezierCurveTo(-sw - 2, sy + 18, -bust - 12, cy - 8, -bust, cy + 2);
+	ctx.bezierCurveTo(-bust + 2, cy + 16, -waist, wy - 16, -waist, wy);
+	ctx.bezierCurveTo(-waist, wy + 18, -hip + 2, hy - 14, -hip, hy);
+	ctx.bezierCurveTo(-hip * 0.55, hy + 16, hip * 0.55, hy + 16, hip, hy);
+	ctx.bezierCurveTo(hip + 2, hy - 14, waist, wy + 18, waist, wy);
+	ctx.bezierCurveTo(waist, wy - 16, bust - 2, cy + 16, bust, cy + 2);
+	ctx.bezierCurveTo(bust + 12, cy - 8, sw + 2, sy + 18, sw, sy);
+	ctx.quadraticCurveTo(0, sy - 12, -sw, sy);
+	ctx.closePath();
+	fillStroke(ctx, 2.4);
+
+	guideLine(ctx, [0, sy + 2], [0, hy - 2]);
+	guideLine(ctx, [-waist + 3, wy], [waist - 3, wy]);
+
+	if (female) {
+		ellipse(ctx, [-bust * 0.52, cy + 5], [bust * 0.6, bust * 0.5]);
+		ellipse(ctx, [bust * 0.52, cy + 5], [bust * 0.6, bust * 0.5]);
+		ellipse(ctx, [0, hy + 7], [base.glute * p.glutes, 13 * p.glutes]);
+	} else {
+		guideLine(ctx, [-bust * 0.7, cy + 2], [bust * 0.7, cy + 2]);
+	}
+}
+
+function drawHand(ctx, wrist, angle, side) {
+	ctx.save();
+	ctx.translate(wrist[0], wrist[1]);
+	ctx.rotate(angle - Math.PI / 2);
+	ctx.beginPath();
+	ctx.ellipse(0, 9, 6.5, 10, 0, 0, Math.PI * 2);
+	fillStroke(ctx, 1.8);
+	ctx.strokeStyle = LINE;
+	ctx.lineWidth = 1.4;
+	for (let i = 0; i < 4; i++) {
+		const x = -4.5 + i * 3;
+		ctx.beginPath();
+		ctx.moveTo(x, 16);
+		ctx.lineTo(x, 25 + (i === 1 || i === 2 ? 2 : 0));
+		ctx.stroke();
+	}
+	ctx.beginPath();
+	ctx.moveTo(side === "L" ? -6 : 6, 8);
+	ctx.lineTo(side === "L" ? -12 : 12, 16);
+	ctx.stroke();
+	ctx.restore();
+}
+
+function drawFoot(ctx, ankle, side) {
+	const d = side === "L" ? -1 : 1;
+	const x = ankle[0], y = ankle[1];
+	ctx.beginPath();
+	ctx.moveTo(x - 8, y - 2);
+	ctx.bezierCurveTo(x - 10, y + 14, x - 9 + d * 5, y + 27, x - 6 + d * 7, y + 31);
+	ctx.lineTo(x + 8 + d * 7, y + 31);
+	ctx.bezierCurveTo(x + 10 + d * 5, y + 18, x + 9, y + 8, x + 8, y - 2);
+	ctx.closePath();
+	fillStroke(ctx, 2);
+	ctx.strokeStyle = LINE;
+	ctx.lineWidth = 1.3;
+	for (let i = 0; i < 4; i++) {
+		const tx = x - 5 + i * 3.4 + d * 5;
+		ctx.beginPath();
+		ctx.moveTo(tx, y + 30);
+		ctx.lineTo(tx, y + 36);
+		ctx.stroke();
+	}
 }
 
 function anatomy(ctx, m, p, pt) {
 	const y = pt.pelvis[1];
 	if (m.gender === "female") {
-		ellipse(ctx, [pt.pelvis[0], y + 20],
-			[7 * p.genitalSize, 11 * p.genitalSize]);
-		ellipse(ctx, [pt.pelvis[0], y + 21],
-			[3.2 * p.openingSize, 6 * p.openingSize]);
+		ellipse(ctx, [pt.pelvis[0], y + 20], [7 * p.genitalSize, 11 * p.genitalSize]);
+		ellipse(ctx, [pt.pelvis[0], y + 21], [3.2 * p.openingSize, 6 * p.openingSize]);
 	} else {
 		const g = p.genitalSize;
 		ellipse(ctx, [pt.pelvis[0], y + 20], [5 * g, 13 * g]);
-		limb(ctx, [pt.pelvis[0], y + 14], [pt.pelvis[0], y + 30], 8 * g);
+		tapered(ctx, [pt.pelvis[0], y + 14], [pt.pelvis[0], y + 30], 5 * g, 4 * g);
 	}
 	ellipse(ctx, [pt.pelvis[0], y + 37], [4 * p.anusSize, 3 * p.anusSize]);
 }
@@ -163,28 +277,40 @@ function anatomy(ctx, m, p, pt) {
 export function drawMannequin(ctx, m, nsfw = false) {
 	if (!m || !ctx) return;
 	const pt = skeleton(m);
+	const base = BASE[m.gender] || BASE.female;
 	ctx.save();
 	ctx.lineCap = "round";
 	ctx.lineJoin = "round";
 
 	for (const side of ["L", "R"]) {
-		limb(ctx, pt["hip" + side], pt["knee" + side], 15);
-		limb(ctx, pt["knee" + side], pt["ankle" + side], 11);
+		tapered(ctx, pt["hip" + side], pt["knee" + side], 17, 11);
+		tapered(ctx, pt["knee" + side], pt["ankle" + side], 10, 6.5);
+		drawFoot(ctx, pt["ankle" + side], side);
 	}
 	for (const side of ["L", "R"]) {
-		limb(ctx, pt["shoulder" + side], pt["elbow" + side], 12);
-		limb(ctx, pt["elbow" + side], pt["wrist" + side], 9);
+		tapered(ctx, pt["shoulder" + side], pt["elbow" + side], 11, 8);
+		tapered(ctx, pt["elbow" + side], pt["wrist" + side], 7.5, 5.5);
+		drawHand(ctx, pt["wrist" + side], pt["wristAngle" + side], side);
 	}
-	limb(ctx, pt.pelvis, pt.neck, 34);
 
-	ellipse(ctx, pt.pelvis, pt.hipR);
-	ellipse(ctx, [0, pt.pelvis[1] + 8], pt.gluteR);
-	ellipse(ctx, pt.waist, pt.waistR);
-	ellipse(ctx, pt.chest, pt.chestR);
-	ellipse(ctx, pt.head, [pt.headRadius, pt.headRadius]);
+	drawTorso(ctx, pt, base, m);
+	drawHead(ctx, pt);
+
+	const r = Math.max(3, handleSizeFallback(m) * 0.1);
+	for (const side of ["L", "R"]) {
+		joint(ctx, pt["shoulder" + side], r + 3);
+		joint(ctx, pt["elbow" + side], r + 2);
+		joint(ctx, pt["knee" + side], r + 4);
+		joint(ctx, pt["ankle" + side], r + 2);
+	}
+	joint(ctx, pt.neck, r + 1);
 
 	if (nsfw) anatomy(ctx, m, m.proportions, pt);
 	ctx.restore();
+}
+
+function handleSizeFallback(m) {
+	return Math.max(3, Math.abs(m.tf.sx) * 8);
 }
 
 export function mannequinBounds(m) {
