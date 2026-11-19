@@ -30,6 +30,13 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const names = pack.bones.map((b) => b.name);
 	const bonePos = solved.bonePositions;
 	const byName = new Map(names.map((n, i) => [i, n]));
+	const boneSet = (prefixes) => new Set(
+		names.filter((n) => prefixes.some((p) => n.startsWith(p))));
+	// Incluye TODOS los huesos del miembro (dedos, pie, ball): si el peso de
+	// un dedo no se cuenta, la mano se queda atrás y se ve un desgarro.
+	const ARM_SET = boneSet(["upperarm_", "lowerarm_", "hand_", "index_",
+		"middle_", "ring_", "pinky_", "thumb_"]);
+	const LEG_SET = boneSet(["thigh_", "calf_", "foot_", "ball_"]);
 
 	let minY = Infinity;
 	let maxY = -Infinity;
@@ -114,22 +121,17 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 				delta("waist", i, x * (fWaist - 1) * fall, 0, z * (fWaist - 1) * fall);
 			}
 
-			if (C.hips.includes(name) && t > 0.46 && t < 0.62) {
-				const fall = smooth((Math.abs(t - 0.54) - 0.02) / 0.08) * w;
-				// La cadera ensancha sobre todo en X; el volumen de atrás lo
-				// controla el target de glúteos, no este.
-				delta("hips", i, x * (fHips - 1) * fall, 0,
-					z * (fHips - 1) * 0.4 * fall);
-			}
-
-			// La cadera no termina en un óvalo: el ensanchamiento se reparte
-			// por el muslo alto y se desvanece antes de la rodilla, para que la
-			// siluera siga la forma del hueso en vez de una campana aislada.
-			if (C.thigh.includes(name) && t > 0.34 && t < 0.56 && fHips !== 1) {
-				const fall = smooth((t - 0.34) / 0.1) * smooth((0.56 - t) / 0.1) * w;
+			if (C.hips.includes(name) && fHips !== 1) {
+				// Campana asimétrica: ensancha al máximo en el trocánter (t≈0.48),
+				// se estrecha hacia la cintura y baja suavemente por el muslo.
+				// Un único campo continuo evita el óvalo con borde que daban las
+				// dos bandas independientes.
+				const center = 0.48;
+				const sigma = t < center ? 0.14 : 0.1;
+				const fall = Math.exp(-(((t - center) / sigma) ** 2)) * w;
 				delta("hips", i,
-					x * (fHips - 1) * 0.65 * fall, 0,
-					z * (fHips - 1) * 0.22 * fall);
+					x * (fHips - 1) * fall, 0,
+					z * (fHips - 1) * 0.32 * fall);
 			}
 
 			if (C.bust.includes(name) && z > 0.1 && t > 0.62 && t < 0.86 && fBust !== 1) {
@@ -200,7 +202,7 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 		// largo del eje del hueso raíz de CADA miembro (target, no huesos).
 		if (fArmLen !== 1 || fLegLen !== 1) {
 			const limbSide = x >= 0 ? "l" : "r";
-			const stretchLimb = (target, rootPrefix, factor, partNames) => {
+			const stretchLimb = (target, rootPrefix, factor, boneSetForLimb) => {
 				if (Math.abs(factor - 1) < 0.001) return;
 				const idx = names.indexOf(rootPrefix + limbSide);
 				if (idx < 0) return;
@@ -210,14 +212,21 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 				dx /= len; dy /= len; dz /= len;
 				const along = (x - a.hx) * dx + (y - a.hy) * dy + (z - a.hz) * dz;
 				if (along <= 0) return;
+				// Peso total del miembro: dedos y pie incluidos. Así la mano y
+				// el empeine estiran igual que el antebrazo o la pantorrilla.
+				let wLimb = 0;
 				for (let k = 0; k < 4; k++) {
-					if (!partNames.includes(byName.get(skin[o + k]))) continue;
-					const f = (factor - 1) * weights[o + k] * along;
-					delta(target, i, dx * f, dy * f, dz * f);
+					if (boneSetForLimb.has(byName.get(skin[o + k]))) {
+						wLimb += weights[o + k];
+					}
 				}
+				if (wLimb < 0.01) return;
+				const ease = smooth(Math.min(1, along / (0.06 * span)));
+				const f = (factor - 1) * along * wLimb * ease;
+				delta(target, i, dx * f, dy * f, dz * f);
 			};
-			stretchLimb("armLength", "upperarm_", fArmLen, C.arm);
-			stretchLimb("legLength", "thigh_", fLegLen, [...C.thigh, ...C.calf]);
+			stretchLimb("armLength", "upperarm_", fArmLen, ARM_SET);
+			stretchLimb("legLength", "thigh_", fLegLen, LEG_SET);
 		}
 
 		// Glúteos: dos lóbulos redondeados en lugar de una banda plana. Cada

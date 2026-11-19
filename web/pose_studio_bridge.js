@@ -27,7 +27,6 @@ const DEFAULT_ANATOMY = {
 	gender: 0, bust: 0.75, waist: 0.35, hips: 0.65, glutes: 0.6, headSize: 0.45,
 	handGripL: 0.5, handGripR: 0.5,
 	penisLength: 0.5, penisGirth: 0.5,
-	penisRotX: 0, penisRotY: 0, penisRotZ: 0,
 };
 
 // Huesos que maneja la anatomía (rotación de muñecas/tobillos y cierre de
@@ -425,12 +424,15 @@ function buildCharacter(pack, params, pose) {
 			? solved.bonePositions[pelvisIdx * 6 + 1]
 			: height.minY + heightUnits * 0.45;
 		const pos = geometry.attributes.position.array;
-		const bandY = heightUnits * 0.045;
-		const bandX = heightUnits * 0.09;
+		// Buscar la superficie a la altura real del perineo, no a la del hueso
+		// pelvis (que está encima y hacía que el volumen pareciera en el abdomen).
+		const crotchY = pelvisY - heightUnits * 0.035;
+		const bandY = heightUnits * 0.02;
+		const bandX = heightUnits * 0.06;
 		let frontZ = -Infinity;
 		let backZ = Infinity;
 		for (let i = 0; i < pos.length; i += 3) {
-			if (Math.abs(pos[i + 1] - pelvisY) > bandY) continue;
+			if (Math.abs(pos[i + 1] - crotchY) > bandY) continue;
 			if (Math.abs(pos[i]) > bandX) continue;
 			if (pos[i + 2] > frontZ) frontZ = pos[i + 2];
 			if (pos[i + 2] < backZ) backZ = pos[i + 2];
@@ -448,7 +450,7 @@ function buildCharacter(pack, params, pose) {
 			// esfera de radio negativo (malla degenerada).
 			if (!(size > 0)) return;
 			const m = new THREE.Mesh(
-				new THREE.SphereGeometry(unit * Math.max(0.15, 0.6 + size), 12, 10),
+				new THREE.SphereGeometry(unit * (0.35 + size * 0.4), 12, 10),
 				new THREE.MeshBasicMaterial({ color, map: details[name] || null }),
 			);
 			m.name = name;
@@ -467,9 +469,14 @@ function buildCharacter(pack, params, pose) {
 				genitals.add(edge);
 			}
 		};
-		add("vagina", params.genitalMeshes.vagina, pelvisY - unit * 0.6, frontZ + unit * 0.25, 1.35, 1, BODY_COLOR);
-		add("opening", params.genitalMeshes.opening, pelvisY - unit * 0.9, frontZ + unit * 0.5, 0.6, 0.5);
-		add("anus", params.genitalMeshes.anus, pelvisY - unit * 2.2, backZ - unit * 0.3, 1, 1);
+		// Todos con relleno blanco y contorno negro: antes opening y ano eran
+		// esferas negras y el ano parecía un punto flotante.
+		add("vagina", params.genitalMeshes.vagina,
+			crotchY - unit * 0.2, frontZ + unit * 0.05, 1.1, 0.8, BODY_COLOR);
+		add("opening", params.genitalMeshes.opening,
+			crotchY - unit * 0.5, frontZ + unit * 0.08, 0.55, 0.45, BODY_COLOR);
+		add("anus", params.genitalMeshes.anus,
+			crotchY - unit * 0.6, backZ - unit * 0.05, 0.8, 0.8, BODY_COLOR);
 	}
 	// El morph de pene termina en 1; el excedente del slider se aplica aquí.
 	const maleSurplus = params.localDeform?.genitalSize > 1
@@ -685,7 +692,6 @@ function sliderRow(panel, label, key, state, onInput) {
 		gender: [0, 1], posX: [-8, 8], posY: [-3, 3], rotationY: [-180, 180],
 		handRotX: [-180, 180], handRotY: [-180, 180], handRotZ: [-180, 180],
 		footRotX: [-180, 180], footRotY: [-180, 180], footRotZ: [-180, 180],
-		penisRotX: [-180, 180], penisRotY: [-180, 180], penisRotZ: [-180, 180],
 	};
 	const [mn, mx] = RANGES[key] || [-1, 2.5];
 	input.min = String(mn);
@@ -888,25 +894,25 @@ export async function openPoseStudio3D(node) {
 			rotatePair("foot", anatomy.footRotX ?? 0,
 				anatomy.footRotY ?? oldFoot, anatomy.footRotZ ?? 0);
 
-			// Cerrar/abrir cada mano por separado, articulando las falanges
-			// reales del asset. -1 = abierta, 0.5 = reposo, 2.5 = puño.
-			// El eje X local flexionan los dedos (apuntan en +Z); el pulgar se
-			// mueve menos y con otro eje.
+			// Cerrar/abrir cada mano por separado. Curvaturas suaves: con 105°
+			// acumuladas las falanges se clavaban en la palma y desde ciertos
+			// ángulos parecía una deformación, no un puño.
 			const xAxis = new THREE.Vector3(1, 0, 0);
 			const yAxis = new THREE.Vector3(0, 1, 0);
 			const q = new THREE.Quaternion();
-			const factors = { "01": 1, "02": 0.85, "03": 0.6 };
+			const phFactor = { "01": 1, "02": 0.8, "03": 0.55 };
+			const fingerFactor = {
+				index: 0.92, middle: 1, ring: 0.94, pinky: 0.86, thumb: 0.45,
+			};
 			for (const [side, key] of [["l", "handGripL"], ["r", "handGripR"]]) {
 				const grip = anatomy[key] ?? anatomy.handGrip ?? 0.5;
-				const curl = Math.max(-12, Math.min(105, (grip - 0.5) * 55));
+				const curl = Math.max(-10, Math.min(78, (grip - 0.5) * 42));
 				if (Math.abs(curl) < 0.1) continue;
 				for (const finger of FINGERS) {
 					for (const ph of PHALANGES) {
 						const bone = built.byName[`${finger}_${ph}_${side}`];
 						if (!bone) continue;
-						const deg = finger === "thumb"
-							? curl * 0.5
-							: curl * factors[ph];
+						const deg = curl * fingerFactor[finger] * phFactor[ph];
 						q.setFromAxisAngle(
 							finger === "thumb" ? yAxis : xAxis,
 							deg * Math.PI / 180);
@@ -1042,9 +1048,6 @@ export async function openPoseStudio3D(node) {
 		["genitalSize", "Genitales"],
 		["penisLength", "Largo pene", "Longitud: ×1.5 al máximo (2.5), activo en NSFW masculino"],
 		["penisGirth", "Grosor pene", "Circunferencia: ×3 al máximo (2.5), activo en NSFW masculino"],
-		["penisRotX", "Pivote pene X", "Ángulo alrededor de la entrepierna; arrastra el tirador de la punta"],
-		["penisRotY", "Pivote pene Y", "Ángulo alrededor de la entrepierna; arrastra el tirador de la punta"],
-		["penisRotZ", "Pivote pene Z", "Ángulo alrededor de la entrepierna"],
 		["openingSize", "Abertura"],
 		["anusSize", "Ano"],
 		["posX", "Pos X", "Desplazamiento horizontal en unidades del mundo"],
@@ -1066,9 +1069,6 @@ export async function openPoseStudio3D(node) {
 				rotationY: Math.round((slot.rotationY || 0) * 180 / Math.PI),
 				handGripL: slot.anatomy?.handGripL ?? slot.anatomy?.handGrip ?? 0.5,
 				handGripR: slot.anatomy?.handGripR ?? slot.anatomy?.handGrip ?? 0.5,
-				penisRotX: slot.anatomy?.penisRotX ?? 0,
-				penisRotY: slot.anatomy?.penisRotY ?? 0,
-				penisRotZ: slot.anatomy?.penisRotZ ?? 0,
 				handRotX: slot.anatomy?.handRotX ?? 0,
 				handRotY: slot.anatomy?.handRotY ?? 0,
 				handRotZ: slot.anatomy?.handRotZ ?? 0,
@@ -1308,12 +1308,20 @@ export async function openPoseStudio3D(node) {
 			start: pointerOnPlane(event, plane),
 		};
 		if (bone.name === "penis_tip") {
-			const slot = activeSlot(stateOf(node));
+			// El punto azul se lleva hasta el cursor: la dirección ancla→punta
+			// sigue al ratón en el plano de la cámara, sin ejes invertidos.
+			const pivot = bone.parent;
+			const anchor = new THREE.Vector3();
+			pivot.getWorldPosition(anchor);
+			const parentQ = new THREE.Quaternion();
+			pivot.parent.getWorldQuaternion(parentQ);
+			const throughAnchor = new THREE.Plane()
+				.setFromNormalAndCoplanarPoint(normal, anchor);
+			state.drag.plane = throughAnchor;
 			state.drag.penis = {
-				base: [slot.anatomy.penisRotX || 0,
-					slot.anatomy.penisRotY || 0,
-					slot.anatomy.penisRotZ || 0],
-				sx: event.clientX, sy: event.clientY,
+				anchor,
+				neutral: bone.position.clone().normalize(),
+				parentQ,
 			};
 		}
 		hit.mesh.material = hit.matActive;
@@ -1347,17 +1355,21 @@ export async function openPoseStudio3D(node) {
 		if (!raycaster.ray.intersectPlane(state.drag.plane, target)) return;
 
 		if (state.drag.penis) {
-			// El tirador gira alrededor del ancla: mover el ratón cambia los
-			// ángulos, nunca traslada el miembro. La raíz queda fija.
+			// El punto azul va hacia el cursor. La dirección se mide en el
+			// plano de la cámara y se convierte al marco del pelvis: arriba en
+			// pantalla es arriba en el modelo (no hay eje invertido).
 			const drag = state.drag.penis;
-			// save() reemplaza node.properties con una copia: hay que tomar la
-			// ranura actual en cada paso o las actualizaciones van a un objeto
-			// huérfano y el arrastre solo registra el primer movimiento.
+			const desired = target.clone().sub(drag.anchor);
+			if (desired.lengthSq() < 1e-6) return;
+			desired.normalize().applyQuaternion(drag.parentQ.clone().invert());
+			const q = new THREE.Quaternion().setFromUnitVectors(drag.neutral, desired);
+			const e = new THREE.Euler().setFromQuaternion(q, "XYZ");
+			// save() reemplaza node.properties con una copia: leer la ranura
+			// fresca en cada paso para que no se pierdan movimientos.
 			const a = activeSlot(stateOf(node)).anatomy;
-			const deg = (v) => Math.max(-180, Math.min(180, v));
-			a.penisRotY = deg(drag.base[1] + (event.clientX - drag.sx) * 0.5);
-			a.penisRotX = deg(drag.base[0] - (event.clientY - drag.sy) * 0.5);
-			a.penisRotZ = drag.base[2];
+			a.penisRotX = e.x * 180 / Math.PI;
+			a.penisRotY = e.y * 180 / Math.PI;
+			a.penisRotZ = e.z * 180 / Math.PI;
 			state.save();
 			queueRebuild();
 			requestRender();

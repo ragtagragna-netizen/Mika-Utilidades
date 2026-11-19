@@ -13,7 +13,7 @@ export const ANATOMY_KEYS = [
 	"handRotX", "handRotY", "handRotZ",
 	"footRotX", "footRotY", "footRotZ",
 	"headSize", "genitalSize", "openingSize", "anusSize",
-	"penisLength", "penisGirth", "penisRotX", "penisRotY", "penisRotZ",
+	"penisLength", "penisGirth",
 ];
 
 export const BODY_PRESETS = {
@@ -27,7 +27,7 @@ export const BODY_PRESETS = {
 		headSize: 0.45,
 		genitalSize: 0.5, openingSize: 0.5, anusSize: 0.5,
 		penisLength: 0.5, penisGirth: 0.5,
-		penisRotX: 0, penisRotY: 0, penisRotZ: 0,
+		
 	},
 	muscular_male: {
 		gender: 1, height: 0.72, bust: 0.45, firmness: 0.7, waist: 0.55,
@@ -38,7 +38,7 @@ export const BODY_PRESETS = {
 		footRotX: 0, footRotY: 0, footRotZ: 0, headSize: 0.5,
 		genitalSize: 0.6, openingSize: 0.5, anusSize: 0.5,
 		penisLength: 0.6, penisGirth: 0.55,
-		penisRotX: 0, penisRotY: 0, penisRotZ: 0,
+		
 	},
 	slim_female: {
 		gender: 0, height: 0.65, bust: 0.35, firmness: 0.45, waist: 0.2,
@@ -49,7 +49,7 @@ export const BODY_PRESETS = {
 		footRotX: 0, footRotY: 0, footRotZ: 0, headSize: 0.5,
 		genitalSize: 0.45, openingSize: 0.45, anusSize: 0.45,
 		penisLength: 0.5, penisGirth: 0.5,
-		penisRotX: 0, penisRotY: 0, penisRotZ: 0,
+		
 	},
 };
 
