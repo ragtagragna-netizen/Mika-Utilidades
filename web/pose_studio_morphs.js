@@ -14,6 +14,8 @@ const C = {
 	calf: ["calf_l", "calf_r", "foot_l", "foot_r"],
 	armLength: ["lowerarm_l", "lowerarm_r", "hand_l", "hand_r"],
 	legLength: ["calf_l", "calf_r", "foot_l", "foot_r"],
+	hand: ["hand_l", "hand_r", "thumb_01_l", "thumb_02_l", "thumb_03_l",
+		"thumb_01_r", "thumb_02_r", "thumb_03_r"],
 	pubis: ["pelvis"],
 };
 
@@ -43,7 +45,7 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const pubisY = minY + 0.53 * span;
 
 	const keys = ["waist", "hips", "glutes", "bust", "arm", "thigh", "calf",
-		"armLength", "legLength", "pubis", "height"];
+		"armLength", "legLength", "handGrip", "pubis", "height"];
 	const targets = {};
 	for (const k of keys) targets[k] = new Float32Array(verts.length);
 	const delta = (k, i, x, y, z) => {
@@ -58,12 +60,13 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const fHips = 1 + ((d.hips ?? 0.5) - 0.5) * 0.4;
 	const fGlute = 1 + ((d.glutes ?? 0.5) - 0.5) * 0.5;
 	const raw = params.rawAnatomy || {};
-	const fBust = 1 + Math.min(1.6, Math.max(0, (raw.bust ?? 0.5) - 1) * 0.75);
+	const fBust = 1 + Math.min(2.6, Math.max(0, (raw.bust ?? 0.5) - 1) * 0.95);
 	const fArm = 1 + ((d.armThickness ?? 0.5) - 0.5) * 0.5;
 	const fThigh = 1 + ((d.thighThickness ?? 0.5) - 0.5) * 0.5;
 	const fCalf = 1 + ((d.calfThickness ?? 0.5) - 0.5) * 0.5;
 	const fArmLen = 1 + ((d.armLength ?? 0.5) - 0.5) * 0.55;
 	const fLegLen = 1 + ((d.legLength ?? 0.5) - 0.5) * 0.55;
+	const grip = d.handGrip ?? 0.5;
 	const fPubis = 1 + ((d.genitalSize ?? 0.5) - 0.5) * 0.35;
 	const h = d.height ?? 0.5;
 	const fHeight = h < 0 || h > 1 ? 1 + (h - 0.5) * 0.6 : 1;
@@ -193,6 +196,36 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 			};
 			stretchLimb("armLength", "upperarm_", fArmLen, C.arm);
 			stretchLimb("legLength", "thigh_", fLegLen, [...C.thigh, ...C.calf]);
+		}
+
+		// Abrir/cerrar manos: el pack no tiene huesos de dedos, así que se
+		// curvatura los vértices de la mano alrededor del eje de la muñeca.
+		if (Math.abs(grip - 0.5) > 0.001) {
+			for (let k = 0; k < 4; k++) {
+				const name = byName.get(skin[o + k]);
+				if (!name || !C.hand.includes(name)) continue;
+				const side = name.endsWith("_l") ? "l" : "r";
+				const hi = names.indexOf("hand_" + side);
+				if (hi < 0) continue;
+				const a = axis(hi);
+				let dx = a.tx - a.hx, dy = a.ty - a.hy, dz = a.tz - a.hz;
+				const len = Math.hypot(dx, dy, dz) || 1;
+				dx /= len; dy /= len; dz /= len;
+				// Eje de curvatura: perpendicular al antebrazo y a "arriba".
+				let ax = dy * 0 - dz * 1;
+				let ay = dz * 0 - dx * 0;
+				let az = dx * 1 - dy * 0;
+				const al = Math.hypot(ax, ay, az) || 1;
+				ax /= al; ay /= al; az /= al;
+				const angle = (0.5 - grip) * 2.0 * weights[o + k];
+				const px = x - a.hx, py = y - a.hy, pz = z - a.hz;
+				const dot = ax * px + ay * py + az * pz;
+				const cs = Math.cos(angle), sn = Math.sin(angle);
+				const rx = px * cs + (ay * pz - az * py) * sn + ax * dot * (1 - cs);
+				const ry = py * cs + (az * px - ax * pz) * sn + ay * dot * (1 - cs);
+				const rz = pz * cs + (ax * py - ay * px) * sn + az * dot * (1 - cs);
+				delta("handGrip", i, rx - px, ry - py, rz - pz);
+			}
 		}
 
 		if (fHeight !== 1) delta("height", i, 0, (y - minY) * (fHeight - 1), 0);

@@ -593,7 +593,10 @@ function sliderRow(panel, label, key, state, onInput) {
 		"width:70px;flex:none;color:#222;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
 	const input = document.createElement("input");
 	input.type = "range";
-	const RANGES = { gender: [0, 1], posX: [-8, 8], posY: [-3, 3], rotationY: [-180, 180] };
+	const RANGES = {
+		gender: [0, 1], posX: [-8, 8], posY: [-3, 3], rotationY: [-180, 180],
+		handRotation: [-180, 180], footRotation: [-180, 180],
+	};
 	const [mn, mx] = RANGES[key] || [-1, 2.5];
 	input.min = String(mn);
 	input.max = String(mx);
@@ -775,6 +778,21 @@ export async function openPoseStudio3D(node) {
 			built.mesh.userData.slot = i;
 			charactersGroup.add(built.group);
 			applyPose(built, poses[i]);
+			const anatomy = st.slots[i]?.anatomy || {};
+			const axis = new THREE.Vector3(0, 1, 0);
+			for (const [names, deg] of [
+				[["hand_l", "hand_r"], anatomy.handRotation || 0],
+				[["foot_l", "foot_r"], anatomy.footRotation || 0],
+			]) {
+				for (const n of names) {
+					const bone = built.byName[n];
+					if (!bone) continue;
+					bone.quaternion.identity();
+					if (Math.abs(deg) > 0.5) {
+						bone.quaternion.setFromAxisAngle(axis, (deg * Math.PI) / 180);
+					}
+				}
+			}
 			state.characters.push(built);
 		});
 		charactersGroup.updateMatrixWorld(true);
@@ -891,6 +909,9 @@ export async function openPoseStudio3D(node) {
 		["armThickness", "Grosor brazos"],
 		["thighThickness", "Grosor muslos"],
 		["calfThickness", "Grosor pantorrillas"],
+		["handGrip", "Abrir/cerrar manos"],
+		["handRotation", "Rotar manos"],
+		["footRotation", "Rotar pies"],
 		["headSize", "Cabeza"],
 		["genitalSize", "Genitales"],
 		["openingSize", "Abertura"],
@@ -912,6 +933,9 @@ export async function openPoseStudio3D(node) {
 				posX: slot.offset?.[0] ?? 0,
 				posY: slot.offset?.[1] ?? 0,
 				rotationY: Math.round((slot.rotationY || 0) * 180 / Math.PI),
+				handRotation: slot.anatomy?.handRotation ?? 0,
+				footRotation: slot.anatomy?.footRotation ?? 0,
+				handGrip: slot.anatomy?.handGrip ?? 0.5,
 			},
 		};
 	};
