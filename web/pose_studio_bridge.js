@@ -25,8 +25,12 @@ export function onPoseCapture(cb) {
 	return () => LISTENERS.delete(cb);
 }
 
+export let __lastCaptureScene = 1;
+export let __sceneCount = 1;
+
 export function setPoseStudioCapture(dataUrl, nodeId = null) {
 	CAPTURES.set(nodeId ?? "__last", dataUrl);
+	__lastCaptureScene = __sceneCount;
 	emit(dataUrl, nodeId);
 }
 
@@ -210,7 +214,6 @@ function renderCapture(data, w, h, params) {
 // --- Hooks de prueba ---
 export function __setCaptureForTest(url) { setPoseStudioCapture(url); }
 export function __setSceneForTest(n) { __sceneCount = n; }
-export let __sceneCount = 1;
 export function __captureSizeForTest(node) { return captureSizeFor(node); }
 export function __renderPoseCaptureForTest(ctx, w, h) {
 	ctx.save();

@@ -4004,6 +4004,42 @@ app.registerExtension({
 			if (s) node.properties.mikaPoseStudio3D = JSON.parse(JSON.stringify(s));
 		}
 
+		async function sendPoseToCalco(node) {
+			const bridge = await import("./pose_studio_bridge.js");
+			let url = bridge.getPoseStudioCapture(node.id);
+			if (!url) url = bridge.getPoseStudioCapture();
+			if (!url) return false;
+			const img = new Image();
+			await new Promise((res, rej) => {
+				img.onload = res;
+				img.onerror = rej;
+				img.src = url;
+			});
+			const st = node._mikaLineart;
+			const W = st.paint.width, H = st.paint.height;
+			const prev = st.calcoLayers.find((l) => l.name === "Pose 3D");
+			if (prev) {
+				prev.src.width = img.width; prev.src.height = img.height;
+				prev.src.getContext("2d").drawImage(img, 0, 0);
+				prev.w = img.width; prev.h = img.height;
+				prev.name = "Pose 3D";
+				prev.tf = { cx: W / 2, cy: H / 2, sx: W / img.width, sy: H / img.height, rot: 0 };
+				prev.tf0 = { ...prev.tf };
+				refreshLayerThumb(prev);
+				st.selection = [layerKey(prev)];
+				drawCalcoLayers(node);
+				renderLayerPanel(node);
+				drawTransformUI(node);
+			} else {
+				const layer = addCalcoLayer(node, img, "Pose 3D");
+				layer.name = "Pose 3D";
+				renderLayerPanel(node);
+			}
+			writeCalco(node);
+			node.setDirtyCanvas(true, true);
+			return true;
+		}
+
 		function bakePaintTf(node) {
 			const st = node._mikaLineart;
 			const t = st.paintTransform;
@@ -4703,6 +4739,10 @@ app.registerExtension({
 			window.__saveMannequins = () => saveMannequins(node);
 			window.__pushUndo = () => pushUndo(node);
 			window.__undoOnce = () => undoOnce(node);
+			window.__sendPoseToCalco = () => sendPoseToCalco(node);
+			import("./pose_studio_bridge.js")
+				.then((b) => b.onPoseCapture(() => sendPoseToCalco(node)))
+				.catch(() => {});
 
 			// Estado guardado en el workflow (widget oculto "pincel"). Lo de la
 			// sesión (prevState) se aplica después y pisa esto si existe.
