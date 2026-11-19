@@ -1886,19 +1886,17 @@ app.registerExtension({
 				m.onload = () => {
 					const W = st.paint.width;
 					const H = st.paint.height;
-					const s = Math.min(W / m.naturalWidth, H / m.naturalHeight);
-					const dw = Math.max(1, Math.round(m.naturalWidth * s));
-					const dh = Math.max(1, Math.round(m.naturalHeight * s));
-					const dx = Math.round((W - dw) / 2);
-					const dy = Math.round((H - dh) / 2);
 					const color = modeStroke(node);
 
+					// El calco se compone en espacio del lienzo; el resultado
+					// vuelve a tamaño completo (la proporción se conserva) para
+					// que caiga exactamente sobre la zona calqueada.
 					const tmp = document.createElement("canvas");
-					tmp.width = dw;
-					tmp.height = dh;
+					tmp.width = W;
+					tmp.height = H;
 					const tctx = tmp.getContext("2d");
-					tctx.drawImage(m, 0, 0, dw, dh);
-					const id = tctx.getImageData(0, 0, dw, dh);
+					tctx.drawImage(m, 0, 0, W, H);
+					const id = tctx.getImageData(0, 0, W, H);
 					const d = id.data;
 					let cr = 0, cg = 0, cb = 0;
 					if (color[0] === "#") {
@@ -1916,10 +1914,15 @@ app.registerExtension({
 					tctx.putImageData(id, 0, 0);
 
 					pushUndo(node);
+					// Si el trazo estaba movido/escalado, se hornea antes: así el
+					// lineart nuevo cae donde está el calco y no se suma a un
+					// canvas con transformación viva.
+					bakePaintTf(node);
 					const ctx = paintCtx(node);
 					ctx.globalCompositeOperation = "source-over";
-					ctx.clearRect(0, 0, W, H);
-					ctx.drawImage(tmp, dx, dy);
+					// Se suma al trazo existente: calcar una figura nueva no debe
+					// borrar lo que ya se había trazado.
+					ctx.drawImage(tmp, 0, 0);
 					st.dirty = true;
 					renderPreview(node);
 					write(node);
@@ -3581,6 +3584,31 @@ app.registerExtension({
 			});
 		}
 
+		// Hornea la transformación viva del trazo en el canvas fuente y la
+		// deja en identidad. Sin esto, al dibujar sobre un trazo movido/escalado
+		// el punto del lienzo cae fuera del canvas fuente y el trazo se pierde.
+		function bakePaintTf(node) {
+			const st = node._mikaLineart;
+			const t = st.paintTransform;
+			if (!t) return;
+			const W = st.paint.width, H = st.paint.height;
+			const out = document.createElement("canvas");
+			out.width = W; out.height = H;
+			const ctx = out.getContext("2d");
+			ctx.translate(t.cx, t.cy);
+			ctx.rotate(t.rot);
+			ctx.scale(t.sx, t.sy);
+			ctx.drawImage(st.paint, -W / 2, -H / 2);
+			const pctx = paintCtx(node);
+			pctx.setTransform(1, 0, 0, 1, 0, 0);
+			pctx.globalCompositeOperation = "source-over";
+			pctx.clearRect(0, 0, W, H);
+			pctx.drawImage(out, 0, 0);
+			st.paintTransform = null;
+			renderPreview(node);
+			write(node);
+		}
+
 		// Ejecuta fn con la transformación de la capa de trazo aplicada.
 		function withTf(node, ctx, fn) {
 			const st = node._mikaLineart;
@@ -4063,8 +4091,12 @@ app.registerExtension({
 						nsx = n;
 						nsy = n;
 					}
-					const sx = Math.max(0.02, nsx);
-					const sy = Math.max(0.02, nsy);
+					// El espejo vive en el signo de la escala: redimensionar no
+					// debe devolver la capa a su orientación original.
+					const signX = s0.sx < 0 ? -1 : 1;
+					const signY = s0.sy < 0 ? -1 : 1;
+					const sx = Math.max(0.02, nsx) * signX;
+					const sy = Math.max(0.02, nsy) * signY;
 					const cxs = sgx * hw * sx;
 					const cys = sgy * hh * sy;
 					setLayerTf(node, which, {
@@ -4687,6 +4719,11 @@ app.registerExtension({
 						}
 						commitShapeObj(node);
 					}
+
+					// Un trazo con transformación viva no acepta dibujo nuevo
+					// fuera del rectángulo que ocupa: se hornea primero para que
+					// el pincel caiga siempre sobre el lienzo.
+					bakePaintTf(node);
 
 					hideCursor(node);
 					if (st.tool === "text") {
