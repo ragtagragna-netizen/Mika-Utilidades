@@ -401,16 +401,61 @@ function sceneBox(scene, onlyCharacters = true) {
 	return box;
 }
 
+const STUDIO_GEOM_KEY = "mikaPoseStudio3D.window";
+
+function defaultStudioGeom() {
+	return {
+		x: Math.max(8, window.innerWidth - 576),
+		y: 56,
+		w: Math.min(560, window.innerWidth - 32),
+		h: Math.min(780, window.innerHeight - 72),
+	};
+}
+
+function clampStudioGeom(g) {
+	const w = Math.min(Math.max(420, Number(g?.w) || 560), window.innerWidth - 16);
+	const h = Math.min(Math.max(520, Number(g?.h) || 700), window.innerHeight - 60);
+	return {
+		x: Math.min(Math.max(80 - w, Number(g?.x) || 0), window.innerWidth - 80),
+		y: Math.min(Math.max(0, Number(g?.y) || 0), window.innerHeight - 40),
+		w, h,
+	};
+}
+
+function readStudioGeom() {
+	try {
+		return clampStudioGeom(JSON.parse(localStorage.getItem(STUDIO_GEOM_KEY)) || defaultStudioGeom());
+	} catch (e) {
+		return defaultStudioGeom();
+	}
+}
+
+function writeStudioGeom(root) {
+	const r = root.getBoundingClientRect();
+	localStorage.setItem(STUDIO_GEOM_KEY, JSON.stringify(clampStudioGeom({
+		x: r.left, y: r.top, w: r.width, h: r.height,
+	})));
+}
+
+function applyStudioGeom(root, g) {
+	const q = clampStudioGeom(g);
+	root.style.left = `${q.x}px`;
+	root.style.top = `${q.y}px`;
+	root.style.width = `${q.w}px`;
+	root.style.height = `${q.h}px`;
+	root.style.right = "auto";
+}
+
 function makeWindow(node) {
 	const root = document.createElement("div");
 	root.dataset.mika = "pose-studio-3d-root";
 	root.style.cssText =
-		"position:fixed;right:16px;top:56px;width:min(560px,92vw);height:min(780px,90vh);z-index:9000;" +
+		"position:fixed;z-index:9000;box-sizing:border-box;resize:both;min-width:420px;min-height:520px;" +
 		"background:#f4f4f4;color:#222;border:1px solid #888;border-radius:8px;display:flex;flex-direction:column;" +
 		"box-shadow:0 8px 28px rgba(0,0,0,.35);font:12px sans-serif;overflow:hidden;";
 
 	const bar = document.createElement("div");
-	bar.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 8px;background:#333;color:#eee;flex:none;";
+	bar.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 8px;background:#333;color:#eee;flex:none;cursor:move;user-select:none;";
 	const title = document.createElement("span");
 	title.textContent = "Pose Studio 3D — Mika";
 	title.style.cssText = "font-weight:600;flex:1;";
@@ -434,6 +479,40 @@ function makeWindow(node) {
 
 	root.append(bar, viewport, panel);
 	document.body.appendChild(root);
+	applyStudioGeom(root, readStudioGeom());
+
+	// Arrastre desde la cabecera, con el mismo contrato que la ventana del editor.
+	let drag = null;
+	bar.addEventListener("pointerdown", (e) => {
+		if (e.target.closest?.("button") || e.button !== 0) return;
+		const r = root.getBoundingClientRect();
+		drag = { dx: e.clientX - r.left, dy: e.clientY - r.top, w: r.width, h: r.height };
+		root.style.left = `${r.left}px`;
+		root.style.top = `${r.top}px`;
+		root.style.right = "auto";
+		bar.setPointerCapture(e.pointerId);
+		e.preventDefault();
+	});
+	bar.addEventListener("pointermove", (e) => {
+		if (!drag) return;
+		const x = Math.min(Math.max(e.clientX - drag.dx, 80 - drag.w), window.innerWidth - 80);
+		const y = Math.min(Math.max(e.clientY - drag.dy, 0), window.innerHeight - 40);
+		root.style.left = `${x}px`;
+		root.style.top = `${y}px`;
+	});
+	const endDrag = () => {
+		if (!drag) return;
+		drag = null;
+		writeStudioGeom(root);
+	};
+	bar.addEventListener("pointerup", endDrag);
+	bar.addEventListener("pointercancel", endDrag);
+	bar.addEventListener("dblclick", (e) => {
+		if (e.target.closest?.("button")) return;
+		applyStudioGeom(root, defaultStudioGeom());
+		writeStudioGeom(root);
+	});
+
 	return { root, canvas, viewport, panel };
 }
 
@@ -497,6 +576,8 @@ export async function openPoseStudio3D(node) {
 		dispose() {
 			if (state.anim) cancelAnimationFrame(state.anim);
 			try { state.resizeObserver?.disconnect(); } catch (e) { /* no-op */ }
+			try { state.geoObserver?.disconnect(); } catch (e) { /* no-op */ }
+			if (state.geoSaveTimer) clearTimeout(state.geoSaveTimer);
 			try { orbit.dispose(); } catch (e) { /* no-op */ }
 			try { renderer.dispose(); } catch (e) { /* no-op */ }
 			ui.root.remove();
@@ -526,6 +607,14 @@ export async function openPoseStudio3D(node) {
 	};
 	state.resizeObserver = new ResizeObserver(resize);
 	state.resizeObserver.observe(ui.viewport);
+	state.geoObserver = new ResizeObserver(() => {
+		if (state.geoSaveTimer) clearTimeout(state.geoSaveTimer);
+		state.geoSaveTimer = setTimeout(() => {
+			writeStudioGeom(ui.root);
+			requestRender();
+		}, 250);
+	});
+	state.geoObserver.observe(ui.root);
 	resize();
 
 	const refreshHandles = () => {
