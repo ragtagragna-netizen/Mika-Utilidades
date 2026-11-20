@@ -27,7 +27,20 @@ const MAX_UNDO = 20;
 // recrea los nodos al cambiar de pestaña de workflow y, como el calco es solo
 // de sesión (no se serializa), se perdería. Se indexa por id de workflow + nodo.
 const CALCO_CACHE = new Map();
-const calcoKey = (node) => `${node.graph?.id ?? app.graph?.id ?? "g"}:${node.id}`;
+// El id del grafo NO identifica la sesión: ComfyUI reutiliza el mismo objeto
+// grafo al abrir otro workflow y el id del archivo se comparte entre copias.
+// La ruta del workflow activo sí cambia por pestaña / "Guardar como copia",
+// así que el calco se recupera al recrear el nodo dentro de su workflow pero
+// nunca se filtra a otro.
+const workflowIdentity = () => {
+  try {
+    const wf = app.extensionManager?.workflow?.activeWorkflow;
+    if (wf?.path) return String(wf.path);
+    if (wf?.filename) return String(wf.filename);
+  } catch (e) { /* no-op */ }
+  return String(app.graph?.id ?? "g");
+};
+const calcoKey = (node) => `${workflowIdentity()}:${node.id}`;
 
 const RES_RE = /(\d+)\s*x\s*(\d+)/;
 

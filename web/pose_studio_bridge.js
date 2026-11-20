@@ -2,6 +2,7 @@
 // Modelo MakeHuman CC0 con morphs, articulaciones arrastrables, varios
 // personajes y captura en blanco/negro lista para el calco.
 
+import { app } from "/scripts/app.js";
 import * as THREE from "./vendor/three/three.module.js";
 import { OrbitControls } from "./vendor/three/OrbitControls.js";
 import {
@@ -9,6 +10,10 @@ import {
 } from "./pose_studio/morph_runtime.mjs";
 import { applyAnatomy, BODY_PRESETS } from "./pose_studio_anatomy.js";
 import { buildCustomMorphs } from "./pose_studio_morphs.js";
+
+// Rango de desplazamiento del personaje. Antes era ±8 en X/Z y ±3 en Y,
+// demasiado corto para armar una escena; ahora es prácticamente libre.
+const MOVE_LIMIT = 100;
 
 const CAPTURES = new Map();
 const LISTENERS = new Set();
@@ -616,6 +621,19 @@ const STUDIO_GEOM_KEY = "mikaPoseStudio3D.window";
 // exactamente el mismo ángulo y zoom que se dejó.
 const CAMERA_KEY_PREFIX = "mikaPoseStudio3D.camera.";
 
+// La cámara se guardaba solo por id de nodo, así que dos workflows con el
+// mismo nodo compartían el ángulo. La ruta del workflow activo distingue
+// pestañas y copias; se usa como prefijo del id de nodo.
+const workflowKey = () => {
+	try {
+		const wf = app.extensionManager?.workflow?.activeWorkflow;
+		if (wf?.path) return String(wf.path);
+		if (wf?.filename) return String(wf.filename);
+	} catch (e) { /* no-op */ }
+	return String(app.graph?.id ?? "g");
+};
+const cameraKey = (node) => CAMERA_KEY_PREFIX + workflowKey() + "." + String(node?.id ?? "");
+
 function defaultStudioGeom() {
 	return {
 		x: Math.max(8, window.innerWidth - 796),
@@ -652,8 +670,7 @@ function writeStudioGeom(root) {
 
 function readCamera(node) {
 	try {
-		const raw = JSON.parse(localStorage.getItem(
-			CAMERA_KEY_PREFIX + String(node?.id ?? "")));
+		const raw = JSON.parse(localStorage.getItem(cameraKey(node)));
 		if (!raw) return null;
 		const ok = (a) => Array.isArray(a) && a.length === 3
 			&& a.every((v) => Number.isFinite(Number(v)));
@@ -666,7 +683,7 @@ function readCamera(node) {
 
 function writeCamera(node, camera, orbit) {
 	try {
-		localStorage.setItem(CAMERA_KEY_PREFIX + String(node?.id ?? ""), JSON.stringify({
+		localStorage.setItem(cameraKey(node), JSON.stringify({
 			position: camera.position.toArray(),
 			target: orbit.target.toArray(),
 		}));
@@ -779,7 +796,7 @@ function sliderRow(panel, label, key, state, onInput) {
 	input.type = "range";
 	const RANGES = {
 		gender: [0, 1], age: [1, 90], weight: [0, 1],
-		posX: [-8, 8], posY: [-3, 3], posZ: [-8, 8],
+		posX: [-MOVE_LIMIT, MOVE_LIMIT], posY: [-MOVE_LIMIT, MOVE_LIMIT], posZ: [-MOVE_LIMIT, MOVE_LIMIT],
 		rotationY: [-180, 180],
 		handLPosX: [-4, 4], handLPosY: [-4, 4], handLPosZ: [-4, 4],
 		handRPosX: [-4, 4], handRPosY: [-4, 4], handRPosZ: [-4, 4],
@@ -1948,7 +1965,7 @@ export async function openPoseStudio3D(node) {
 			if (!target) return;
 			const delta = target.clone().sub(d.start);
 			const ai = { x: 0, y: 1, z: 2 }[d.axis];
-			const value = Math.max(-8, Math.min(8, d.base[ai] + delta[d.axis]));
+			const value = Math.max(-MOVE_LIMIT, Math.min(MOVE_LIMIT, d.base[ai] + delta[d.axis]));
 			d.slot.offset[ai] = value;
 			if (d.model) {
 				d.model.group.position[d.axis] = d.basePos + (value - d.base[ai]);
