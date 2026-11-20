@@ -57,7 +57,7 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const gluteZ = -0.025 * span;
 
 	const keys = ["waist", "hips", "glutes", "bust", "arm", "thigh", "calf",
-		"armLength", "legLength", "pubis", "height", "penisRot"];
+		"armLength", "legLength", "pubis", "height", "width", "penisRot"];
 	const targets = {};
 	for (const k of keys) targets[k] = new Float32Array(verts.length);
 	const delta = (k, i, x, y, z) => {
@@ -93,6 +93,8 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const h = d.height ?? 0.5;
 	const extraH = h > 1 ? h - 1 : h < 0 ? h : 0;
 	const fHeight = 1 + extraH * 0.22;
+	// Anchura global: mismo rango y neutral que altura, sin morph nativo.
+	const fWidth = 1 + ((d.width ?? 0.5) - 0.5) * 0.45;
 
 	// Eje de cada hueso (cabeza -> cola) en espacio de malla.
 	const axis = (index) => {
@@ -255,6 +257,7 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 		}
 
 		if (fHeight !== 1) delta("height", i, 0, (y - minY) * (fHeight - 1), 0);
+		if (fWidth !== 1) delta("width", i, x * (fWidth - 1), 0, 0);
 	}
 
 	// El pene gira alrededor de su ancla en la entrepierna, como un hueso: la
@@ -294,13 +297,16 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 		const cx = Math.cos(rotX), sx = Math.sin(rotX);
 		const cy = Math.cos(rotY), sy = Math.sin(rotY);
 		const cz = Math.cos(rotZ), sz = Math.sin(rotZ);
+		// Mismo orden que THREE.Euler("XYZ"): q = qx·qy·qz, es decir se
+		// aplica Z, luego Y y por último X. Así el hueso del tirador y el
+		// target giran exactamente igual.
 		const rotate = (x, y, z) => {
-			let ny = y * cx - z * sx, nz = y * sx + z * cx;
-			y = ny; z = nz;
-			let nx2 = x * cy + z * sy; nz = -x * sy + z * cy;
-			x = nx2;
-			const nx3 = x * cz - y * sz; ny = x * sz + y * cz;
-			return [nx3, ny, nz];
+			let nx = x * cz - y * sz; let ny = x * sz + y * cz;
+			x = nx; y = ny;
+			nx = x * cy + z * sy; let nz = -x * sy + z * cy;
+			x = nx; z = nz;
+			ny = y * cx - z * sx; nz = y * sx + z * cx;
+			return [x, ny, nz];
 		};
 		for (const gi of gset) {
 			const i = gi * 3;

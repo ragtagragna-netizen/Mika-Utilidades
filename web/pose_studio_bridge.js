@@ -105,7 +105,7 @@ function defaultSlot(anatomy, nsfw) {
 		anatomy: { ...DEFAULT_ANATOMY, ...(anatomy || {}) },
 		preset: null,
 		pose: {},
-		offset: [0, 0],
+		offset: [0, 0, 0],
 		rotationY: 0,
 		nsfw: !!nsfw,
 	};
@@ -162,7 +162,10 @@ function stateOf(node) {
 			slot.anatomy.handGripR = oldGrip;
 		}
 		slot.pose ||= {};
-		if (!Array.isArray(slot.offset) || slot.offset.length !== 2) slot.offset = [0, 0];
+		if (!Array.isArray(slot.offset) || slot.offset.length !== 3) {
+			const o = Array.isArray(slot.offset) ? slot.offset : [];
+			slot.offset = [o[0] || 0, o[1] || 0, o[2] || 0];
+		}
 		if (typeof slot.rotationY !== "number") slot.rotationY = 0;
 	}
 	st.characters = st.slots.length;
@@ -294,6 +297,14 @@ function buildCharacter(pack, params, pose) {
 			solved.bonePositions[i + 4] = height.minY + (solved.bonePositions[i + 4] - height.minY) * hStretch;
 		}
 	}
+	// La anchura global escala X de vértices y pivotes por igual, centrada en 0.
+	const wStretch = 1 + ((params.localDeform?.width ?? 0.5) - 0.5) * 0.45;
+	if (wStretch !== 1) {
+		for (let i = 0; i < solved.bonePositions.length; i += 6) {
+			solved.bonePositions[i] *= wStretch;
+			solved.bonePositions[i + 3] *= wStretch;
+		}
+	}
 
 	const bodyMaterial = new THREE.MeshBasicMaterial({
 		color: BODY_COLOR, side: THREE.DoubleSide,
@@ -379,6 +390,20 @@ function buildCharacter(pack, params, pose) {
 				tz = vpos[gi * 3 + 2];
 			}
 		}
+		const d0 = params.localDeform || {};
+		const q0 = new THREE.Quaternion()
+			.setFromAxisAngle(new THREE.Vector3(1, 0, 0),
+				(d0.penisRotX ?? 0) * Math.PI / 180)
+			.multiply(new THREE.Quaternion().setFromAxisAngle(
+				new THREE.Vector3(0, 1, 0),
+				(d0.penisRotY ?? 0) * Math.PI / 180))
+			.multiply(new THREE.Quaternion().setFromAxisAngle(
+				new THREE.Vector3(0, 0, 1),
+				(d0.penisRotZ ?? 0) * Math.PI / 180));
+		// El morph ya giró los vértices alrededor del ancla. Si el hueso
+		// también gira, desplaza el ancla y el tirador se separa de la punta:
+		// se compensa con la rotación inversa en las posiciones locales.
+		const inv = q0.clone().invert();
 		const pivot = new THREE.Bone();
 		pivot.name = "penis";
 		byName.pelvis.add(pivot);
@@ -387,17 +412,13 @@ function buildCharacter(pack, params, pose) {
 			ay - solved.bonePositions[pelvisIdx * 6 + 1],
 			az - solved.bonePositions[pelvisIdx * 6 + 2],
 		);
-		const d0 = params.localDeform || {};
-		pivot.quaternion.setFromEuler(new THREE.Euler(
-			(d0.penisRotX ?? 0) * Math.PI / 180,
-			(d0.penisRotY ?? 0) * Math.PI / 180,
-			(d0.penisRotZ ?? 0) * Math.PI / 180, "XYZ"));
+		pivot.quaternion.copy(q0);
 		const tip = new THREE.Bone();
 		tip.name = "penis_tip";
 		pivot.add(tip);
-		// El tirador sigue la punta también cuando el miembro crece.
-		const fLenTip = 1 + Math.max(0, (d0.penisLength ?? 0.5) - 1) / 3;
-		tip.position.set((tx - ax) * fLenTip, (ty - ay) * fLenTip, (tz - az) * fLenTip);
+		// tx/ty/tz vienen de la malla ya deformada: con la compensación
+		// anterior el tirador cae justo en la punta real.
+		tip.position.set(tx - ax, ty - ay, tz - az).applyQuaternion(inv);
 		byName.penis = pivot;
 		byName.penis_tip = tip;
 		bones.push(pivot, tip);
@@ -630,7 +651,7 @@ function makeWindow(node) {
 	const viewport = document.createElement("div");
 	viewport.style.cssText = "position:relative;flex:1;min-width:0;min-height:0;background:#fff;";
 	const canvas = document.createElement("canvas");
-	canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;";
+	canvas.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;display:block;touch-action:none;background:#fff;";
 	viewport.appendChild(canvas);
 
 	const panel = document.createElement("div");
@@ -689,7 +710,8 @@ function sliderRow(panel, label, key, state, onInput) {
 	const input = document.createElement("input");
 	input.type = "range";
 	const RANGES = {
-		gender: [0, 1], posX: [-8, 8], posY: [-3, 3], rotationY: [-180, 180],
+		gender: [0, 1], posX: [-8, 8], posY: [-3, 3], posZ: [-8, 8],
+		rotationY: [-180, 180],
 		handRotX: [-180, 180], handRotY: [-180, 180], handRotZ: [-180, 180],
 		footRotX: [-180, 180], footRotY: [-180, 180], footRotZ: [-180, 180],
 	};
@@ -785,15 +807,27 @@ export async function openPoseStudio3D(node) {
 		}
 	};
 
+	// La vista se encaja al mismo aspecto que se va a enviar al calco: lo que
+	// se ve en el visor es exactamente lo que llega, sin recortes sorpresa.
 	const resize = () => {
 		const w = Math.max(1, ui.viewport.clientWidth);
 		const h = Math.max(1, ui.viewport.clientHeight);
-		renderer.setSize(w, h, false);
-		camera.aspect = w / h;
+		const [cw, ch] = captureSizeFor(node);
+		const aspect = cw / ch;
+		let rw = w, rh = h;
+		if (w / h > aspect) rw = Math.max(1, Math.round(h * aspect));
+		else rh = Math.max(1, Math.round(w / aspect));
+		renderer.setSize(rw, rh, false);
+		ui.canvas.style.width = rw + "px";
+		ui.canvas.style.height = rh + "px";
+		ui.canvas.style.left = Math.round((w - rw) / 2) + "px";
+		ui.canvas.style.top = Math.round((h - rh) / 2) + "px";
+		camera.aspect = aspect;
 		camera.updateProjectionMatrix();
-		applyOutlineWidth(h);
+		applyOutlineWidth(rh);
 		needsRender = true;
 	};
+	state.setCaptureAspect = resize;
 	state.resizeObserver = new ResizeObserver(resize);
 	state.resizeObserver.observe(ui.viewport);
 	state.geoObserver = new ResizeObserver(() => {
@@ -868,6 +902,7 @@ export async function openPoseStudio3D(node) {
 			const slot = st.slots[i];
 			built.group.position.x = (i - (count - 1) / 2) * spacing + (slot.offset?.[0] || 0);
 			built.group.position.y = slot.offset?.[1] || 0;
+			built.group.position.z = slot.offset?.[2] || 0;
 			built.group.rotation.y = slot.rotationY || 0;
 			built.mesh.userData.mikaCharacter = true;
 			built.outline.userData.mikaCharacter = true;
@@ -998,6 +1033,7 @@ export async function openPoseStudio3D(node) {
 		}
 		rebuild();
 		syncButtons();
+		state.refreshOutput?.();
 	};
 	window.__mikaPoseStudioRefresh = state.refresh;
 
@@ -1026,6 +1062,7 @@ export async function openPoseStudio3D(node) {
 	const defs = [
 		["gender", "Género ♀♂", "0 = femenino, 1 = masculino"],
 		["height", "Altura"],
+		["width", "Anchura", "Escala global en X, como Altura pero de lado a lado"],
 		["bust", "Pecho"],
 		["firmness", "Firmeza"],
 		["waist", "Cintura"],
@@ -1052,6 +1089,7 @@ export async function openPoseStudio3D(node) {
 		["anusSize", "Ano"],
 		["posX", "Pos X", "Desplazamiento horizontal en unidades del mundo"],
 		["posY", "Pos Y", "Desplazamiento vertical"],
+		["posZ", "Pos Z", "Desplazamiento en profundidad"],
 		["rotationY", "Giro", "Rotación en grados"],
 	];
 	const grid = document.createElement("div");
@@ -1066,6 +1104,7 @@ export async function openPoseStudio3D(node) {
 				...slot.anatomy,
 				posX: slot.offset?.[0] ?? 0,
 				posY: slot.offset?.[1] ?? 0,
+				posZ: slot.offset?.[2] ?? 0,
 				rotationY: Math.round((slot.rotationY || 0) * 180 / Math.PI),
 				handGripL: slot.anatomy?.handGripL ?? slot.anatomy?.handGrip ?? 0.5,
 				handGripR: slot.anatomy?.handGripR ?? slot.anatomy?.handGrip ?? 0.5,
@@ -1085,6 +1124,7 @@ export async function openPoseStudio3D(node) {
 			const slot = activeSlot(stateOf(node));
 			if (k === "posX") slot.offset[0] = v;
 			else if (k === "posY") slot.offset[1] = v;
+			else if (k === "posZ") slot.offset[2] = v;
 			else if (k === "rotationY") slot.rotationY = (v * Math.PI) / 180;
 			else slot.anatomy[k] = v;
 			state.save();
@@ -1122,6 +1162,61 @@ export async function openPoseStudio3D(node) {
 		presets.appendChild(b);
 	}
 	ui.panel.appendChild(presets);
+
+	// --- Tamaño de salida ---
+	// Elige el lienzo desde la propia ventana: la vista se reencuadra a ese
+	// aspecto y "Enviar al calco" manda exactamente lo que se está viendo.
+	const resWidget = node.widgets?.find((w) => w.name === "resolucion");
+	const outRow = document.createElement("label");
+	outRow.style.cssText =
+		"display:flex;align-items:center;gap:6px;width:100%;font-size:11px;color:#222;";
+	const outName = document.createElement("span");
+	outName.textContent = "Salida";
+	outName.style.cssText = "width:70px;flex:none;";
+	const outSel = document.createElement("select");
+	outSel.title = "Tamaño del lienzo y de la vista 3D";
+	outSel.style.cssText = "flex:1;min-width:0;font:11px sans-serif;";
+	const refreshOut = () => {
+		const values = (resWidget?.options?.values || []).slice();
+		const cur = String(resWidget?.value || "");
+		if (cur && !values.includes(cur)) values.push(cur);
+		const key = values.join("\u0000");
+		if (outSel.dataset.options !== key) {
+			outSel.dataset.options = key;
+			outSel.innerHTML = "";
+			for (const v of values) {
+				const o = document.createElement("option");
+				o.value = v;
+				o.textContent = v;
+				outSel.appendChild(o);
+			}
+		}
+		if (cur) outSel.value = cur;
+	};
+	outSel.onchange = () => {
+		if (!resWidget) return;
+		resWidget.value = outSel.value;
+		resWidget.callback?.(outSel.value);
+		state.setCaptureAspect?.();
+		// Mantener el ángulo pero alejar/acercar para que el modelo siga
+		// cabiendo en el nuevo aspecto.
+		const box = sceneBox(scene);
+		if (!box.isEmpty()) {
+			const size = box.getSize(new THREE.Vector3());
+			const vFov = camera.fov * Math.PI / 180;
+			const dist = Math.max(
+				size.y / 2 / Math.tan(vFov / 2),
+				size.x / 2 / Math.tan(vFov / 2) / camera.aspect,
+				size.z) * 1.22;
+			const dir = camera.position.clone().sub(orbit.target).normalize();
+			camera.position.copy(orbit.target).addScaledVector(dir, dist);
+			orbit.update();
+		}
+	};
+	refreshOut();
+	outRow.append(outName, outSel);
+	ui.panel.appendChild(outRow);
+	state.refreshOutput = refreshOut;
 
 	const tools = document.createElement("div");
 	tools.style.cssText = "display:flex;gap:6px;width:100%;margin-top:6px;flex-wrap:wrap;";
@@ -1192,7 +1287,7 @@ export async function openPoseStudio3D(node) {
 		}
 		slot.anatomy.gender = 0.5;
 		slot.pose = {};
-		slot.offset = [0, 0];
+		slot.offset = [0, 0, 0];
 		slot.rotationY = 0;
 		// Primero se reconstruye: save() captura las rotaciones de las mallas
 		// vivas, así que si se guarda antes se reescriben las poses antiguas.
@@ -1448,9 +1543,8 @@ export async function openPoseStudio3D(node) {
 		camera.aspect = width / height;
 		camera.updateProjectionMatrix();
 		scene.updateMatrixWorld(true);
-		fitCamera(camera, orbit, sceneBox(scene), 1.12);
-		// La línea mide ~2.2 px en la imagen final, aunque la cámara se haya
-		// alejado para caber toda la escena.
+		// Se manda la vista ACTUAL: no se reencuadra. El visor ya tiene el
+		// mismo aspecto que esta imagen, así que el resultado es lo que se ve.
 		applyOutlineWidth(height, 2.2);
 		renderer.render(scene, camera);
 		try { ctx.drawImage(renderer.domElement, 0, 0, width, height); }
