@@ -6,6 +6,7 @@
 
 const C = {
 	waist: ["spine_01", "spine_02"],
+	stomach: ["spine_01", "spine_02"],
 	hips: ["pelvis", "thigh_l", "thigh_r"],
 	glutes: ["pelvis", "thigh_l", "thigh_r"],
 	bust: ["spine_03", "clavicle_l", "clavicle_r"],
@@ -37,6 +38,8 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const ARM_SET = boneSet(["upperarm_", "lowerarm_", "hand_", "index_",
 		"middle_", "ring_", "pinky_", "thumb_"]);
 	const LEG_SET = boneSet(["thigh_", "calf_", "foot_", "ball_"]);
+	const HAND_SET = boneSet(["hand_", "index_", "middle_", "ring_", "pinky_", "thumb_"]);
+	const FOOT_SET = boneSet(["foot_", "ball_"]);
 
 	let minY = Infinity;
 	let maxY = -Infinity;
@@ -56,8 +59,9 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const gluteX = 0.033 * span;
 	const gluteZ = -0.025 * span;
 
-	const keys = ["waist", "hips", "glutes", "bust", "arm", "thigh", "calf",
-		"armLength", "legLength", "pubis", "height", "width", "penisRot"];
+	const keys = ["waist", "stomach", "hips", "glutes", "bust", "arm", "thigh",
+		"calf", "armLength", "legLength", "pubis", "height", "width",
+		"handSize", "footSize", "penisRot"];
 	const targets = {};
 	for (const k of keys) targets[k] = new Float32Array(verts.length);
 	const delta = (k, i, x, y, z) => {
@@ -78,6 +82,9 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const fLen = 1 + lenExtra / 3;
 	const fGirth = 1 + girthExtra * 4 / 3;
 	const fWaist = 1 + (0.5 - (d.waist ?? 0.5)) * 0.45;
+	const fStomach = 1 + ((d.stomach ?? 0.5) - 0.5) * 0.55;
+	const fHand = 1 + ((d.handSize ?? 0.5) - 0.5) * 0.6;
+	const fFoot = 1 + ((d.footSize ?? 0.5) - 0.5) * 0.6;
 	const fHips = 1 + ((d.hips ?? 0.5) - 0.5) * 0.4;
 	const fGlute = 1 + ((d.glutes ?? 0.5) - 0.5) * 0.85;
 	const raw = params.rawAnatomy || {};
@@ -121,6 +128,17 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 			if (C.waist.includes(name) && t > 0.55 && t < 0.72) {
 				const fall = smooth((Math.abs(t - 0.63) - 0.025) / 0.07) * w;
 				delta("waist", i, x * (fWaist - 1) * fall, 0, z * (fWaist - 1) * fall);
+			}
+
+			// Estómago: abdomen alto, crece sobre todo hacia delante y algo
+			// de lado, sin tocar el pecho ni la cintura baja.
+			if (C.stomach.includes(name) && z > 0 && t > 0.56 && t < 0.74
+					&& fStomach !== 1) {
+				const fall = Math.exp(-(((t - 0.65) / 0.09) ** 2))
+					* Math.min(1, z / 0.3) * w;
+				delta("stomach", i,
+					x * (fStomach - 1) * fall, 0,
+					(z - 0.3) * (fStomach - 1) * 1.2 * fall);
 			}
 
 			if (C.hips.includes(name) && fHips !== 1) {
@@ -258,6 +276,28 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 
 		if (fHeight !== 1) delta("height", i, 0, (y - minY) * (fHeight - 1), 0);
 		if (fWidth !== 1) delta("width", i, x * (fWidth - 1), 0, 0);
+
+		// Tamaño de manos y pies: escalado radial desde la muñeca / el tobillo.
+		// Se cuentan todos los huesos de la parte (dedos incluidos) para que
+		// no queden despegados del resto de la mano.
+		for (const [target, factor, set, root] of [
+			["handSize", fHand, HAND_SET, "hand_"],
+			["footSize", fFoot, FOOT_SET, "foot_"],
+		]) {
+			if (factor === 1) continue;
+			let wPart = 0;
+			for (let k = 0; k < 4; k++) {
+				if (set.has(byName.get(skin[o + k]))) wPart += weights[o + k];
+			}
+			if (wPart < 0.01) continue;
+			const idx = names.indexOf(root + (x >= 0 ? "l" : "r"));
+			if (idx < 0) continue;
+			const a = axis(idx);
+			delta(target, i,
+				(x - a.hx) * (factor - 1) * wPart,
+				(y - a.hy) * (factor - 1) * wPart,
+				(z - a.hz) * (factor - 1) * wPart);
+		}
 	}
 
 	// El pene gira alrededor de su ancla en la entrepierna, como un hueso: la

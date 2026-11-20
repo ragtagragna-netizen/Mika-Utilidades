@@ -24,8 +24,14 @@ const OUTLINE_COLOR = 0x111111;
 // Anatomía inicial: femenina y reconocible, en lugar del valor neutro del
 // morph que daba un cuerpo plano y sin pecho.
 const DEFAULT_ANATOMY = {
-	gender: 0, bust: 0.75, waist: 0.35, hips: 0.65, glutes: 0.6, headSize: 0.45,
-	handGripL: 0.5, handGripR: 0.5,
+	gender: 0, bust: 0.75, waist: 0.35, stomach: 0.5,
+	hips: 0.65, glutes: 0.6, headSize: 0.45,
+	handGripL: 0.5, handGripR: 0.5, handSize: 0.5, footSize: 0.5,
+	handLPosX: 0, handLPosY: 0, handLPosZ: 0,
+	handRPosX: 0, handRPosY: 0, handRPosZ: 0,
+	handLRotX: 0, handLRotY: 0, handLRotZ: 0,
+	handRRotX: 0, handRRotY: 0, handRRotZ: 0,
+	footRotX: 0, footRotY: 0, footRotZ: 0,
 	penisLength: 0.5, penisGirth: 0.5,
 };
 
@@ -86,6 +92,7 @@ setInterval(() => {
 
 export function closePoseStudio3D() {
 	if (!active) return;
+	active.saveCamera?.();
 	active.dispose();
 	active = null;
 	window.__mikaPoseStudioRefresh = null;
@@ -580,6 +587,9 @@ function sceneBox(scene, onlyCharacters = true) {
 }
 
 const STUDIO_GEOM_KEY = "mikaPoseStudio3D.window";
+// La cámara se recuerda por nodo: al volver a abrir el mismo maniquí se ve
+// exactamente el mismo ángulo y zoom que se dejó.
+const CAMERA_KEY_PREFIX = "mikaPoseStudio3D.camera.";
 
 function defaultStudioGeom() {
 	return {
@@ -613,6 +623,29 @@ function writeStudioGeom(root) {
 	localStorage.setItem(STUDIO_GEOM_KEY, JSON.stringify(clampStudioGeom({
 		x: r.left, y: r.top, w: r.width, h: r.height,
 	})));
+}
+
+function readCamera(node) {
+	try {
+		const raw = JSON.parse(localStorage.getItem(
+			CAMERA_KEY_PREFIX + String(node?.id ?? "")));
+		if (!raw) return null;
+		const ok = (a) => Array.isArray(a) && a.length === 3
+			&& a.every((v) => Number.isFinite(Number(v)));
+		if (!ok(raw.position) || !ok(raw.target)) return null;
+		return { position: raw.position, target: raw.target };
+	} catch (e) {
+		return null;
+	}
+}
+
+function writeCamera(node, camera, orbit) {
+	try {
+		localStorage.setItem(CAMERA_KEY_PREFIX + String(node?.id ?? ""), JSON.stringify({
+			position: camera.position.toArray(),
+			target: orbit.target.toArray(),
+		}));
+	} catch (e) { /* almacenamiento no disponible */ }
 }
 
 function applyStudioGeom(root, g) {
@@ -651,8 +684,16 @@ function makeWindow(node) {
 	const viewport = document.createElement("div");
 	viewport.style.cssText = "position:relative;flex:1;min-width:0;min-height:0;background:#fff;";
 	const canvas = document.createElement("canvas");
-	canvas.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;display:block;touch-action:none;background:#fff;";
+	canvas.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;display:block;touch-action:none;background:#fff;" +
+		"outline:2px solid #000;outline-offset:-2px;";
 	viewport.appendChild(canvas);
+	// La vista ya tiene el aspecto de la salida: este marco negro delimita
+	// exactamente lo que se mandará al calco.
+	const frameLabel = document.createElement("div");
+	frameLabel.style.cssText =
+		"position:absolute;left:6px;top:6px;z-index:2;font:11px monospace;color:#111;" +
+		"background:rgba(255,255,255,.8);padding:2px 5px;pointer-events:none;";
+	viewport.appendChild(frameLabel);
 
 	const panel = document.createElement("div");
 	panel.style.cssText =
@@ -696,7 +737,7 @@ function makeWindow(node) {
 		writeStudioGeom(root);
 	});
 
-	return { root, canvas, viewport, panel };
+	return { root, canvas, viewport, panel, frameLabel };
 }
 
 function sliderRow(panel, label, key, state, onInput) {
@@ -712,7 +753,10 @@ function sliderRow(panel, label, key, state, onInput) {
 	const RANGES = {
 		gender: [0, 1], posX: [-8, 8], posY: [-3, 3], posZ: [-8, 8],
 		rotationY: [-180, 180],
-		handRotX: [-180, 180], handRotY: [-180, 180], handRotZ: [-180, 180],
+		handLPosX: [-4, 4], handLPosY: [-4, 4], handLPosZ: [-4, 4],
+		handRPosX: [-4, 4], handRPosY: [-4, 4], handRPosZ: [-4, 4],
+		handLRotX: [-180, 180], handLRotY: [-180, 180], handLRotZ: [-180, 180],
+		handRRotX: [-180, 180], handRRotY: [-180, 180], handRRotZ: [-180, 180],
 		footRotX: [-180, 180], footRotY: [-180, 180], footRotZ: [-180, 180],
 	};
 	const [mn, mx] = RANGES[key] || [-1, 2.5];
@@ -789,12 +833,47 @@ export async function openPoseStudio3D(node) {
 				}
 			} catch (e) { /* no-op */ }
 			try { handleGeo.dispose(); handleMat.dispose(); handleMatActive.dispose(); } catch (e) { /* no-op */ }
+			try { state.gizmoResources?.forEach((r) => r.dispose()); } catch (e) { /* no-op */ }
 			try { orbit.dispose(); } catch (e) { /* no-op */ }
 			try { renderer.dispose(); } catch (e) { /* no-op */ }
 			ui.root.remove();
 		},
 	};
 	active = state;
+
+	// Tres flechas en la esquina de la base azul para mover el personaje.
+	// Viven en handlesGroup, así que la captura las oculta igual que los puntos.
+	const moveGizmo = new THREE.Group();
+	handlesGroup.add(moveGizmo);
+	state.moveGizmo = moveGizmo;
+	state.gizmoArrows = [];
+	const gizmoResources = [];
+	for (const def of [
+		{ axis: "x", color: 0xe53935, dir: [1, 0, 0] },
+		{ axis: "y", color: 0x43a047, dir: [0, 1, 0] },
+		{ axis: "z", color: 0x1e88e5, dir: [0, 0, 1] },
+	]) {
+		const mat = new THREE.MeshBasicMaterial({
+			color: def.color, depthTest: false, depthWrite: false,
+		});
+		const shaftGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.7, 8);
+		const headGeo = new THREE.ConeGeometry(0.12, 0.3, 10);
+		gizmoResources.push(mat, shaftGeo, headGeo);
+		const arm = new THREE.Group();
+		arm.quaternion.setFromUnitVectors(
+			new THREE.Vector3(0, 1, 0),
+			new THREE.Vector3(...def.dir));
+		for (const [geo, y] of [[shaftGeo, 0.35], [headGeo, 0.85]]) {
+			const m = new THREE.Mesh(geo, mat);
+			m.position.y = y;
+			m.userData.moveAxis = def.axis;
+			m.renderOrder = 11;
+			arm.add(m);
+			state.gizmoArrows.push(m);
+		}
+		moveGizmo.add(arm);
+	}
+	state.gizmoResources = gizmoResources;
 
 	let needsRender = true;
 	const requestRender = () => { needsRender = true; };
@@ -813,6 +892,7 @@ export async function openPoseStudio3D(node) {
 		const w = Math.max(1, ui.viewport.clientWidth);
 		const h = Math.max(1, ui.viewport.clientHeight);
 		const [cw, ch] = captureSizeFor(node);
+		if (ui.frameLabel) ui.frameLabel.textContent = `${cw}×${ch}`;
 		const aspect = cw / ch;
 		let rw = w, rh = h;
 		if (w / h > aspect) rw = Math.max(1, Math.round(h * aspect));
@@ -845,6 +925,17 @@ export async function openPoseStudio3D(node) {
 			h.bone.getWorldPosition(h.mesh.position);
 			h.mesh.visible = state.characters.length > 0;
 		}
+		const model = state.characters[state.selected] || state.characters[0];
+		const box = state.selectionVolume?.geometry;
+		if (model && box) {
+			if (!box.boundingBox) box.computeBoundingBox();
+			const b = box.boundingBox;
+			moveGizmo.position.set(b.max.x, b.min.y, b.max.z);
+			moveGizmo.scale.setScalar(Math.max(0.6, model.heightUnits * 0.09));
+			moveGizmo.visible = true;
+		} else {
+			moveGizmo.visible = false;
+		}
 	};
 
 	const render = () => {
@@ -862,7 +953,13 @@ export async function openPoseStudio3D(node) {
 		}
 	};
 	frame();
-	orbit.addEventListener("change", requestRender);
+	let camSaveTimer = null;
+	state.saveCamera = () => writeCamera(node, camera, orbit);
+	orbit.addEventListener("change", () => {
+		requestRender();
+		if (camSaveTimer) clearTimeout(camSaveTimer);
+		camSaveTimer = setTimeout(() => state.saveCamera?.(), 250);
+	});
 
 	const rebuild = () => {
 		if (!state.pack) return;
@@ -922,10 +1019,29 @@ export async function openPoseStudio3D(node) {
 					if (bone) bone.quaternion.multiply(q);
 				}
 			};
-			const oldHand = anatomy.handRotation ?? 0;
+			const rotateBone = (name, x, y, z) => {
+				const bone = built.byName[name];
+				if (!bone || Math.abs(x) + Math.abs(y) + Math.abs(z) < 0.01) return;
+				bone.quaternion.multiply(new THREE.Quaternion().setFromEuler(
+					new THREE.Euler(x * Math.PI / 180, y * Math.PI / 180,
+						z * Math.PI / 180, "XYZ")));
+			};
+			const oldHand = anatomy.handRotation ?? anatomy.handRotY ?? 0;
 			const oldFoot = anatomy.footRotation ?? 0;
-			rotatePair("hand", anatomy.handRotX ?? 0,
-				anatomy.handRotY ?? oldHand, anatomy.handRotZ ?? 0);
+			// Cada mano tiene su propia posición y rotación en tres ejes.
+			for (const [side, p] of [["l", "handL"], ["r", "handR"]]) {
+				const name = "hand_" + side;
+				rotateBone(name,
+					anatomy[p + "RotX"] ?? anatomy.handRotX ?? 0,
+					anatomy[p + "RotY"] ?? oldHand,
+					anatomy[p + "RotZ"] ?? anatomy.handRotZ ?? 0);
+				const bone = built.byName[name];
+				if (!bone) continue;
+				const dx = anatomy[p + "PosX"] ?? 0;
+				const dy = anatomy[p + "PosY"] ?? 0;
+				const dz = anatomy[p + "PosZ"] ?? 0;
+				if (dx || dy || dz) bone.position.add(new THREE.Vector3(dx, dy, dz));
+			}
 			rotatePair("foot", anatomy.footRotX ?? 0,
 				anatomy.footRotY ?? oldFoot, anatomy.footRotZ ?? 0);
 
@@ -1066,6 +1182,7 @@ export async function openPoseStudio3D(node) {
 		["bust", "Pecho"],
 		["firmness", "Firmeza"],
 		["waist", "Cintura"],
+		["stomach", "Estómago", "Abdomen alto, crece hacia delante y en anchura"],
 		["hips", "Cadera"],
 		["glutes", "Glúteos"],
 		["armLength", "Largo brazos"],
@@ -1073,11 +1190,22 @@ export async function openPoseStudio3D(node) {
 		["armThickness", "Grosor brazos"],
 		["thighThickness", "Grosor muslos"],
 		["calfThickness", "Grosor pantorrillas"],
+		["handSize", "Tamaño manos", "Escala de ambas manos y dedos"],
+		["footSize", "Tamaño pies", "Escala de ambos pies"],
 		["handGripL", "Abrir mano izq.", "Mano izquierda: -1 abierta, 0.5 reposo, 2.5 puño"],
 		["handGripR", "Abrir mano der.", "Mano derecha: -1 abierta, 0.5 reposo, 2.5 puño"],
-		["handRotX", "Rotar mano X", "Inclinación de muñeca, -180°…180°"],
-		["handRotY", "Rotar mano Y", "Giro de muñeca, -180°…180°"],
-		["handRotZ", "Rotar mano Z", "Pivotar muñeca, -180°…180°"],
+		["handLPosX", "Izq pos X", "Mover mano izquierda en X"],
+		["handLPosY", "Izq pos Y", "Mover mano izquierda en Y"],
+		["handLPosZ", "Izq pos Z", "Mover mano izquierda en Z"],
+		["handRPosX", "Der pos X", "Mover mano derecha en X"],
+		["handRPosY", "Der pos Y", "Mover mano derecha en Y"],
+		["handRPosZ", "Der pos Z", "Mover mano derecha en Z"],
+		["handLRotX", "Izq rot X", "Rotar mano izquierda, -180°…180°"],
+		["handLRotY", "Izq rot Y", "Rotar mano izquierda, -180°…180°"],
+		["handLRotZ", "Izq rot Z", "Rotar mano izquierda, -180°…180°"],
+		["handRRotX", "Der rot X", "Rotar mano derecha, -180°…180°"],
+		["handRRotY", "Der rot Y", "Rotar mano derecha, -180°…180°"],
+		["handRRotZ", "Der rot Z", "Rotar mano derecha, -180°…180°"],
 		["footRotX", "Rotar pie X", "Dorsiflexión / flexión plantar, -180°…180°"],
 		["footRotY", "Rotar pie Y", "Giro del pie, -180°…180°"],
 		["footRotZ", "Rotar pie Z", "Inversión / eversión, -180°…180°"],
@@ -1087,9 +1215,7 @@ export async function openPoseStudio3D(node) {
 		["penisGirth", "Grosor pene", "Circunferencia: ×3 al máximo (2.5), activo en NSFW masculino"],
 		["openingSize", "Abertura"],
 		["anusSize", "Ano"],
-		["posX", "Pos X", "Desplazamiento horizontal en unidades del mundo"],
-		["posY", "Pos Y", "Desplazamiento vertical"],
-		["posZ", "Pos Z", "Desplazamiento en profundidad"],
+		// El desplazamiento se hace con las tres flechas de la base azul.
 		["rotationY", "Giro", "Rotación en grados"],
 	];
 	const grid = document.createElement("div");
@@ -1108,9 +1234,21 @@ export async function openPoseStudio3D(node) {
 				rotationY: Math.round((slot.rotationY || 0) * 180 / Math.PI),
 				handGripL: slot.anatomy?.handGripL ?? slot.anatomy?.handGrip ?? 0.5,
 				handGripR: slot.anatomy?.handGripR ?? slot.anatomy?.handGrip ?? 0.5,
-				handRotX: slot.anatomy?.handRotX ?? 0,
-				handRotY: slot.anatomy?.handRotY ?? 0,
-				handRotZ: slot.anatomy?.handRotZ ?? 0,
+				stomach: slot.anatomy?.stomach ?? 0.5,
+				handSize: slot.anatomy?.handSize ?? 0.5,
+				footSize: slot.anatomy?.footSize ?? 0.5,
+				handLPosX: slot.anatomy?.handLPosX ?? 0,
+				handLPosY: slot.anatomy?.handLPosY ?? 0,
+				handLPosZ: slot.anatomy?.handLPosZ ?? 0,
+				handRPosX: slot.anatomy?.handRPosX ?? 0,
+				handRPosY: slot.anatomy?.handRPosY ?? 0,
+				handRPosZ: slot.anatomy?.handRPosZ ?? 0,
+				handLRotX: slot.anatomy?.handLRotX ?? 0,
+				handLRotY: slot.anatomy?.handLRotY ?? 0,
+				handLRotZ: slot.anatomy?.handLRotZ ?? 0,
+				handRRotX: slot.anatomy?.handRRotX ?? 0,
+				handRRotY: slot.anatomy?.handRRotY ?? 0,
+				handRRotZ: slot.anatomy?.handRRotZ ?? 0,
 				footRotX: slot.anatomy?.footRotX ?? 0,
 				footRotY: slot.anatomy?.footRotY ?? 0,
 				footRotZ: slot.anatomy?.footRotZ ?? 0,
@@ -1223,6 +1361,7 @@ export async function openPoseStudio3D(node) {
 	const sfw = document.createElement("button");
 	const count = document.createElement("button");
 	const reset = document.createElement("button");
+	const posReset = document.createElement("button");
 	const del = document.createElement("button");
 	const mover = document.createElement("button");
 	const send = document.createElement("button");
@@ -1235,6 +1374,7 @@ export async function openPoseStudio3D(node) {
 	btn(sfw, "SFW", "Alternar SFW / NSFW");
 	btn(count, "👥 1", "Cantidad de personajes (1-4)");
 	btn(reset, "Reiniciar", "Volver a la pose de reposo, sliders al punto medio y posición central");
+	btn(posReset, "Restablecer posición", "Restablecer posición: pose y desplazamiento al origen, manteniendo los sliders de tamaño");
 	btn(del, "🗑 Eliminar", "Eliminar el personaje seleccionado");
 	btn(mover, "Mover", "Activar: arrastra el cuerpo para mover al personaje seleccionado");
 	btn(send, "Enviar al calco", "Enviar la escena 3D al calco del nodo lineart");
@@ -1283,7 +1423,8 @@ export async function openPoseStudio3D(node) {
 	reset.onclick = () => {
 		const slot = activeSlot(stateOf(node));
 		for (const k of Object.keys(slot.anatomy)) {
-			slot.anatomy[k] = /^(hand|foot|penis)Rot[XYZ]$/.test(k) ? 0 : 0.5;
+			slot.anatomy[k] = /^(footRot[XYZ]|penisRot[XYZ]|hand[LR](Pos|Rot)[XYZ])$/
+				.test(k) ? 0 : 0.5;
 		}
 		slot.anatomy.gender = 0.5;
 		slot.pose = {};
@@ -1291,6 +1432,20 @@ export async function openPoseStudio3D(node) {
 		slot.rotationY = 0;
 		// Primero se reconstruye: save() captura las rotaciones de las mallas
 		// vivas, así que si se guarda antes se reescriben las poses antiguas.
+		rebuild();
+		state.save();
+		for (const row of sliderRows) {
+			const v = sliderState().anatomy[row.key];
+			if (v !== undefined) row.input.value = String(v);
+		}
+		syncButtons();
+	};
+	posReset.onclick = () => {
+		const slot = activeSlot(stateOf(node));
+		// Solo pose y emplazamiento: la anatomía (tamaños) queda intacta.
+		slot.pose = {};
+		slot.offset = [0, 0, 0];
+		slot.rotationY = 0;
 		rebuild();
 		state.save();
 		for (const row of sliderRows) {
@@ -1317,7 +1472,7 @@ export async function openPoseStudio3D(node) {
 		const [w, h] = captureSizeFor(node);
 		setPoseStudioCapture(renderCapture(w, h), node.id);
 	};
-	tools.append(sfw, count, reset, del, mover, send);
+	tools.append(sfw, count, reset, posReset, del, mover, send);
 	ui.panel.appendChild(tools);
 
 	// --- Articulaciones ---
@@ -1326,6 +1481,14 @@ export async function openPoseStudio3D(node) {
 		pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
 		pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 		raycaster.setFromCamera(pointer, camera);
+		// Las flechas de movimiento tienen prioridad: están en la esquina y
+		// son más pequeñas que los puntos de las articulaciones.
+		if (moveGizmo.visible) {
+			const arrows = raycaster.intersectObjects(state.gizmoArrows, false);
+			if (arrows.length) {
+				return { gizmo: true, axis: arrows[0].object.userData.moveAxis };
+			}
+		}
 		const hits = raycaster.intersectObjects(state.handles.map((h) => h.mesh), false);
 		if (!hits.length) return null;
 		// Con varios personajes puede haber tiradores alineados en profundidad;
@@ -1364,6 +1527,32 @@ export async function openPoseStudio3D(node) {
 
 	ui.canvas.addEventListener("pointerdown", (event) => {
 		const hit = pickHandle(event);
+		if (hit?.gizmo) {
+			const index = state.selected;
+			const model = state.characters[index];
+			const slot = activeSlot(stateOf(node));
+			const axis = new THREE.Vector3(
+				hit.axis === "x" ? 1 : 0,
+				hit.axis === "y" ? 1 : 0,
+				hit.axis === "z" ? 1 : 0);
+			const origin = moveGizmo.getWorldPosition(new THREE.Vector3());
+			const camDir = camera.getWorldDirection(new THREE.Vector3());
+			// Plano que contiene el eje y mira a la cámara: el cursor se
+			// proyecta sobre él y solo se toma la componente del eje.
+			const normal = new THREE.Vector3().crossVectors(axis, camDir)
+				.cross(axis).normalize();
+			const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, origin);
+			const start = pointerOnPlane(event, plane);
+			if (!start) return;
+			state.axisDrag = {
+				axis: hit.axis, plane, start,
+				base: [...slot.offset], slot, model,
+			};
+			orbit.enabled = false;
+			ui.canvas.setPointerCapture(event.pointerId);
+			event.preventDefault();
+			return;
+		}
 		if (!hit) {
 			if (state.moveMode) {
 				const index = pickBody(event);
@@ -1413,10 +1602,18 @@ export async function openPoseStudio3D(node) {
 			const throughAnchor = new THREE.Plane()
 				.setFromNormalAndCoplanarPoint(normal, anchor);
 			state.drag.plane = throughAnchor;
+			const tipWorld = new THREE.Vector3();
+			bone.getWorldPosition(tipWorld);
+			const a0 = activeSlot(stateOf(node)).anatomy;
+			const q0 = new THREE.Quaternion()
+				.setFromAxisAngle(new THREE.Vector3(1, 0, 0), (a0.penisRotX || 0) * Math.PI / 180)
+				.multiply(new THREE.Quaternion().setFromAxisAngle(
+					new THREE.Vector3(0, 1, 0), (a0.penisRotY || 0) * Math.PI / 180))
+				.multiply(new THREE.Quaternion().setFromAxisAngle(
+					new THREE.Vector3(0, 0, 1), (a0.penisRotZ || 0) * Math.PI / 180));
 			state.drag.penis = {
-				anchor,
-				neutral: bone.position.clone().normalize(),
-				parentQ,
+				anchor, parentQ, q: q0,
+				dir: tipWorld.sub(anchor).normalize(),
 			};
 		}
 		hit.mesh.material = hit.matActive;
@@ -1426,6 +1623,18 @@ export async function openPoseStudio3D(node) {
 	});
 
 	ui.canvas.addEventListener("pointermove", (event) => {
+		if (state.axisDrag) {
+			const d = state.axisDrag;
+			const target = pointerOnPlane(event, d.plane);
+			if (!target) return;
+			const delta = target.clone().sub(d.start);
+			const value = Math.max(-8, Math.min(8,
+				d.base[{ x: 0, y: 1, z: 2 }[d.axis]] + delta[d.axis]));
+			d.slot.offset[{ x: 0, y: 1, z: 2 }[d.axis]] = value;
+			if (d.model) d.model.group.position[d.axis] = value;
+			requestRender();
+			return;
+		}
 		if (state.moveDrag) {
 			const target = pointerOnPlane(event, state.moveDrag.plane);
 			if (!target) return;
@@ -1450,21 +1659,32 @@ export async function openPoseStudio3D(node) {
 		if (!raycaster.ray.intersectPlane(state.drag.plane, target)) return;
 
 		if (state.drag.penis) {
-			// El punto azul va hacia el cursor. La dirección se mide en el
-			// plano de la cámara y se convierte al marco del pelvis: arriba en
-			// pantalla es arriba en el modelo (no hay eje invertido).
+			// Igual que los otros tiradores: rotación INCREMENTAL desde la
+			// dirección actual hasta el cursor. Nunca se calcula un ángulo
+			// absoluto desde el reposo, que daba saltos y marchas atrás al
+			// cruzar el ancla o cambiar de lado.
 			const drag = state.drag.penis;
 			const desired = target.clone().sub(drag.anchor);
 			if (desired.lengthSq() < 1e-6) return;
-			desired.normalize().applyQuaternion(drag.parentQ.clone().invert());
-			const q = new THREE.Quaternion().setFromUnitVectors(drag.neutral, desired);
-			const e = new THREE.Euler().setFromQuaternion(q, "XYZ");
-			// save() reemplaza node.properties con una copia: leer la ranura
-			// fresca en cada paso para que no se pierdan movimientos.
+			desired.normalize();
+			let dq = new THREE.Quaternion().setFromUnitVectors(drag.dir, desired);
+			const angle = 2 * Math.acos(Math.max(-1, Math.min(1, dq.w)));
+			if (angle < 0.02) return;
+			if (angle > 1.0) {
+				dq = new THREE.Quaternion().setFromAxisAngle(
+					new THREE.Vector3(dq.x, dq.y, dq.z).normalize(), 1.0);
+			}
+			// El delta se mide en mundo y se lleva al marco local del pelvis.
+			const inv = drag.parentQ.clone().invert();
+			const localDelta = inv.clone().multiply(dq).multiply(drag.parentQ);
+			const next = localDelta.multiply(drag.q).normalize();
+			const e = new THREE.Euler().setFromQuaternion(next, "XYZ");
 			const a = activeSlot(stateOf(node)).anatomy;
 			a.penisRotX = e.x * 180 / Math.PI;
 			a.penisRotY = e.y * 180 / Math.PI;
 			a.penisRotZ = e.z * 180 / Math.PI;
+			drag.q.copy(next);
+			drag.dir.copy(desired);
 			state.save();
 			queueRebuild();
 			requestRender();
@@ -1491,6 +1711,13 @@ export async function openPoseStudio3D(node) {
 	});
 
 	const endDrag = (event) => {
+		if (state.axisDrag) {
+			state.axisDrag = null;
+			orbit.enabled = true;
+			state.save();
+			requestRender();
+			return;
+		}
 		if (state.moveDrag) {
 			state.moveDrag = null;
 			state.moveMode = false;
@@ -1567,8 +1794,18 @@ export async function openPoseStudio3D(node) {
 		state.pack = await getPack();
 		rebuild();
 		syncButtons();
-		const box = sceneBox(scene);
-		fitCamera(camera, orbit, box);
+		const savedCam = readCamera(node);
+		if (savedCam) {
+			orbit.target.fromArray(savedCam.target);
+			camera.position.fromArray(savedCam.position);
+			const dist = Math.max(0.01, camera.position.distanceTo(orbit.target));
+			camera.near = Math.max(0.01, dist / 200);
+			camera.far = dist * 20;
+			camera.updateProjectionMatrix();
+			orbit.update();
+		} else {
+			fitCamera(camera, orbit, sceneBox(scene));
+		}
 		render();
 	} catch (e) {
 		console.error("Mika Pose Studio 3D:", e);

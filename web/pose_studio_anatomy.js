@@ -7,10 +7,13 @@
 // espalda y las caderas el estómago.
 
 export const ANATOMY_KEYS = [
-	"height", "width", "bust", "firmness", "waist", "hips", "glutes",
+	"height", "width", "bust", "firmness", "waist", "stomach", "hips", "glutes",
 	"armLength", "legLength", "armThickness", "thighThickness",
-	"calfThickness", "handGripL", "handGripR",
-	"handRotX", "handRotY", "handRotZ",
+	"calfThickness", "handSize", "footSize", "handGripL", "handGripR",
+	"handLPosX", "handLPosY", "handLPosZ",
+	"handRPosX", "handRPosY", "handRPosZ",
+	"handLRotX", "handLRotY", "handLRotZ",
+	"handRRotX", "handRRotY", "handRRotZ",
 	"footRotX", "footRotY", "footRotZ",
 	"headSize", "genitalSize", "openingSize", "anusSize",
 	"penisLength", "penisGirth",
@@ -18,11 +21,14 @@ export const ANATOMY_KEYS = [
 
 export const BODY_PRESETS = {
 	curvy_female: {
-		gender: 0, height: 0.55, width: 0.5, bust: 0.82, firmness: 0.5, waist: 0.3,
+		gender: 0, height: 0.55, width: 0.5, bust: 0.82, firmness: 0.5, waist: 0.3, stomach: 0.5,
 		hips: 0.85, glutes: 0.8, armLength: 0.5, legLength: 0.55,
-		armThickness: 0.45, thighThickness: 0.5, calfThickness: 0.5,
+		armThickness: 0.45, thighThickness: 0.5, calfThickness: 0.5, handSize: 0.5, footSize: 0.5,
 		handGripL: 0.5, handGripR: 0.5,
-		handRotX: 0, handRotY: 0, handRotZ: 0,
+		handLPosX: 0, handLPosY: 0, handLPosZ: 0,
+		handRPosX: 0, handRPosY: 0, handRPosZ: 0,
+		handLRotX: 0, handLRotY: 0, handLRotZ: 0,
+		handRRotX: 0, handRRotY: 0, handRRotZ: 0,
 		footRotX: 0, footRotY: 0, footRotZ: 0,
 		headSize: 0.45,
 		genitalSize: 0.5, openingSize: 0.5, anusSize: 0.5,
@@ -30,22 +36,28 @@ export const BODY_PRESETS = {
 		
 	},
 	muscular_male: {
-		gender: 1, height: 0.72, width: 0.5, bust: 0.45, firmness: 0.7, waist: 0.55,
+		gender: 1, height: 0.72, width: 0.5, bust: 0.45, firmness: 0.7, waist: 0.55, stomach: 0.5,
 		hips: 0.4, glutes: 0.55, armLength: 0.7, legLength: 0.65,
-		armThickness: 0.75, thighThickness: 0.7, calfThickness: 0.65,
+		armThickness: 0.75, thighThickness: 0.7, calfThickness: 0.65, handSize: 0.5, footSize: 0.5,
 		handGripL: 0.5, handGripR: 0.5,
-		handRotX: 0, handRotY: 0, handRotZ: 0,
+		handLPosX: 0, handLPosY: 0, handLPosZ: 0,
+		handRPosX: 0, handRPosY: 0, handRPosZ: 0,
+		handLRotX: 0, handLRotY: 0, handLRotZ: 0,
+		handRRotX: 0, handRRotY: 0, handRRotZ: 0,
 		footRotX: 0, footRotY: 0, footRotZ: 0, headSize: 0.5,
 		genitalSize: 0.6, openingSize: 0.5, anusSize: 0.5,
 		penisLength: 0.6, penisGirth: 0.55,
 		
 	},
 	slim_female: {
-		gender: 0, height: 0.65, width: 0.5, bust: 0.35, firmness: 0.45, waist: 0.2,
+		gender: 0, height: 0.65, width: 0.5, bust: 0.35, firmness: 0.45, waist: 0.2, stomach: 0.5,
 		hips: 0.35, glutes: 0.3, armLength: 0.6, legLength: 0.7,
-		armThickness: 0.35, thighThickness: 0.35, calfThickness: 0.35,
+		armThickness: 0.35, thighThickness: 0.35, calfThickness: 0.35, handSize: 0.5, footSize: 0.5,
 		handGripL: 0.5, handGripR: 0.5,
-		handRotX: 0, handRotY: 0, handRotZ: 0,
+		handLPosX: 0, handLPosY: 0, handLPosZ: 0,
+		handRPosX: 0, handRPosY: 0, handRPosZ: 0,
+		handLRotX: 0, handLRotY: 0, handLRotZ: 0,
+		handRRotX: 0, handRRotY: 0, handRRotZ: 0,
 		footRotX: 0, footRotY: 0, footRotZ: 0, headSize: 0.5,
 		genitalSize: 0.45, openingSize: 0.45, anusSize: 0.45,
 		penisLength: 0.5, penisGirth: 0.5,
@@ -79,6 +91,7 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 	const size = (key) => clampSize(anatomy[key] ?? 0.5);
 	const localDeform = {
 		waist: size("waist"),
+		stomach: size("stomach"),
 		hips: size("hips"),
 		glutes: size("glutes"),
 		armLength: size("armLength"),
@@ -86,6 +99,8 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 		armThickness: size("armThickness"),
 		thighThickness: size("thighThickness"),
 		calfThickness: size("calfThickness"),
+		handSize: size("handSize"),
+		footSize: size("footSize"),
 		handGripL: size("handGripL"),
 		handGripR: size("handGripR"),
 		genitalSize: size("genitalSize"),
