@@ -21,6 +21,26 @@ let vendoredSeen = null;
 const BODY_COLOR = 0xffffff;
 const OUTLINE_COLOR = 0x111111;
 
+// Paleta tomada del tema activo de ComfyUI. Se usan variables CSS para que
+// la ventana y sus paneles sigan automáticamente el tema claro/oscuro elegido.
+const THEME = {
+	bg: "var(--comfy-menu-bg, var(--was-panel-bg, #1e1e1e))",
+	bgAlt: "var(--comfy-menu-secondary-bg, var(--was-bg-dark, #252525))",
+	inputBg: "var(--comfy-input-bg, var(--input, #2b2b2b))",
+	fg: "var(--fg-color, var(--content-fg, #eee))",
+	muted: "var(--descrip-text, var(--was-fg-muted, #999))",
+	border: "var(--border-color, var(--was-border, #555))",
+	accent: "var(--theme-color, var(--primary-bg, #4a9eff))",
+	accentFg: "var(--primary-fg, #fff)",
+	selected: "color-mix(in srgb, var(--theme-color, #4a9eff) 38%, transparent)",
+	success: "var(--success-color, #52c41a)",
+	successFg: "var(--primary-fg, #fff)",
+	danger: "var(--error-color, #ff4d4f)",
+};
+const buttonCss =
+	"padding:3px 8px;border:1px solid " + THEME.border + ";border-radius:4px;" +
+	"background:" + THEME.inputBg + ";color:" + THEME.fg + ";cursor:pointer;font:11px sans-serif;";
+
 // Anatomía inicial: femenina y reconocible, en lugar del valor neutro del
 // morph que daba un cuerpo plano y sin pecho.
 const DEFAULT_ANATOMY = {
@@ -667,18 +687,20 @@ function makeWindow(node) {
 	root.dataset.mika = "pose-studio-3d-root";
 	root.style.cssText =
 		"position:fixed;z-index:9000;box-sizing:border-box;resize:both;min-width:560px;min-height:520px;" +
-		"background:#f4f4f4;color:#222;border:1px solid #888;border-radius:8px;display:flex;flex-direction:column;" +
-		"box-shadow:0 8px 28px rgba(0,0,0,.35);font:12px sans-serif;overflow:hidden;";
+		"background:" + THEME.bg + ";color:" + THEME.fg + ";border:1px solid " + THEME.border +
+		";border-radius:8px;display:flex;flex-direction:column;" +
+		"box-shadow:var(--interface-floating-panel-shadow, 0 8px 28px rgba(0,0,0,.4));font:12px sans-serif;overflow:hidden;";
 
 	const bar = document.createElement("div");
-	bar.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 8px;background:#333;color:#eee;flex:none;cursor:move;user-select:none;";
+	bar.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 8px;background:" +
+		THEME.bgAlt + ";color:" + THEME.fg + ";flex:none;cursor:move;user-select:none;border-bottom:1px solid " + THEME.border + ";";
 	const title = document.createElement("span");
 	title.textContent = "Pose Studio 3D — Mika";
 	title.style.cssText = "font-weight:600;flex:1;";
 	const close = document.createElement("button");
 	close.textContent = "✕";
 	close.title = "Cerrar Pose Studio 3D";
-	close.style.cssText = "background:transparent;color:#eee;border:1px solid #777;border-radius:4px;cursor:pointer;";
+	close.style.cssText = "background:transparent;color:" + THEME.fg + ";border:1px solid " + THEME.border + ";border-radius:4px;cursor:pointer;";
 	close.onclick = () => closePoseStudio3D();
 	bar.append(title, close);
 
@@ -696,14 +718,14 @@ function makeWindow(node) {
 	// exactamente lo que se mandará al calco.
 	const frameLabel = document.createElement("div");
 	frameLabel.style.cssText =
-		"position:absolute;left:6px;top:6px;z-index:2;font:11px monospace;color:#111;" +
-		"background:rgba(255,255,255,.8);padding:2px 5px;pointer-events:none;";
+		"position:absolute;left:6px;top:6px;z-index:2;font:11px monospace;color:" + THEME.fg + ";" +
+		"background:" + THEME.bg + ";border:1px solid " + THEME.border + ";padding:2px 5px;pointer-events:none;";
 	viewport.appendChild(frameLabel);
 
 	const panel = document.createElement("div");
 	panel.style.cssText =
 		"flex:none;width:252px;overflow-y:auto;overflow-x:hidden;padding:8px;display:flex;flex-direction:column;" +
-		"gap:6px;border-left:1px solid #ccc;background:#f4f4f4;color:#222;box-sizing:border-box;";
+		"gap:6px;border-left:1px solid " + THEME.border + ";background:" + THEME.bg + ";color:" + THEME.fg + ";box-sizing:border-box;";
 
 	body.append(viewport, panel);
 	root.append(bar, body);
@@ -748,11 +770,11 @@ function makeWindow(node) {
 function sliderRow(panel, label, key, state, onInput) {
 	const wrap = document.createElement("label");
 	wrap.style.cssText =
-		"display:flex;align-items:center;gap:6px;width:100%;font-size:11px;color:#222;line-height:16px;";
+		"display:flex;align-items:center;gap:6px;width:100%;font-size:11px;color:" + THEME.fg + ";line-height:16px;";
 	const name = document.createElement("span");
 	name.textContent = label;
 	name.style.cssText =
-		"width:70px;flex:none;color:#222;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+		"width:70px;flex:none;color:" + THEME.fg + ";overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
 	const input = document.createElement("input");
 	input.type = "range";
 	const RANGES = {
@@ -769,7 +791,7 @@ function sliderRow(panel, label, key, state, onInput) {
 	input.min = String(mn);
 	input.max = String(mx);
 	input.step = "0.01";
-	input.style.cssText = "flex:1;min-width:0;height:14px;";
+	input.style.cssText = "flex:1;min-width:0;height:14px;accent-color:" + THEME.accent + ";";
 	input.dataset.key = key;
 	input.value = String(state.anatomy?.[key] ?? state[key] ?? 0.5);
 	input.oninput = () => onInput(key, parseFloat(input.value));
@@ -971,6 +993,46 @@ export async function openPoseStudio3D(node) {
 		camSaveTimer = setTimeout(() => state.saveCamera?.(), 250);
 	});
 
+	// Cambiar de personaje solo debe mover los tiradores y la caja de selección.
+	// Reconstruir los modelos recalculaba el espaciado y podía desplazar a los
+	// demás personajes; por eso se aísla esta parte del rebuild completo.
+	const rebuildSelectionVisuals = () => {
+		for (const h of state.handles) handlesGroup.remove(h.mesh);
+		state.handles = [];
+		const st = stateOf(node);
+		const activeModel = state.characters[st.selected] || state.characters[0];
+		if (activeModel) {
+			for (const name of HANDLE_BONES) {
+				const bone = activeModel.byName[name];
+				if (!bone) continue;
+				const mesh = new THREE.Mesh(handleGeo, handleMat);
+				mesh.userData.bone = bone;
+				mesh.userData.character = activeModel;
+				mesh.renderOrder = 10;
+				mesh.visible = false;
+				handlesGroup.add(mesh);
+				state.handles.push({ bone, mesh, mat: handleMat, matActive: handleMatActive });
+			}
+		}
+		handlesGroup.updateMatrixWorld(true);
+		if (state.selectionVolume) {
+			scene.remove(state.selectionVolume);
+			state.selectionVolume.geometry.dispose();
+			state.selectionVolume.material.dispose();
+			state.selectionVolume = null;
+		}
+		if (activeModel) {
+			const box = new THREE.BoxHelper(activeModel.mesh, 0x1e88e5);
+			box.material.depthTest = false;
+			box.renderOrder = 9;
+			scene.add(box);
+			state.selectionVolume = box;
+		}
+		refreshHandles();
+		requestRender();
+	};
+	state.rebuildSelectionVisuals = rebuildSelectionVisuals;
+
 	const rebuild = () => {
 		if (!state.pack) return;
 		const st0 = stateOf(node);
@@ -1061,12 +1123,17 @@ export async function openPoseStudio3D(node) {
 			// global) + un slider por dedo. Se articulan huesos reales.
 			const xAxis = new THREE.Vector3(1, 0, 0);
 			const yAxis = new THREE.Vector3(0, 1, 0);
-			const zAxis = new THREE.Vector3(0, 0, 1);
 			const q = new THREE.Quaternion();
 			const phFactor = { "01": 1, "02": 0.8, "03": 0.55 };
 			const fingerKey = {
 				thumb: "Thumb", index: "Index", middle: "Middle",
 				ring: "Ring", pinky: "Pinky",
+			};
+			// Spread de abanico: cada dedo gira en un sentido (índice y pulgar
+			// hacia un lado, anular y meñique hacia el otro). Aplicar la misma
+			// rotación a todos solo giraba la mano; aquí sí se separan.
+			const spreadFactor = {
+				thumb: 0.7, index: 1, middle: 0.35, ring: -0.4, pinky: -1,
 			};
 			for (const [side, gripKey, prefix] of [
 				["l", "handGripL", "handL"], ["r", "handGripR", "handR"],
@@ -1082,9 +1149,10 @@ export async function openPoseStudio3D(node) {
 					for (const ph of PHALANGES) {
 						const bone = built.byName[`${finger}_${ph}_${side}`];
 						if (!bone) continue;
-						if (ph === "01" && spread) {
-							q.setFromAxisAngle(zAxis,
-								spread * 40 * (side === "l" ? 1 : -1) * Math.PI / 180);
+						if (spread && ph === "01") {
+							q.setFromAxisAngle(xAxis,
+								spread * 90 * (side === "l" ? 1 : -1) *
+								(spreadFactor[finger] ?? 0) * Math.PI / 180);
 							bone.quaternion.multiply(q);
 						}
 						const deg = curl * phFactor[ph] * (finger === "thumb" ? 0.6 : 1);
@@ -1108,35 +1176,7 @@ export async function openPoseStudio3D(node) {
 
 		// Solo el personaje seleccionado expone tiradores: con 4 personajes
 		// serían 80 esferas solapadas y seleccionar se volvería imposible.
-		const activeModel = state.characters[st.selected] || state.characters[0];
-		if (activeModel) {
-			for (const name of HANDLE_BONES) {
-				const bone = activeModel.byName[name];
-				if (!bone) continue;
-				const mesh = new THREE.Mesh(handleGeo, handleMat);
-				mesh.userData.bone = bone;
-				mesh.userData.character = activeModel;
-				mesh.renderOrder = 10;
-				mesh.visible = false;
-				handlesGroup.add(mesh);
-				state.handles.push({ bone, mesh, mat: handleMat, matActive: handleMatActive });
-			}
-		}
-		handlesGroup.updateMatrixWorld(true);
-		if (state.selectionVolume) {
-			scene.remove(state.selectionVolume);
-			state.selectionVolume.geometry.dispose();
-			state.selectionVolume.material.dispose();
-			state.selectionVolume = null;
-		}
-		if (activeModel) {
-			const box = new THREE.BoxHelper(activeModel.mesh, 0x1e88e5);
-			box.material.depthTest = false;
-			box.renderOrder = 9;
-			scene.add(box);
-			state.selectionVolume = box;
-		}
-		refreshHandles();
+		rebuildSelectionVisuals();
 		applyOutlineWidth(Math.max(1, ui.viewport.clientHeight));
 		state.dirty = true;
 		requestRender();
@@ -1182,15 +1222,14 @@ export async function openPoseStudio3D(node) {
 	selector.style.cssText = "display:flex;gap:4px;width:100%;flex-wrap:wrap;align-items:center;";
 	const selectorLabel = document.createElement("span");
 	selectorLabel.textContent = "Personaje:";
-	selectorLabel.style.cssText = "color:#222;font-size:11px;";
+	selectorLabel.style.cssText = "color:" + THEME.fg + ";font-size:11px;";
 	selector.appendChild(selectorLabel);
 	const selectorButtons = [];
 	for (let i = 0; i < 4; i++) {
 		const b = document.createElement("button");
 		b.textContent = String(i + 1);
 		b.title = "Seleccionar personaje " + (i + 1);
-		b.style.cssText =
-			"padding:2px 9px;border:1px solid #888;border-radius:4px;background:#fff;cursor:pointer;";
+		b.style.cssText = buttonCss;
 		b.onclick = () => selectSlot(i);
 		selectorButtons.push(b);
 		selector.appendChild(b);
@@ -1296,11 +1335,11 @@ export async function openPoseStudio3D(node) {
 		const rows = defs.filter((d) => d[3] === gname);
 		if (!rows.length) continue;
 		const holder = document.createElement("div");
-		holder.style.cssText = "width:100%;border-top:1px solid #ddd;padding-top:3px;";
+		holder.style.cssText = "width:100%;border-top:1px solid " + THEME.border + ";padding-top:3px;";
 		const head = document.createElement("div");
 		head.textContent = (gi === 0 ? "▾ " : "▸ ") + gname;
 		head.style.cssText =
-			"cursor:pointer;font-weight:600;font-size:11px;color:#333;padding:2px 0;user-select:none;";
+			"cursor:pointer;font-weight:600;font-size:11px;color:" + THEME.fg + ";padding:2px 0;user-select:none;";
 		const body = document.createElement("div");
 		body.style.cssText =
 			"display:" + (gi === 0 ? "grid" : "none") +
@@ -1357,7 +1396,8 @@ export async function openPoseStudio3D(node) {
 	}
 	const presetSel = document.createElement("select");
 	presetSel.title = "Presets de maniquí";
-	presetSel.style.cssText = "flex:1;min-width:0;font:11px sans-serif;";
+	presetSel.style.cssText = "flex:1;min-width:0;font:11px sans-serif;background:" + THEME.inputBg +
+		";color:" + THEME.fg + ";border:1px solid " + THEME.border + ";border-radius:4px;";
 	let currentGroup = "";
 	for (const [group, id, text] of presetList) {
 		if (group !== currentGroup) {
@@ -1389,7 +1429,7 @@ export async function openPoseStudio3D(node) {
 	const applyBtn = document.createElement("button");
 	applyBtn.textContent = "Aplicar";
 	applyBtn.title = "Aplicar el preset seleccionado";
-	applyBtn.style.cssText = "padding:3px 8px;border:1px solid #999;border-radius:4px;background:#fff;cursor:pointer;";
+	applyBtn.style.cssText = buttonCss;
 	applyBtn.onclick = applyPreset;
 	const presetRow = document.createElement("div");
 	presetRow.style.cssText = "display:flex;gap:6px;width:100%;margin-top:6px;align-items:center;";
@@ -1412,7 +1452,7 @@ export async function openPoseStudio3D(node) {
 	delPresetBtn.textContent = "Borrar";
 	delPresetBtn.title = "Borrar el preset propio seleccionado";
 	for (const b of [savePresetBtn, loadPresetBtn, delPresetBtn]) {
-		b.style.cssText = "padding:3px 8px;border:1px solid #999;border-radius:4px;background:#fff;cursor:pointer;";
+		b.style.cssText = buttonCss;
 	}
 	savePresetBtn.onclick = () => {
 		const name = prompt("Nombre del preset:", "Mi maniquí");
@@ -1458,14 +1498,14 @@ export async function openPoseStudio3D(node) {
 	// --- Panel flotante de dedos (Spread / Grasp / un dedo cada uno) ---
 	const handPanel = document.createElement("div");
 	handPanel.style.cssText = "position:absolute;left:8px;top:40px;z-index:20;width:250px;" +
-		"background:#262626;color:#eee;border:1px solid #555;border-radius:6px;" +
-		"padding:10px;box-shadow:0 6px 18px rgba(0,0,0,.5);display:none;font:11px sans-serif;";
+		"background:" + THEME.bg + ";color:" + THEME.fg + ";border:1px solid " + THEME.border + ";border-radius:6px;" +
+		"padding:10px;box-shadow:var(--interface-floating-panel-shadow, 0 6px 18px rgba(0,0,0,.5));display:none;font:11px sans-serif;";
 	const handTitle = document.createElement("div");
-	handTitle.style.cssText = "font-weight:700;letter-spacing:.1em;color:#ffd54f;margin-bottom:6px;" +
+	handTitle.style.cssText = "font-weight:700;letter-spacing:.1em;color:" + THEME.accent + ";margin-bottom:6px;" +
 		"display:flex;justify-content:space-between;align-items:center;";
 	const handClose = document.createElement("button");
 	handClose.textContent = "✕";
-	handClose.style.cssText = "background:none;border:none;color:#eee;cursor:pointer;font-size:14px;";
+	handClose.style.cssText = "background:none;border:none;color:" + THEME.fg + ";cursor:pointer;font-size:14px;";
 	handClose.onclick = () => { handPanel.style.display = "none"; };
 	handTitle.append(document.createTextNode("LEFT HAND"), handClose);
 	handPanel.appendChild(handTitle);
@@ -1475,8 +1515,8 @@ export async function openPoseStudio3D(node) {
 		const t = document.createElement("button");
 		t.textContent = label;
 		t.dataset.side = side;
-		t.style.cssText = "flex:1;padding:3px;border:1px solid #666;border-radius:4px;" +
-			"background:#333;color:#eee;cursor:pointer;font:11px sans-serif;";
+		t.style.cssText = "flex:1;padding:3px;border:1px solid " + THEME.border + ";border-radius:4px;" +
+			"background:" + THEME.inputBg + ";color:" + THEME.fg + ";cursor:pointer;font:11px sans-serif;";
 		t.onclick = () => showHand(side);
 		handTabs.appendChild(t);
 	}
@@ -1491,15 +1531,15 @@ export async function openPoseStudio3D(node) {
 		row.style.cssText = "display:flex;align-items:center;gap:6px;margin:3px 0;";
 		const name = document.createElement("span");
 		name.textContent = label;
-		name.style.cssText = "width:62px;flex:none;color:#ddd;";
+		name.style.cssText = "width:62px;flex:none;color:" + THEME.fg + ";";
 		const input = document.createElement("input");
 		input.type = "range";
 		input.min = "0";
 		input.max = label === "Grasp" ? "2.5" : "1";
 		input.step = "0.01";
-		input.style.cssText = "flex:1;min-width:0;accent-color:#ef5b8b;";
+		input.style.cssText = "flex:1;min-width:0;accent-color:" + THEME.accent + ";";
 		const val = document.createElement("span");
-		val.style.cssText = "width:34px;text-align:right;color:#bbb;";
+		val.style.cssText = "width:34px;text-align:right;color:" + THEME.muted + ";";
 		input.oninput = () => {
 			const side = handPanel.dataset.side || "L";
 			const p = "hand" + side;
@@ -1517,8 +1557,8 @@ export async function openPoseStudio3D(node) {
 	}
 	const resetHand = document.createElement("button");
 	resetHand.textContent = "Reset Hand Sliders";
-	resetHand.style.cssText = "width:100%;margin-top:8px;padding:6px;border:1px solid #666;" +
-		"border-radius:5px;background:#3a3a3a;color:#eee;cursor:pointer;";
+	resetHand.style.cssText = "width:100%;margin-top:8px;padding:6px;border:1px solid " + THEME.border + ";" +
+		"border-radius:5px;background:" + THEME.inputBg + ";color:" + THEME.fg + ";cursor:pointer;";
 	resetHand.onclick = () => {
 		const side = handPanel.dataset.side || "L";
 		const p = "hand" + side;
@@ -1536,7 +1576,8 @@ export async function openPoseStudio3D(node) {
 		handPanel.dataset.side = side;
 		handTitle.firstChild.textContent = (side === "L" ? "LEFT" : "RIGHT") + " HAND";
 		for (const t of handTabs.children) {
-			t.style.background = t.dataset.side === side ? "#ef5b8b" : "#333";
+			t.style.background = t.dataset.side === side ? THEME.accent : THEME.inputBg;
+			t.style.color = t.dataset.side === side ? THEME.accentFg : THEME.fg;
 		}
 		const a = activeSlot(stateOf(node)).anatomy;
 		const p = "hand" + side;
@@ -1556,7 +1597,7 @@ export async function openPoseStudio3D(node) {
 	const openHandBtn = document.createElement("button");
 	openHandBtn.textContent = "✋ Dedos";
 	openHandBtn.title = "Abrir el panel de dedos (Spread, Grasp y cada dedo)";
-	openHandBtn.style.cssText = "padding:3px 8px;border:1px solid #999;border-radius:4px;background:#fff;cursor:pointer;";
+	openHandBtn.style.cssText = buttonCss;
 	openHandBtn.onclick = () => showHand("L");
 	userRow.appendChild(openHandBtn);
 
@@ -1566,13 +1607,14 @@ export async function openPoseStudio3D(node) {
 	const resWidget = node.widgets?.find((w) => w.name === "resolucion");
 	const outRow = document.createElement("label");
 	outRow.style.cssText =
-		"display:flex;align-items:center;gap:6px;width:100%;font-size:11px;color:#222;";
+		"display:flex;align-items:center;gap:6px;width:100%;font-size:11px;color:" + THEME.fg + ";";
 	const outName = document.createElement("span");
 	outName.textContent = "Salida";
 	outName.style.cssText = "width:70px;flex:none;";
 	const outSel = document.createElement("select");
 	outSel.title = "Tamaño del lienzo y de la vista 3D";
-	outSel.style.cssText = "flex:1;min-width:0;font:11px sans-serif;";
+	outSel.style.cssText = "flex:1;min-width:0;font:11px sans-serif;background:" + THEME.inputBg +
+		";color:" + THEME.fg + ";border:1px solid " + THEME.border + ";border-radius:4px;";
 	const refreshOut = () => {
 		const values = (resWidget?.options?.values || []).slice();
 		const cur = String(resWidget?.value || "");
@@ -1627,7 +1669,7 @@ export async function openPoseStudio3D(node) {
 	const btn = (b, text, title) => {
 		b.textContent = text;
 		b.title = title;
-		b.style.cssText = "padding:4px 8px;border:1px solid #888;border-radius:4px;background:#fff;cursor:pointer;";
+		b.style.cssText = buttonCss;
 		return b;
 	};
 	btn(sfw, "SFW", "Alternar SFW / NSFW");
@@ -1637,18 +1679,22 @@ export async function openPoseStudio3D(node) {
 	btn(del, "🗑 Eliminar", "Eliminar el personaje seleccionado");
 	btn(mover, "Mover", "Activar: arrastra el cuerpo para mover al personaje seleccionado");
 	btn(send, "Enviar al calco", "Enviar la escena 3D al calco del nodo lineart");
-	send.style.background = "#2e7d32";
-	send.style.color = "#fff";
-	send.style.borderColor = "#1b5e20";
+	send.style.background = THEME.success;
+	send.style.color = THEME.successFg;
+	send.style.borderColor = THEME.success;
 
 	const syncButtons = () => {
 		sfw.textContent = activeSlot(stateOf(node)).nsfw ? "NSFW" : "SFW";
 		count.textContent = "👥 " + (state.characters.length || 1);
 		selectorButtons.forEach((b, i) => {
-			b.style.background = i === state.selected ? "#90caf9" : "#fff";
+			const on = i === state.selected;
+			b.style.background = on ? THEME.selected : THEME.inputBg;
+			b.style.color = on ? THEME.accent : THEME.fg;
+			b.style.borderColor = on ? THEME.accent : THEME.border;
 			b.disabled = i >= state.characters.length;
 		});
-		mover.style.background = state.moveMode ? "#ffcc80" : "#fff";
+		mover.style.background = state.moveMode ? THEME.selected : THEME.inputBg;
+		mover.style.borderColor = state.moveMode ? THEME.accent : THEME.border;
 	};
 
 	const selectSlot = (i) => {
@@ -1656,13 +1702,16 @@ export async function openPoseStudio3D(node) {
 		const idx = Math.max(0, Math.min(st.slots.length - 1, Number(i) || 0));
 		st.selected = idx;
 		state.selected = idx;
-		state.save();
-		rebuild();
+		// NO reconstruir: los modelos ya están en su sitio. Solo se cambia
+		// qué tiradores y caja se muestran, para que ningún personaje se mueva.
+		node.properties.mikaPoseStudio3D = JSON.parse(JSON.stringify(st));
+		rebuildSelectionVisuals();
 		for (const row of sliderRows) {
 			const v = sliderState().anatomy[row.key];
 			if (v !== undefined) row.input.value = String(v);
 		}
 		syncButtons();
+		refreshHandPopup?.();
 	};
 	state.select = selectSlot;
 	sfw.onclick = () => {
