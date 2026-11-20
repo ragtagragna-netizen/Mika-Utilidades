@@ -28,6 +28,10 @@ const DEFAULT_ANATOMY = {
 	bust: 0.75, waist: 0.35, stomach: 0.5,
 	hips: 0.65, glutes: 0.6, headSize: 0.45,
 	handGripL: 0.5, handGripR: 0.5, handSize: 0.5, footSize: 0.5,
+	handLSpread: 0.5, handLThumb: 0.25, handLIndex: 0.25, handLMiddle: 0.25,
+	handLRing: 0.25, handLPinky: 0.25,
+	handRSpread: 0.5, handRThumb: 0.25, handRIndex: 0.25, handRMiddle: 0.25,
+	handRRing: 0.25, handRPinky: 0.25,
 	handLPosX: 0, handLPosY: 0, handLPosZ: 0,
 	handRPosX: 0, handRPosY: 0, handRPosZ: 0,
 	handLRotX: 0, handLRotY: 0, handLRotZ: 0,
@@ -989,8 +993,10 @@ export async function openPoseStudio3D(node) {
 		const poses = st.slots.map((slot) => slot.pose || {});
 		const models = [];
 		for (let i = 0; i < count; i++) {
-			const params = i === st.selected ? state.params : morphParams(st.slots[i]);
-			models.push(buildCharacter(state.pack, params, poses[i]));
+			// Todos se construyen con SU propia anatomía: usar state.params
+			// para el seleccionado cambiaba el ancho de models[0] al cambiar
+			// de personaje y desplazaba a los demás por el espaciado.
+			models.push(buildCharacter(state.pack, morphParams(st.slots[i]), poses[i]));
 		}
 
 		// Los personajes no pueden solaparse: el espaciado sale del ancho real
@@ -1051,27 +1057,39 @@ export async function openPoseStudio3D(node) {
 			rotatePair("foot", anatomy.footRotX ?? 0,
 				anatomy.footRotY ?? oldFoot, anatomy.footRotZ ?? 0);
 
-			// Cerrar/abrir cada mano por separado. Curvaturas suaves: con 105°
-			// acumuladas las falanges se clavaban en la palma y desde ciertos
-			// ángulos parecía una deformación, no un puño.
+			// Dedos como en Pose Studio 3D: Spread (separación) + Grasp (cierre
+			// global) + un slider por dedo. Se articulan huesos reales.
 			const xAxis = new THREE.Vector3(1, 0, 0);
 			const yAxis = new THREE.Vector3(0, 1, 0);
+			const zAxis = new THREE.Vector3(0, 0, 1);
 			const q = new THREE.Quaternion();
 			const phFactor = { "01": 1, "02": 0.8, "03": 0.55 };
-			const fingerFactor = {
-				index: 0.92, middle: 1, ring: 0.94, pinky: 0.86, thumb: 0.45,
+			const fingerKey = {
+				thumb: "Thumb", index: "Index", middle: "Middle",
+				ring: "Ring", pinky: "Pinky",
 			};
-			for (const [side, key] of [["l", "handGripL"], ["r", "handGripR"]]) {
-				const grip = anatomy[key] ?? anatomy.handGrip ?? 0.5;
-				const curl = Math.max(-10, Math.min(78, (grip - 0.5) * 42));
-				if (Math.abs(curl) < 0.1) continue;
+			for (const [side, gripKey, prefix] of [
+				["l", "handGripL", "handL"], ["r", "handGripR", "handR"],
+			]) {
+				const grip = anatomy[gripKey] ?? anatomy.handGrip ?? 0.5;
+				const grasp = Math.max(0, Math.min(1, (grip - 0.5) / 2));
+				const spread = (anatomy[prefix + "Spread"] ?? 0.5) - 0.5;
 				for (const finger of FINGERS) {
+					const fv = anatomy[prefix + fingerKey[finger]] ?? 0.25;
+					// 0.25 es el reposo del slider: solo suma curl por encima.
+					const curl = Math.min(105,
+						grasp * 90 + Math.max(0, fv - 0.25) * 120);
 					for (const ph of PHALANGES) {
 						const bone = built.byName[`${finger}_${ph}_${side}`];
 						if (!bone) continue;
-						const deg = curl * fingerFactor[finger] * phFactor[ph];
-						q.setFromAxisAngle(
-							finger === "thumb" ? yAxis : xAxis,
+						if (ph === "01" && spread) {
+							q.setFromAxisAngle(zAxis,
+								spread * 40 * (side === "l" ? 1 : -1) * Math.PI / 180);
+							bone.quaternion.multiply(q);
+						}
+						const deg = curl * phFactor[ph] * (finger === "thumb" ? 0.6 : 1);
+						if (Math.abs(deg) < 0.1) continue;
+						q.setFromAxisAngle(finger === "thumb" ? yAxis : xAxis,
 							deg * Math.PI / 180);
 						bone.quaternion.multiply(q);
 					}
@@ -1182,55 +1200,50 @@ export async function openPoseStudio3D(node) {
 	// --- Controles de anatomía ---
 	// Se agrupan en dos columnas; el panel hace scroll si no entra todo.
 	const defs = [
-		["gender", "Género ♀♂", "0 = femenino, 1 = masculino"],
-		["age", "Edad", "Años (1–90): morfs nativos niño/joven/anciano"],
-		["weight", "Peso", "0 delgado → 1 obeso; morf nativo + vientre"],
-		["height", "Altura"],
-		["width", "Anchura", "Escala global en X, como Altura pero de lado a lado"],
-		["bust", "Pecho"],
-		["firmness", "Firmeza"],
-		["waist", "Cintura"],
-		["stomach", "Estómago", "Abdomen alto, crece hacia delante y en anchura"],
-		["hips", "Cadera"],
-		["glutes", "Glúteos"],
-		["armLength", "Largo brazos"],
-		["legLength", "Largo piernas"],
-		["armThickness", "Grosor brazos"],
-		["thighThickness", "Grosor muslos"],
-		["calfThickness", "Grosor pantorrillas"],
-		["handSize", "Tamaño manos", "Escala de ambas manos y dedos"],
-		["footSize", "Tamaño pies", "Escala de ambos pies"],
-		["handGripL", "Abrir mano izq.", "Mano izquierda: -1 abierta, 0.5 reposo, 2.5 puño"],
-		["handGripR", "Abrir mano der.", "Mano derecha: -1 abierta, 0.5 reposo, 2.5 puño"],
-		["handLPosX", "Izq pos X", "Mover mano izquierda en X"],
-		["handLPosY", "Izq pos Y", "Mover mano izquierda en Y"],
-		["handLPosZ", "Izq pos Z", "Mover mano izquierda en Z"],
-		["handRPosX", "Der pos X", "Mover mano derecha en X"],
-		["handRPosY", "Der pos Y", "Mover mano derecha en Y"],
-		["handRPosZ", "Der pos Z", "Mover mano derecha en Z"],
-		["handLRotX", "Izq rot X", "Rotar mano izquierda, -180°…180°"],
-		["handLRotY", "Izq rot Y", "Rotar mano izquierda, -180°…180°"],
-		["handLRotZ", "Izq rot Z", "Rotar mano izquierda, -180°…180°"],
-		["handRRotX", "Der rot X", "Rotar mano derecha, -180°…180°"],
-		["handRRotY", "Der rot Y", "Rotar mano derecha, -180°…180°"],
-		["handRRotZ", "Der rot Z", "Rotar mano derecha, -180°…180°"],
-		["footRotX", "Rotar pie X", "Dorsiflexión / flexión plantar, -180°…180°"],
-		["footRotY", "Rotar pie Y", "Giro del pie, -180°…180°"],
-		["footRotZ", "Rotar pie Z", "Inversión / eversión, -180°…180°"],
-		["headSize", "Cabeza"],
-		["genitalSize", "Genitales"],
-		["penisLength", "Largo pene", "Longitud: ×1.5 al máximo (2.5), activo en NSFW masculino"],
-		["penisGirth", "Grosor pene", "Circunferencia: ×3 al máximo (2.5), activo en NSFW masculino"],
-		["openingSize", "Abertura"],
-		["anusSize", "Ano"],
+		["gender", "Género ♀♂", "0 = femenino, 1 = masculino", "Cuerpo"],
+		["age", "Edad", "Años (1–90): morfs nativos niño/joven/anciano", "Cuerpo"],
+		["weight", "Peso", "0 delgado → 1 obeso; morf nativo + vientre", "Cuerpo"],
+		["height", "Altura", "", "Cuerpo"],
+		["width", "Anchura", "Escala global en X, como Altura pero de lado a lado", "Cuerpo"],
+		["bust", "Pecho", "", "Cuerpo"],
+		["firmness", "Firmeza", "", "Cuerpo"],
+		["waist", "Cintura", "", "Cuerpo"],
+		["stomach", "Estómago", "Abdomen alto, crece hacia delante y en anchura", "Cuerpo"],
+		["hips", "Cadera", "", "Cuerpo"],
+		["glutes", "Glúteos", "", "Cuerpo"],
+		["armLength", "Largo brazos", "", "Brazos"],
+		["legLength", "Largo piernas", "", "Piernas y pies"],
+		["armThickness", "Grosor brazos", "", "Brazos"],
+		["thighThickness", "Grosor muslos", "", "Piernas y pies"],
+		["calfThickness", "Grosor pantorrillas", "", "Piernas y pies"],
+		["handSize", "Tamaño manos", "Escala de ambas manos y dedos", "Manos"],
+		["footSize", "Tamaño pies", "Escala de ambos pies", "Piernas y pies"],
+		["handGripL", "Abrir mano izq.", "Mano izquierda: -1 abierta, 0.5 reposo, 2.5 puño", "Manos"],
+		["handGripR", "Abrir mano der.", "Mano derecha: -1 abierta, 0.5 reposo, 2.5 puño", "Manos"],
+		["handLPosX", "Izq pos X", "Mover mano izquierda en X", "Manos"],
+		["handLPosY", "Izq pos Y", "Mover mano izquierda en Y", "Manos"],
+		["handLPosZ", "Izq pos Z", "Mover mano izquierda en Z", "Manos"],
+		["handRPosX", "Der pos X", "Mover mano derecha en X", "Manos"],
+		["handRPosY", "Der pos Y", "Mover mano derecha en Y", "Manos"],
+		["handRPosZ", "Der pos Z", "Mover mano derecha en Z", "Manos"],
+		["handLRotX", "Izq rot X", "Rotar mano izquierda, -180°…180°", "Manos"],
+		["handLRotY", "Izq rot Y", "Rotar mano izquierda, -180°…180°", "Manos"],
+		["handLRotZ", "Izq rot Z", "Rotar mano izquierda, -180°…180°", "Manos"],
+		["handRRotX", "Der rot X", "Rotar mano derecha, -180°…180°", "Manos"],
+		["handRRotY", "Der rot Y", "Rotar mano derecha, -180°…180°", "Manos"],
+		["handRRotZ", "Der rot Z", "Rotar mano derecha, -180°…180°", "Manos"],
+		["footRotX", "Rotar pie X", "Dorsiflexión / flexión plantar, -180°…180°", "Piernas y pies"],
+		["footRotY", "Rotar pie Y", "Giro del pie, -180°…180°", "Piernas y pies"],
+		["footRotZ", "Rotar pie Z", "Inversión / eversión, -180°…180°", "Piernas y pies"],
+		["headSize", "Cabeza", "", "Cuerpo"],
+		["genitalSize", "Genitales", "", "Zona íntima"],
+		["penisLength", "Largo pene", "Longitud: ×1.5 al máximo (2.5), activo en NSFW masculino", "Zona íntima"],
+		["penisGirth", "Grosor pene", "Circunferencia: ×3 al máximo (2.5), activo en NSFW masculino", "Zona íntima"],
+		["openingSize", "Abertura", "", "Zona íntima"],
+		["anusSize", "Ano", "", "Zona íntima"],
 		// El desplazamiento se hace con las tres flechas de la base azul.
-		["rotationY", "Giro", "Rotación en grados"],
+		["rotationY", "Giro", "Rotación en grados", "Pose"],
 	];
-	const grid = document.createElement("div");
-	grid.style.cssText =
-		"display:grid;grid-template-columns:1fr;gap:3px;width:100%;";
-	ui.panel.appendChild(grid);
-
 	const sliderState = () => {
 		const slot = activeSlot(stateOf(node));
 		return {
@@ -1242,6 +1255,18 @@ export async function openPoseStudio3D(node) {
 				rotationY: Math.round((slot.rotationY || 0) * 180 / Math.PI),
 				handGripL: slot.anatomy?.handGripL ?? slot.anatomy?.handGrip ?? 0.5,
 				handGripR: slot.anatomy?.handGripR ?? slot.anatomy?.handGrip ?? 0.5,
+				handLSpread: slot.anatomy?.handLSpread ?? 0.5,
+				handLThumb: slot.anatomy?.handLThumb ?? 0.25,
+				handLIndex: slot.anatomy?.handLIndex ?? 0.25,
+				handLMiddle: slot.anatomy?.handLMiddle ?? 0.25,
+				handLRing: slot.anatomy?.handLRing ?? 0.25,
+				handLPinky: slot.anatomy?.handLPinky ?? 0.25,
+				handRSpread: slot.anatomy?.handRSpread ?? 0.5,
+				handRThumb: slot.anatomy?.handRThumb ?? 0.25,
+				handRIndex: slot.anatomy?.handRIndex ?? 0.25,
+				handRMiddle: slot.anatomy?.handRMiddle ?? 0.25,
+				handRRing: slot.anatomy?.handRRing ?? 0.25,
+				handRPinky: slot.anatomy?.handRPinky ?? 0.25,
 				stomach: slot.anatomy?.stomach ?? 0.5,
 				handSize: slot.anatomy?.handSize ?? 0.5,
 				footSize: slot.anatomy?.footSize ?? 0.5,
@@ -1265,56 +1290,275 @@ export async function openPoseStudio3D(node) {
 	};
 
 	const sliderRows = [];
-	for (const [key, label, title] of defs) {
-		const input = sliderRow(grid, label, key, sliderState(), (k, v) => {
-			const slot = activeSlot(stateOf(node));
-			if (k === "posX") slot.offset[0] = v;
-			else if (k === "posY") slot.offset[1] = v;
-			else if (k === "posZ") slot.offset[2] = v;
-			else if (k === "rotationY") slot.rotationY = (v * Math.PI) / 180;
-			else slot.anatomy[k] = v;
-			state.save();
-			queueRebuild();
-		});
-		if (title) input.title = title;
-		sliderRows.push({ input, key });
+	// Grupos expandibles por parte del cuerpo. El primero abre por defecto.
+	const groupNames = ["Cuerpo", "Brazos", "Manos", "Piernas y pies", "Zona íntima", "Pose"];
+	for (const [gi, gname] of groupNames.entries()) {
+		const rows = defs.filter((d) => d[3] === gname);
+		if (!rows.length) continue;
+		const holder = document.createElement("div");
+		holder.style.cssText = "width:100%;border-top:1px solid #ddd;padding-top:3px;";
+		const head = document.createElement("div");
+		head.textContent = (gi === 0 ? "▾ " : "▸ ") + gname;
+		head.style.cssText =
+			"cursor:pointer;font-weight:600;font-size:11px;color:#333;padding:2px 0;user-select:none;";
+		const body = document.createElement("div");
+		body.style.cssText =
+			"display:" + (gi === 0 ? "grid" : "none") +
+			";grid-template-columns:1fr;gap:3px;width:100%;padding-bottom:3px;";
+		head.onclick = () => {
+			const open = body.style.display === "none";
+			body.style.display = open ? "grid" : "none";
+			head.textContent = (open ? "▾ " : "▸ ") + gname;
+		};
+		for (const [key, label, title] of rows) {
+			const input = sliderRow(body, label, key, sliderState(), (k, v) => {
+				const slot = activeSlot(stateOf(node));
+				if (k === "posX") slot.offset[0] = v;
+				else if (k === "posY") slot.offset[1] = v;
+				else if (k === "posZ") slot.offset[2] = v;
+				else if (k === "rotationY") slot.rotationY = (v * Math.PI) / 180;
+				else slot.anatomy[k] = v;
+				state.save();
+				queueRebuild();
+			});
+			if (title) input.title = title;
+			sliderRows.push({ input, key });
+		}
+		holder.append(head, body);
+		ui.panel.appendChild(holder);
 	}
 
-	// --- Presets de cuerpo ---
-	const presets = document.createElement("div");
-	presets.style.cssText = "display:flex;gap:6px;width:100%;margin-top:6px;flex-wrap:wrap;";
-	const presetDefs = [
-		["curvy_female", "Curvilínea"],
-		["slim_female", "Delgada"],
-		["muscular_male", "Musculoso"],
-		["age_child", "Niño"],
-		["age_teen", "Adolescente"],
-		["age_adult", "Adulto"],
-		["age_elder", "Anciano"],
-		["weight_slim", "Muy delgado"],
-		["weight_chubby", "Relleno"],
-		["weight_mega", "Muy grueso"],
+	// --- Presets de cuerpo (lista desplegable agrupada) ---
+	const presetList = [
+		["Cuerpo base", "curvy_female", "Curvilínea"],
+		["Cuerpo base", "slim_female", "Delgada"],
+		["Cuerpo base", "muscular_male", "Musculoso"],
+		["Edad", "age_child", "Niño"],
+		["Edad", "age_teen", "Adolescente"],
+		["Edad", "age_adult", "Adulto"],
+		["Edad", "age_elder", "Anciano"],
+		["Peso", "weight_slim", "Muy delgado"],
+		["Peso", "weight_chubby", "Relleno"],
+		["Peso", "weight_mega", "Muy grueso"],
 	];
-	for (const [id, text] of presetDefs) {
-		const b = document.createElement("button");
-		b.textContent = text;
-		b.title = "Aplicar preset " + text;
-		b.style.cssText =
-			"padding:3px 8px;border:1px solid #999;border-radius:4px;background:#fff;cursor:pointer;";
-		b.onclick = () => {
-			const slot = activeSlot(stateOf(node));
-			slot.anatomy = { ...(slot.anatomy || {}), ...BODY_PRESETS[id] };
-			slot.preset = id;
+	const bodyLabels = {
+		body_01: "01 Reloj media", body_02: "02 Curvy caderas",
+		body_03: "03 Gran pecho", body_04: "04 Atlética curvy",
+		body_05: "05 Muy curvilínea", body_06: "06 Pecho y cintura",
+		body_07: "07 Barriga y caderas", body_08: "08 Caderas anchas",
+		body_09: "09 Glúteos grandes", body_10: "10 Bajo ancho",
+		body_11: "11 Piernas largas", body_12: "12 Bustos y brazos",
+		body_13: "13 Delgada baja", body_14: "14 Todo grande",
+		body_15: "15 Arena extrema", body_16: "16 Barriga redonda",
+		body_17: "17 Ancha y maciza", body_18: "18 Caderas XX",
+	};
+	for (const [id, label] of Object.entries(bodyLabels)) {
+		presetList.push(["Tipos de cuerpo", id, label]);
+	}
+	const presetSel = document.createElement("select");
+	presetSel.title = "Presets de maniquí";
+	presetSel.style.cssText = "flex:1;min-width:0;font:11px sans-serif;";
+	let currentGroup = "";
+	for (const [group, id, text] of presetList) {
+		if (group !== currentGroup) {
+			const og = document.createElement("optgroup");
+			og.label = group;
+			presetSel.appendChild(og);
+			currentGroup = group;
+		}
+		const o = document.createElement("option");
+		o.value = id;
+		o.textContent = text;
+		presetSel.lastChild.appendChild(o);
+	}
+	const applyPreset = () => {
+		const id = presetSel.value;
+		if (!BODY_PRESETS[id]) return;
+		const slot = activeSlot(stateOf(node));
+		slot.anatomy = { ...(slot.anatomy || {}), ...BODY_PRESETS[id] };
+		slot.preset = id;
+		state.save();
+		for (const row of sliderRows) {
+			const v = slot.anatomy[row.key];
+			if (v !== undefined) row.input.value = String(v);
+		}
+		refreshHandPopup?.();
+		queueRebuild();
+	};
+	presetSel.onchange = applyPreset;
+	const applyBtn = document.createElement("button");
+	applyBtn.textContent = "Aplicar";
+	applyBtn.title = "Aplicar el preset seleccionado";
+	applyBtn.style.cssText = "padding:3px 8px;border:1px solid #999;border-radius:4px;background:#fff;cursor:pointer;";
+	applyBtn.onclick = applyPreset;
+	const presetRow = document.createElement("div");
+	presetRow.style.cssText = "display:flex;gap:6px;width:100%;margin-top:6px;align-items:center;";
+	presetRow.append(presetSel, applyBtn);
+	ui.panel.appendChild(presetRow);
+
+	// Presets propios guardados en la ventana flotante.
+	const USER_PRESET_KEY = "mikaPoseStudio3D.presets";
+	const readUserPresets = () => {
+		try { return JSON.parse(localStorage.getItem(USER_PRESET_KEY) || "{}"); }
+		catch (e) { return {}; }
+	};
+	const savePresetBtn = document.createElement("button");
+	savePresetBtn.textContent = "Guardar preset";
+	savePresetBtn.title = "Guardar el maniquí actual como preset propio";
+	const loadPresetBtn = document.createElement("button");
+	loadPresetBtn.textContent = "Cargar preset";
+	loadPresetBtn.title = "Cargar un preset propio guardado";
+	const delPresetBtn = document.createElement("button");
+	delPresetBtn.textContent = "Borrar";
+	delPresetBtn.title = "Borrar el preset propio seleccionado";
+	for (const b of [savePresetBtn, loadPresetBtn, delPresetBtn]) {
+		b.style.cssText = "padding:3px 8px;border:1px solid #999;border-radius:4px;background:#fff;cursor:pointer;";
+	}
+	savePresetBtn.onclick = () => {
+		const name = prompt("Nombre del preset:", "Mi maniquí");
+		if (!name) return;
+		const store = readUserPresets();
+		store[name] = JSON.parse(JSON.stringify(stateOf(node).slots));
+		localStorage.setItem(USER_PRESET_KEY, JSON.stringify(store));
+	};
+	loadPresetBtn.onclick = () => {
+		const store = readUserPresets();
+		const names = Object.keys(store);
+		if (!names.length) { alert("No hay presets guardados."); return; }
+		const name = prompt("Presets guardados:\n" + names.join("\n") +
+			"\n\nNombre a cargar:", names[0]);
+		if (!name || !store[name]) return;
+		stateOf(node).slots = JSON.parse(JSON.stringify(store[name]));
+		stateOf(node).characters = stateOf(node).slots.length;
+		state.selected = Math.min(state.selected, stateOf(node).slots.length - 1);
+		stateOf(node).selected = state.selected;
+		state.save();
+		rebuild();
+		for (const row of sliderRows) {
+			const v = sliderState().anatomy[row.key];
+			if (v !== undefined) row.input.value = String(v);
+		}
+		syncButtons();
+	};
+	delPresetBtn.onclick = () => {
+		const store = readUserPresets();
+		const names = Object.keys(store);
+		if (!names.length) return;
+		const name = prompt("Presets guardados:\n" + names.join("\n") +
+			"\n\nNombre a borrar:", names[0]);
+		if (!name) return;
+		delete store[name];
+		localStorage.setItem(USER_PRESET_KEY, JSON.stringify(store));
+	};
+	const userRow = document.createElement("div");
+	userRow.style.cssText = "display:flex;gap:6px;width:100%;margin-top:4px;flex-wrap:wrap;";
+	userRow.append(savePresetBtn, loadPresetBtn, delPresetBtn);
+	ui.panel.appendChild(userRow);
+
+	// --- Panel flotante de dedos (Spread / Grasp / un dedo cada uno) ---
+	const handPanel = document.createElement("div");
+	handPanel.style.cssText = "position:absolute;left:8px;top:40px;z-index:20;width:250px;" +
+		"background:#262626;color:#eee;border:1px solid #555;border-radius:6px;" +
+		"padding:10px;box-shadow:0 6px 18px rgba(0,0,0,.5);display:none;font:11px sans-serif;";
+	const handTitle = document.createElement("div");
+	handTitle.style.cssText = "font-weight:700;letter-spacing:.1em;color:#ffd54f;margin-bottom:6px;" +
+		"display:flex;justify-content:space-between;align-items:center;";
+	const handClose = document.createElement("button");
+	handClose.textContent = "✕";
+	handClose.style.cssText = "background:none;border:none;color:#eee;cursor:pointer;font-size:14px;";
+	handClose.onclick = () => { handPanel.style.display = "none"; };
+	handTitle.append(document.createTextNode("LEFT HAND"), handClose);
+	handPanel.appendChild(handTitle);
+	const handTabs = document.createElement("div");
+	handTabs.style.cssText = "display:flex;gap:4px;margin-bottom:8px;";
+	for (const [label, side] of [["Izquierda", "L"], ["Derecha", "R"]]) {
+		const t = document.createElement("button");
+		t.textContent = label;
+		t.dataset.side = side;
+		t.style.cssText = "flex:1;padding:3px;border:1px solid #666;border-radius:4px;" +
+			"background:#333;color:#eee;cursor:pointer;font:11px sans-serif;";
+		t.onclick = () => showHand(side);
+		handTabs.appendChild(t);
+	}
+	handPanel.appendChild(handTabs);
+	const fingerRows = [];
+	const fingerDefs = [
+		["Spread", 0.5], ["Grasp", 0.5], ["Thumb", 0.25], ["Index", 0.25],
+		["Middle", 0.25], ["Ring", 0.25], ["Pinky", 0.25],
+	];
+	for (const [label] of fingerDefs) {
+		const row = document.createElement("label");
+		row.style.cssText = "display:flex;align-items:center;gap:6px;margin:3px 0;";
+		const name = document.createElement("span");
+		name.textContent = label;
+		name.style.cssText = "width:62px;flex:none;color:#ddd;";
+		const input = document.createElement("input");
+		input.type = "range";
+		input.min = "0";
+		input.max = label === "Grasp" ? "2.5" : "1";
+		input.step = "0.01";
+		input.style.cssText = "flex:1;min-width:0;accent-color:#ef5b8b;";
+		const val = document.createElement("span");
+		val.style.cssText = "width:34px;text-align:right;color:#bbb;";
+		input.oninput = () => {
+			const side = handPanel.dataset.side || "L";
+			const p = "hand" + side;
+			const key = label === "Grasp"
+				? (side === "L" ? "handGripL" : "handGripR")
+				: p + label;
+			activeSlot(stateOf(node)).anatomy[key] = parseFloat(input.value);
+			val.textContent = (+input.value).toFixed(2);
 			state.save();
-			for (const row of sliderRows) {
-				const v = slot.anatomy[row.key];
-				if (v !== undefined) row.input.value = String(v);
-			}
 			queueRebuild();
 		};
-		presets.appendChild(b);
+		row.append(name, input, val);
+		handPanel.appendChild(row);
+		fingerRows.push({ label, input, val });
 	}
-	ui.panel.appendChild(presets);
+	const resetHand = document.createElement("button");
+	resetHand.textContent = "Reset Hand Sliders";
+	resetHand.style.cssText = "width:100%;margin-top:8px;padding:6px;border:1px solid #666;" +
+		"border-radius:5px;background:#3a3a3a;color:#eee;cursor:pointer;";
+	resetHand.onclick = () => {
+		const side = handPanel.dataset.side || "L";
+		const p = "hand" + side;
+		const a = activeSlot(stateOf(node)).anatomy;
+		a[p + "Spread"] = 0.5;
+		a[side === "L" ? "handGripL" : "handGripR"] = 0.5; // grasp neutro
+		for (const f of ["Thumb", "Index", "Middle", "Ring", "Pinky"]) a[p + f] = 0.25;
+		state.save();
+		showHand(side);
+		queueRebuild();
+	};
+	handPanel.appendChild(resetHand);
+	ui.root.appendChild(handPanel);
+	const showHand = (side) => {
+		handPanel.dataset.side = side;
+		handTitle.firstChild.textContent = (side === "L" ? "LEFT" : "RIGHT") + " HAND";
+		for (const t of handTabs.children) {
+			t.style.background = t.dataset.side === side ? "#ef5b8b" : "#333";
+		}
+		const a = activeSlot(stateOf(node)).anatomy;
+		const p = "hand" + side;
+		for (const row of fingerRows) {
+			const key = row.label === "Grasp"
+				? (side === "L" ? "handGripL" : "handGripR")
+				: p + row.label;
+			const v = a[key] ?? (row.label === "Spread" ? 0.5 : 0.25);
+			row.input.value = String(v);
+			row.val.textContent = (+v).toFixed(2);
+		}
+		handPanel.style.display = "block";
+	};
+	const refreshHandPopup = () => {
+		if (handPanel.style.display === "block") showHand(handPanel.dataset.side || "L");
+	};
+	const openHandBtn = document.createElement("button");
+	openHandBtn.textContent = "✋ Dedos";
+	openHandBtn.title = "Abrir el panel de dedos (Spread, Grasp y cada dedo)";
+	openHandBtn.style.cssText = "padding:3px 8px;border:1px solid #999;border-radius:4px;background:#fff;cursor:pointer;";
+	openHandBtn.onclick = () => showHand("L");
+	userRow.appendChild(openHandBtn);
 
 	// --- Tamaño de salida ---
 	// Elige el lienzo desde la propia ventana: la vista se reencuadra a ese
@@ -1443,6 +1687,11 @@ export async function openPoseStudio3D(node) {
 		}
 		slot.anatomy.gender = 0.5;
 		slot.anatomy.age = 30;
+		for (const side of ["L", "R"]) {
+			for (const f of ["Thumb", "Index", "Middle", "Ring", "Pinky"]) {
+				slot.anatomy["hand" + side + f] = 0.25;
+			}
+		}
 		slot.pose = {};
 		slot.offset = [0, 0, 0];
 		slot.rotationY = 0;

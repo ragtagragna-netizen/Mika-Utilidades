@@ -10,6 +10,8 @@ export const ANATOMY_KEYS = [
 	"age", "weight", "height", "width", "bust", "firmness", "waist", "stomach", "hips", "glutes",
 	"armLength", "legLength", "armThickness", "thighThickness",
 	"calfThickness", "handSize", "footSize", "handGripL", "handGripR",
+	"handLSpread", "handLThumb", "handLIndex", "handLMiddle", "handLRing", "handLPinky",
+	"handRSpread", "handRThumb", "handRIndex", "handRMiddle", "handRRing", "handRPinky",
 	"handLPosX", "handLPosY", "handLPosZ",
 	"handRPosX", "handRPosY", "handRPosZ",
 	"handLRotX", "handLRotY", "handLRotZ",
@@ -27,6 +29,10 @@ const preset = (o = {}) => ({
 	armLength: 0.5, legLength: 0.5, armThickness: 0.5,
 	thighThickness: 0.5, calfThickness: 0.5, handSize: 0.5, footSize: 0.5,
 	handGripL: 0.5, handGripR: 0.5,
+	handLSpread: 0.5, handLThumb: 0.25, handLIndex: 0.25, handLMiddle: 0.25,
+	handLRing: 0.25, handLPinky: 0.25,
+	handRSpread: 0.5, handRThumb: 0.25, handRIndex: 0.25, handRMiddle: 0.25,
+	handRRing: 0.25, handRPinky: 0.25,
 	handLPosX: 0, handLPosY: 0, handLPosZ: 0,
 	handRPosX: 0, handRPosY: 0, handRPosZ: 0,
 	handLRotX: 0, handLRotY: 0, handLRotZ: 0,
@@ -88,6 +94,24 @@ export const BODY_PRESETS = {
 		weight: 1, waist: 1.2, stomach: 1.5, hips: 1.3, glutes: 1.15,
 		thighThickness: 1.2, calfThickness: 1, armThickness: 1.1, bust: 0.85,
 	}),
+	body_01: preset({ bust: 1.0, waist: 1.2, stomach: 0.4, hips: 1.0, glutes: 0.9, thighThickness: 0.7, armThickness: 0.5, height: 0.62 }), // Reloj media
+	body_02: preset({ bust: 0.8, waist: 1.1, stomach: 0.45, hips: 1.3, glutes: 1.1, thighThickness: 0.8, armThickness: 0.5, height: 0.6 }), // Curvy caderas
+	body_03: preset({ bust: 1.7, waist: 1.3, stomach: 0.4, hips: 0.9, glutes: 0.8, thighThickness: 0.65, armThickness: 0.5, height: 0.62 }), // Gran pecho
+	body_04: preset({ bust: 0.7, waist: 1.0, stomach: 0.35, hips: 1.1, glutes: 0.9, thighThickness: 0.75, armThickness: 0.65, height: 0.68 }), // Atlética curvy
+	body_05: preset({ bust: 2.0, waist: 1.4, stomach: 0.5, hips: 1.7, glutes: 1.5, thighThickness: 1.1, armThickness: 0.6, height: 0.6 }), // Muy curvilínea
+	body_06: preset({ bust: 1.4, waist: 1.5, stomach: 0.35, hips: 1.0, glutes: 0.85, thighThickness: 0.7, armThickness: 0.45, height: 0.65 }), // Pecho y cintura
+	body_07: preset({ bust: 0.9, waist: 0.6, stomach: 1.1, hips: 1.1, glutes: 0.9, thighThickness: 0.7, armThickness: 0.55, height: 0.58 }), // Barriga y caderas
+	body_08: preset({ bust: 0.6, waist: 0.9, stomach: 0.55, hips: 1.9, glutes: 1.7, thighThickness: 1.2, armThickness: 0.55, height: 0.58 }), // Caderas anchas
+	body_09: preset({ bust: 0.7, waist: 1.2, stomach: 0.45, hips: 1.8, glutes: 2.0, thighThickness: 1.1, armThickness: 0.5, height: 0.6 }), // Glúteos grandes
+	body_10: preset({ bust: 0.55, waist: 0.8, stomach: 0.6, hips: 1.5, glutes: 1.3, thighThickness: 1.15, armThickness: 0.55, height: 0.56 }), // Bajo ancho
+	body_11: preset({ bust: 1.3, waist: 1.2, stomach: 0.35, hips: 0.95, glutes: 0.8, thighThickness: 0.6, armThickness: 0.45, legLength: 0.85, height: 0.75 }), // Piernas largas
+	body_12: preset({ bust: 1.6, waist: 1.0, stomach: 0.5, hips: 1.2, glutes: 1.0, thighThickness: 0.85, armThickness: 0.8, height: 0.62 }), // Bustos y brazos
+	body_13: preset({ bust: 0.45, waist: 1.3, stomach: 0.25, hips: 0.6, glutes: 0.5, thighThickness: 0.45, armThickness: 0.35, height: 0.55 }), // Delgada baja
+	body_14: preset({ bust: 2.1, waist: 1.1, stomach: 0.9, hips: 1.8, glutes: 1.6, thighThickness: 1.2, armThickness: 0.8, height: 0.58 }), // Todo grande
+	body_15: preset({ bust: 2.3, waist: 1.8, stomach: 0.5, hips: 2.0, glutes: 1.8, thighThickness: 1.2, armThickness: 0.6, height: 0.6 }), // Arena extrema
+	body_16: preset({ bust: 0.8, waist: 0.5, stomach: 1.3, hips: 1.2, glutes: 0.9, thighThickness: 0.8, armThickness: 0.6, height: 0.56 }), // Barriga redonda
+	body_17: preset({ bust: 1.8, waist: 0.7, stomach: 1.0, hips: 1.6, glutes: 1.4, thighThickness: 1.3, armThickness: 0.95, height: 0.6 }), // Ancha y maciza
+	body_18: preset({ bust: 1.5, waist: 1.0, stomach: 0.7, hips: 2.1, glutes: 1.9, thighThickness: 1.4, armThickness: 0.7, height: 0.58 }), // Caderas xx
 };
 
 const clamp01 = (v) => Math.min(1, Math.max(0, Number(v) || 0));
