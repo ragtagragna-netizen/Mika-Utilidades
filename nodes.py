@@ -4668,9 +4668,11 @@ _MIKA_TANGENT_PRESETS = {
     # Meseta alta del shifted_tangent (slope_1/pivot_1) con refino suave
     # (slope_2 bajo): carácter artístico sin el "cliff" que deforma.
     "artístico": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.50, 0.0, 0.60, 0.50, 0.20, 0.05))),
-    # Defaults exactos de RES4LYF bong_tangent_scheduler. Es la misma curva
-    # del shifted_tangent leída por el modelo, así que coincide con "original".
-    "bong tangent": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.50, 0.0, 0.60, 0.60, 0.20, 0.20))),
+    # Bong_tangent simulado con la curva del modelo: invierte el shift 3 de
+    # Anima (sigma = 3f/(1+2f)) para que las sigmas resultantes imiten al
+    # bong raw (fracciones directas). Calibrado para shift 3; error medio
+    # ~0.01 sigmas y válido de 12 a 50 pasos.
+    "bong (simulado)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.22, 0.0, 0.65, 0.55, 0.10, 0.20))),
 }
 _MIKA_TANGENT_PRESET_NAMES = list(_MIKA_TANGENT_PRESETS)
 

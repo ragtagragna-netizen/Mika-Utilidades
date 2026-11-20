@@ -85,8 +85,9 @@ const PRESETS = {
   original: { start: 1.0, middle: 0.50, end: 0.0, pivot_1: 0.60, pivot_2: 0.60, slope_1: 0.20, slope_2: 0.20 },
   // Meseta del shifted_tangent con refino suave (carácter artístico estable).
   artístico: { start: 1.0, middle: 0.50, end: 0.0, pivot_1: 0.60, pivot_2: 0.50, slope_1: 0.20, slope_2: 0.05 },
-  // Defaults exactos de RES4LYF bong_tangent (misma curva que "original").
-  "bong tangent": { start: 1.0, middle: 0.50, end: 0.0, pivot_1: 0.60, pivot_2: 0.60, slope_1: 0.20, slope_2: 0.20 },
+  // Bong simulado con la curva del modelo (shift 3 de Anima): imita al
+  // bong raw con error ~0.01 sigmas, de 12 a 50 pasos.
+  "bong (simulado)": { start: 1.0, middle: 0.22, end: 0.0, pivot_1: 0.65, pivot_2: 0.55, slope_1: 0.10, slope_2: 0.20 },
 };
 
 function widgetNamed(node, name) {
