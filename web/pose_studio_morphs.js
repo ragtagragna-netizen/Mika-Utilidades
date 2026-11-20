@@ -82,7 +82,7 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 	const fLen = 1 + lenExtra / 3;
 	const fGirth = 1 + girthExtra * 4 / 3;
 	const fWaist = 1 + (0.5 - (d.waist ?? 0.5)) * 0.45;
-	const fStomach = 1 + ((d.stomach ?? 0.5) - 0.5) * 0.55;
+	const fStomach = 1 + ((d.stomach ?? 0.5) - 0.5) * 0.65;
 	const fHand = 1 + ((d.handSize ?? 0.5) - 0.5) * 0.6;
 	const fFoot = 1 + ((d.footSize ?? 0.5) - 0.5) * 0.6;
 	const fHips = 1 + ((d.hips ?? 0.5) - 0.5) * 0.4;
@@ -130,15 +130,15 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 				delta("waist", i, x * (fWaist - 1) * fall, 0, z * (fWaist - 1) * fall);
 			}
 
-			// Estómago: abdomen alto, crece sobre todo hacia delante y algo
-			// de lado, sin tocar el pecho ni la cintura baja.
-			if (C.stomach.includes(name) && z > 0 && t > 0.56 && t < 0.74
+			// Estómago: cubre toda la zona (desde el pecho hasta el ombligo),
+			// no solo el abdomen alto. Campana ancha y centrada más abajo.
+			if (C.stomach.includes(name) && t > 0.50 && t < 0.76
 					&& fStomach !== 1) {
-				const fall = Math.exp(-(((t - 0.65) / 0.09) ** 2))
-					* Math.min(1, z / 0.3) * w;
+				const fall = Math.exp(-(((t - 0.61) / 0.14) ** 2))
+					* Math.min(1, Math.max(0, z + 0.2) / 0.4) * w;
 				delta("stomach", i,
 					x * (fStomach - 1) * fall, 0,
-					(z - 0.3) * (fStomach - 1) * 1.2 * fall);
+					(z - 0.2) * (fStomach - 1) * 1.3 * fall);
 			}
 
 			if (C.hips.includes(name) && fHips !== 1) {
@@ -400,7 +400,12 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 
 	const order = keys.filter((k) => targets[k]);
 	for (const k of order) {
-		// Sin suavizado global: propagaba el target a todo el cuerpo.
+		// Solo las zonas con lóbulos (glúteos, caderas, estómago) se suavizan
+		// un par de anillos: quita las líneas de costura al exagerar sin
+		// propagar el target a todo el cuerpo.
+		if (k === "glutes" || k === "hips" || k === "stomach") {
+			smoothTarget(targets[k]);
+		}
 		const a = targets[k];
 		for (let j = 0; j < a.length; j++) verts[j] += a[j];
 	}

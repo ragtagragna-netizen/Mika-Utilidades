@@ -926,10 +926,11 @@ export async function openPoseStudio3D(node) {
 			h.mesh.visible = state.characters.length > 0;
 		}
 		const model = state.characters[state.selected] || state.characters[0];
-		const box = state.selectionVolume?.geometry;
-		if (model && box) {
-			if (!box.boundingBox) box.computeBoundingBox();
-			const b = box.boundingBox;
+		const helper = state.selectionVolume;
+		if (model && helper) {
+			helper.update();
+			const b = new THREE.Box3().setFromBufferAttribute(
+				helper.geometry.attributes.position);
 			moveGizmo.position.set(b.max.x, b.min.y, b.max.z);
 			moveGizmo.scale.setScalar(Math.max(0.6, model.heightUnits * 0.09));
 			moveGizmo.visible = true;
@@ -957,6 +958,9 @@ export async function openPoseStudio3D(node) {
 	state.saveCamera = () => writeCamera(node, camera, orbit);
 	orbit.addEventListener("change", () => {
 		requestRender();
+		// El contorno se mide en unidades de mundo según la distancia: sin
+		// recalcularlo al hacer zoom engorda y se enreda en los dedos/muslos.
+		applyOutlineWidth(renderer.getSize(new THREE.Vector2()).y);
 		if (camSaveTimer) clearTimeout(camSaveTimer);
 		camSaveTimer = setTimeout(() => state.saveCamera?.(), 250);
 	});
