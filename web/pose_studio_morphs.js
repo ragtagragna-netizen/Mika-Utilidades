@@ -273,10 +273,13 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 				const widen = 1 + (fGlute - 1) * 0.3;
 				const cleft = Math.min(1, Math.abs(x) / (0.022 * span));
 				const fall = Math.exp(-r2 * 1.2 / (widen * widen)) * cleft * wg;
+				// El doble de proyección que antes: la campana gaussiana ya
+				// atenúa el valor en la superficie, así que hacía falta duplicar
+				// el desplazamiento para que el lóbulo llegue al doble de volumen.
 				delta("glutes", i,
-					(x - cx) * (fGlute - 1) * 0.45 * fall,
-					(y - gluteY) * (fGlute - 1) * 0.35 * fall,
-					(z - gluteZ) * (fGlute - 1) * 1.6 * fall);
+					(x - cx) * (fGlute - 1) * 0.9 * fall,
+					(y - gluteY) * (fGlute - 1) * 0.7 * fall,
+					(z - gluteZ) * (fGlute - 1) * 3.2 * fall);
 			}
 		}
 

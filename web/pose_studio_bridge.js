@@ -1861,6 +1861,10 @@ export async function openPoseStudio3D(node) {
 			state.axisDrag = {
 				axis: hit.axis, plane, start,
 				base: [...slot.offset], slot, model,
+				// Posición real del grupo (espaciado + offset). Sin ella el
+				// arrastre asignaba el offset como posición absoluta y el
+				// personaje saltaba al centro; el siguiente rebuild lo devolvía.
+				basePos: model.group.position[hit.axis],
 			};
 			orbit.enabled = false;
 			ui.canvas.setPointerCapture(event.pointerId);
@@ -1942,10 +1946,12 @@ export async function openPoseStudio3D(node) {
 			const target = pointerOnPlane(event, d.plane);
 			if (!target) return;
 			const delta = target.clone().sub(d.start);
-			const value = Math.max(-8, Math.min(8,
-				d.base[{ x: 0, y: 1, z: 2 }[d.axis]] + delta[d.axis]));
-			d.slot.offset[{ x: 0, y: 1, z: 2 }[d.axis]] = value;
-			if (d.model) d.model.group.position[d.axis] = value;
+			const ai = { x: 0, y: 1, z: 2 }[d.axis];
+			const value = Math.max(-8, Math.min(8, d.base[ai] + delta[d.axis]));
+			d.slot.offset[ai] = value;
+			if (d.model) {
+				d.model.group.position[d.axis] = d.basePos + (value - d.base[ai]);
+			}
 			requestRender();
 			return;
 		}
