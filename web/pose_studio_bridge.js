@@ -24,7 +24,8 @@ const OUTLINE_COLOR = 0x111111;
 // Anatomía inicial: femenina y reconocible, en lugar del valor neutro del
 // morph que daba un cuerpo plano y sin pecho.
 const DEFAULT_ANATOMY = {
-	gender: 0, bust: 0.75, waist: 0.35, stomach: 0.5,
+	gender: 0, age: 30, weight: 0.5,
+	bust: 0.75, waist: 0.35, stomach: 0.5,
 	hips: 0.65, glutes: 0.6, headSize: 0.45,
 	handGripL: 0.5, handGripR: 0.5, handSize: 0.5, footSize: 0.5,
 	handLPosX: 0, handLPosY: 0, handLPosZ: 0,
@@ -751,7 +752,8 @@ function sliderRow(panel, label, key, state, onInput) {
 	const input = document.createElement("input");
 	input.type = "range";
 	const RANGES = {
-		gender: [0, 1], posX: [-8, 8], posY: [-3, 3], posZ: [-8, 8],
+		gender: [0, 1], age: [1, 90], weight: [0, 1],
+		posX: [-8, 8], posY: [-3, 3], posZ: [-8, 8],
 		rotationY: [-180, 180],
 		handLPosX: [-4, 4], handLPosY: [-4, 4], handLPosZ: [-4, 4],
 		handRPosX: [-4, 4], handRPosY: [-4, 4], handRPosZ: [-4, 4],
@@ -1181,6 +1183,8 @@ export async function openPoseStudio3D(node) {
 	// Se agrupan en dos columnas; el panel hace scroll si no entra todo.
 	const defs = [
 		["gender", "Género ♀♂", "0 = femenino, 1 = masculino"],
+		["age", "Edad", "Años (1–90): morfs nativos niño/joven/anciano"],
+		["weight", "Peso", "0 delgado → 1 obeso; morf nativo + vientre"],
 		["height", "Altura"],
 		["width", "Anchura", "Escala global en X, como Altura pero de lado a lado"],
 		["bust", "Pecho"],
@@ -1283,6 +1287,13 @@ export async function openPoseStudio3D(node) {
 		["curvy_female", "Curvilínea"],
 		["slim_female", "Delgada"],
 		["muscular_male", "Musculoso"],
+		["age_child", "Niño"],
+		["age_teen", "Adolescente"],
+		["age_adult", "Adulto"],
+		["age_elder", "Anciano"],
+		["weight_slim", "Muy delgado"],
+		["weight_chubby", "Relleno"],
+		["weight_mega", "Muy grueso"],
 	];
 	for (const [id, text] of presetDefs) {
 		const b = document.createElement("button");
@@ -1431,6 +1442,7 @@ export async function openPoseStudio3D(node) {
 				.test(k) ? 0 : 0.5;
 		}
 		slot.anatomy.gender = 0.5;
+		slot.anatomy.age = 30;
 		slot.pose = {};
 		slot.offset = [0, 0, 0];
 		slot.rotationY = 0;

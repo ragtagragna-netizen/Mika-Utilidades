@@ -7,7 +7,7 @@
 // espalda y las caderas el estómago.
 
 export const ANATOMY_KEYS = [
-	"height", "width", "bust", "firmness", "waist", "stomach", "hips", "glutes",
+	"age", "weight", "height", "width", "bust", "firmness", "waist", "stomach", "hips", "glutes",
 	"armLength", "legLength", "armThickness", "thighThickness",
 	"calfThickness", "handSize", "footSize", "handGripL", "handGripR",
 	"handLPosX", "handLPosY", "handLPosZ",
@@ -19,50 +19,75 @@ export const ANATOMY_KEYS = [
 	"penisLength", "penisGirth",
 ];
 
+// Base completa: al aplicar un preset se sobrescriben TODAS las claves,
+// para que no queden valores del maniquí anterior.
+const preset = (o = {}) => ({
+	gender: 0, age: 30, weight: 0.5, height: 0.6, width: 0.5,
+	bust: 0.5, firmness: 0.5, waist: 0.5, stomach: 0.5, hips: 0.5, glutes: 0.5,
+	armLength: 0.5, legLength: 0.5, armThickness: 0.5,
+	thighThickness: 0.5, calfThickness: 0.5, handSize: 0.5, footSize: 0.5,
+	handGripL: 0.5, handGripR: 0.5,
+	handLPosX: 0, handLPosY: 0, handLPosZ: 0,
+	handRPosX: 0, handRPosY: 0, handRPosZ: 0,
+	handLRotX: 0, handLRotY: 0, handLRotZ: 0,
+	handRRotX: 0, handRRotY: 0, handRRotZ: 0,
+	footRotX: 0, footRotY: 0, footRotZ: 0,
+	headSize: 0.45, genitalSize: 0.5, openingSize: 0.5, anusSize: 0.5,
+	penisLength: 0.5, penisGirth: 0.5,
+	...o,
+});
+
 export const BODY_PRESETS = {
-	curvy_female: {
-		gender: 0, height: 0.55, width: 0.5, bust: 0.82, firmness: 0.5, waist: 0.3, stomach: 0.5,
-		hips: 0.85, glutes: 0.8, armLength: 0.5, legLength: 0.55,
-		armThickness: 0.45, thighThickness: 0.5, calfThickness: 0.5, handSize: 0.5, footSize: 0.5,
-		handGripL: 0.5, handGripR: 0.5,
-		handLPosX: 0, handLPosY: 0, handLPosZ: 0,
-		handRPosX: 0, handRPosY: 0, handRPosZ: 0,
-		handLRotX: 0, handLRotY: 0, handLRotZ: 0,
-		handRRotX: 0, handRRotY: 0, handRRotZ: 0,
-		footRotX: 0, footRotY: 0, footRotZ: 0,
-		headSize: 0.45,
-		genitalSize: 0.5, openingSize: 0.5, anusSize: 0.5,
-		penisLength: 0.5, penisGirth: 0.5,
-		
-	},
-	muscular_male: {
-		gender: 1, height: 0.72, width: 0.5, bust: 0.45, firmness: 0.7, waist: 0.55, stomach: 0.5,
+	curvy_female: preset({
+		age: 30, height: 0.55, bust: 0.82, waist: 0.3, hips: 0.85, glutes: 0.8,
+		armThickness: 0.45, headSize: 0.45,
+	}),
+	muscular_male: preset({
+		gender: 1, age: 30, height: 0.72, bust: 0.45, firmness: 0.7, waist: 0.55,
 		hips: 0.4, glutes: 0.55, armLength: 0.7, legLength: 0.65,
-		armThickness: 0.75, thighThickness: 0.7, calfThickness: 0.65, handSize: 0.5, footSize: 0.5,
-		handGripL: 0.5, handGripR: 0.5,
-		handLPosX: 0, handLPosY: 0, handLPosZ: 0,
-		handRPosX: 0, handRPosY: 0, handRPosZ: 0,
-		handLRotX: 0, handLRotY: 0, handLRotZ: 0,
-		handRRotX: 0, handRRotY: 0, handRRotZ: 0,
-		footRotX: 0, footRotY: 0, footRotZ: 0, headSize: 0.5,
-		genitalSize: 0.6, openingSize: 0.5, anusSize: 0.5,
-		penisLength: 0.6, penisGirth: 0.55,
-		
-	},
-	slim_female: {
-		gender: 0, height: 0.65, width: 0.5, bust: 0.35, firmness: 0.45, waist: 0.2, stomach: 0.5,
-		hips: 0.35, glutes: 0.3, armLength: 0.6, legLength: 0.7,
-		armThickness: 0.35, thighThickness: 0.35, calfThickness: 0.35, handSize: 0.5, footSize: 0.5,
-		handGripL: 0.5, handGripR: 0.5,
-		handLPosX: 0, handLPosY: 0, handLPosZ: 0,
-		handRPosX: 0, handRPosY: 0, handRPosZ: 0,
-		handLRotX: 0, handLRotY: 0, handLRotZ: 0,
-		handRRotX: 0, handRRotY: 0, handRRotZ: 0,
-		footRotX: 0, footRotY: 0, footRotZ: 0, headSize: 0.5,
+		armThickness: 0.75, thighThickness: 0.7, calfThickness: 0.65, headSize: 0.5,
+		genitalSize: 0.6, penisLength: 0.6, penisGirth: 0.55,
+	}),
+	slim_female: preset({
+		age: 25, height: 0.65, bust: 0.35, waist: 0.2, hips: 0.35, glutes: 0.3,
+		armThickness: 0.35, thighThickness: 0.35, calfThickness: 0.35, headSize: 0.5,
 		genitalSize: 0.45, openingSize: 0.45, anusSize: 0.45,
-		penisLength: 0.5, penisGirth: 0.5,
-		
-	},
+	}),
+	// Guías de edad: la cabeza es proporcionalmente mayor en el niño, el cuerpo
+	// se alarga en la adolescencia y se encoge/engorda en la vejez.
+	age_child: preset({
+		age: 7, height: 0.18, width: 0.42, headSize: 0.85, bust: 0.45,
+		waist: 0.48, hips: 0.45, glutes: 0.45, armLength: 0.35, legLength: 0.35,
+		armThickness: 0.4, thighThickness: 0.4, calfThickness: 0.4,
+	}),
+	age_teen: preset({
+		age: 16, height: 0.52, width: 0.48, headSize: 0.62, bust: 0.58,
+		waist: 0.42, hips: 0.55, glutes: 0.5, armLength: 0.48, legLength: 0.52,
+	}),
+	age_adult: preset({
+		age: 30, height: 0.62, headSize: 0.45, bust: 0.7, waist: 0.4,
+		hips: 0.55, glutes: 0.55, armLength: 0.55, legLength: 0.6,
+	}),
+	age_elder: preset({
+		age: 82, height: 0.42, width: 0.56, headSize: 0.5, bust: 0.42,
+		firmness: 0.25, waist: 0.62, stomach: 0.7, hips: 0.6, glutes: 0.45,
+		armLength: 0.45, legLength: 0.4, armThickness: 0.4,
+		thighThickness: 0.4, calfThickness: 0.4,
+	}),
+	// Guías de peso: el volumen se reparte entre vientre, cintura, caderas,
+	// glúteos y muslos; los senos y los hombros crecen menos que el resto.
+	weight_slim: preset({
+		weight: 0.2, waist: 0.3, stomach: 0.35, hips: 0.35, glutes: 0.35,
+		thighThickness: 0.35, calfThickness: 0.35, bust: 0.45,
+	}),
+	weight_chubby: preset({
+		weight: 0.7, waist: 0.75, stomach: 0.85, hips: 0.78, glutes: 0.72,
+		thighThickness: 0.75, calfThickness: 0.65, armThickness: 0.7, bust: 0.7,
+	}),
+	weight_mega: preset({
+		weight: 1, waist: 1.2, stomach: 1.5, hips: 1.3, glutes: 1.15,
+		thighThickness: 1.2, calfThickness: 1, armThickness: 1.1, bust: 0.85,
+	}),
 };
 
 const clamp01 = (v) => Math.min(1, Math.max(0, Number(v) || 0));
@@ -79,7 +104,17 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 	const female = g < 0.5;
 
 	a.gender = g;
-	if (anatomy.height !== undefined) a.height = clamp01(anatomy.height);
+	// Edad en años y peso 0..1 alimentan los morfs nativos de MakeHuman:
+	// baby/child/young/old y minweight/averageweight/maxweight.
+	if (anatomy.age !== undefined) {
+		a.age = Math.min(90, Math.max(1, Number(anatomy.age) || 25));
+	}
+	if (anatomy.weight !== undefined) a.weight = clamp01(anatomy.weight);
+	// El morph nativo "old" estira al anciano; las guías lo muestran más bajo
+	// y encorvado, así que se compensa bajando el morph de altura (incluso si
+	// el slider de altura no se ha tocado nunca).
+	const elder = Math.min(1, Math.max(0, ((a.age ?? 30) - 50) / 40));
+	a.height = clamp01(anatomy.height ?? a.height ?? 0.5) * (1 - elder * 0.55);
 	if (anatomy.bust !== undefined) a.breast_size = clamp01(anatomy.bust);
 	if (anatomy.firmness !== undefined) a.firmness = clamp01(anatomy.firmness);
 	// Largo y grosor del pene son morfs nativos independientes; genitalSize
@@ -91,6 +126,7 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 	const size = (key) => clampSize(anatomy[key] ?? 0.5);
 	const localDeform = {
 		waist: size("waist"),
+		weight: clamp01(anatomy.weight ?? 0.5),
 		stomach: size("stomach"),
 		hips: size("hips"),
 		glutes: size("glutes"),

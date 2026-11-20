@@ -1890,7 +1890,90 @@ app.registerExtension({
 			exportBtn.onclick = () => exportProject(node);
 			const importBtn = mkButton("📥", "Importar un proyecto desde un archivo");
 			importBtn.onclick = () => node._mikaProjectInput?.click();
-			return { parts: [exportBtn, importBtn], refresh() {} };
+			const saveM = mkButton("🧍+", "Guardar preset de maniquí (anatomía, pose y posición)");
+			saveM.onclick = () => saveManiqui(node);
+			const loadM = mkButton("🧍↺", "Cargar preset de maniquí guardado");
+			loadM.onclick = () => loadManiqui(node);
+			const saveS = mkButton("🎬+", "Guardar escenario (maniquíes + capas del calco)");
+			saveS.onclick = () => saveEscenario(node);
+			const loadS = mkButton("🎬↺", "Cargar escenario guardado");
+			loadS.onclick = () => loadEscenario(node);
+			return { parts: [exportBtn, importBtn, saveM, loadM, saveS, loadS], refresh() {} };
+		}
+
+		// --- Presets de maniquí y escenarios (localStorage) ---
+		const MANIQUI_KEY = "mikaLineart.maniquiPresets";
+		const ESCENARIO_KEY = "mikaLineart.escenarioPresets";
+		function presetStore(key) {
+			try { return JSON.parse(localStorage.getItem(key) || "{}"); }
+			catch (e) { return {}; }
+		}
+		function askPreset(store, label) {
+			const names = Object.keys(store);
+			if (!names.length) { alert("No hay presets guardados."); return null; }
+			return prompt("Presets guardados:\n" + names.join("\n") +
+				"\n\nEscribe el nombre a cargar:", names[0]);
+		}
+		function saveManiqui(node) {
+			const name = prompt("Nombre del preset de maniquí:", "Maniquí 1");
+			if (!name) return;
+			const store = presetStore(MANIQUI_KEY);
+			store[name] = JSON.parse(JSON.stringify(node.properties.mikaPoseStudio3D || {}));
+			localStorage.setItem(MANIQUI_KEY, JSON.stringify(store));
+		}
+		function loadManiqui(node) {
+			const store = presetStore(MANIQUI_KEY);
+			const name = askPreset(store, "maniquí");
+			if (!name || !store[name]) return;
+			node.properties.mikaPoseStudio3D = JSON.parse(JSON.stringify(store[name]));
+			window.__mikaPoseStudioRefresh?.();
+			node.setDirtyCanvas(true, true);
+		}
+		function saveEscenario(node) {
+			const st = node._mikaLineart;
+			const name = prompt("Nombre del escenario:", "Escenario 1");
+			if (!name) return;
+			const store = presetStore(ESCENARIO_KEY);
+			store[name] = {
+				pose: JSON.parse(JSON.stringify(node.properties.mikaPoseStudio3D || {})),
+				resolucion: resolucionWidget(node)?.value ?? null,
+				calco: (st?.calcoLayers || []).map((l) => ({
+					name: l.name, tf: l.tf, tf0: l.tf0, visible: l.visible,
+					img: imageToDataUrl(l.src).split(",")[1],
+				})),
+			};
+			localStorage.setItem(ESCENARIO_KEY, JSON.stringify(store));
+		}
+		async function loadEscenario(node) {
+			const st = node._mikaLineart;
+			const store = presetStore(ESCENARIO_KEY);
+			const name = askPreset(store, "escenario");
+			if (!name || !store[name] || !st) return;
+			const snap = store[name];
+			const capas = [];
+			for (const c of (snap.calco || [])) {
+				capas.push({ c, img: await imageFromBase64(c.img) });
+			}
+			node.properties.mikaPoseStudio3D = JSON.parse(JSON.stringify(snap.pose || {}));
+			const rw = resolucionWidget(node);
+			if (snap.resolucion && rw && snap.resolucion !== rw.value) {
+				rw.value = snap.resolucion;
+				rw.callback?.(snap.resolucion);
+			}
+			st.calcoLayers = capas.map(({ c, img }) => {
+				const layer = makeLayer(node, img);
+				if (c.name) layer.name = c.name;
+				if (c.tf) { layer.tf = c.tf; layer.tf0 = c.tf0 || c.tf; }
+				layer.visible = c.visible !== false;
+				return layer;
+			});
+			st.selection = [];
+			st.sel = null;
+			drawCalcoLayers(node);
+			renderLayerPanel(node);
+			writeCalco(node);
+			window.__mikaPoseStudioRefresh?.();
+			node.setDirtyCanvas(true, true);
 		}
 
 		// --- ⚡ Lineart desde el calco (no encola el grafo) ---

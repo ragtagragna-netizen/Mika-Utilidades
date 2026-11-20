@@ -130,15 +130,21 @@ export function buildCustomMorphs(pack, solved, staticData, params = {}) {
 				delta("waist", i, x * (fWaist - 1) * fall, 0, z * (fWaist - 1) * fall);
 			}
 
-			// Estómago: cubre toda la zona (desde el pecho hasta el ombligo),
-			// no solo el abdomen alto. Campana ancha y centrada más abajo.
-			if (C.stomach.includes(name) && t > 0.50 && t < 0.76
-					&& fStomach !== 1) {
-				const fall = Math.exp(-(((t - 0.61) / 0.14) ** 2))
-					* Math.min(1, Math.max(0, z + 0.2) / 0.4) * w;
+			// Vientre / peso: volumen elipsoidal redondeado desde las costillas
+			// hasta el pubis, con el frente como eje principal (guías de
+			// aumento de peso). El peso nativo también engorda el vientre.
+			const bellyF = fStomach * (1 + ((d.weight ?? 0.5) - 0.5) * 0.5);
+			if (C.stomach.includes(name) && t > 0.45 && t < 0.78 && bellyF !== 1) {
+				const by = minY + 0.6 * span;
+				const bz = 0.055 * span;
+				const dx = x / (0.09 * span);
+				const dy = (y - by) / (0.14 * span);
+				const dz = (z - bz) / (0.11 * span);
+				const fall = Math.exp(-(dx * dx + dy * dy + dz * dz) * 1.1) * w;
 				delta("stomach", i,
-					x * (fStomach - 1) * fall, 0,
-					(z - 0.2) * (fStomach - 1) * 1.3 * fall);
+					x * (bellyF - 1) * 0.7 * fall,
+					(y - by) * (bellyF - 1) * 0.25 * fall,
+					(z - bz) * (bellyF - 1) * 1.35 * fall);
 			}
 
 			if (C.hips.includes(name) && fHips !== 1) {
