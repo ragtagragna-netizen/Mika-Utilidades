@@ -12,7 +12,33 @@ import { hookGhostSlots, pruneWidgetlessInputs } from "./mika_ghost_slots.js";
 // en el nombre ("red shirt → red shorts", "− blue jeans", "+ hat").
 // El destino se detecta por título y se muestra su ID (vital si hay
 // repetidos). Aplica SOLO la entrada pulsada, sin cables ni cola.
+// Los botones son compactos (con separación) para que el nodo no crezca
+// demasiado cuando hay muchos tags para reemplazar.
 // -----------------------------------------------------------------------
+
+// BTN_H = alto visible del botón; BTN_GAP = separación entre botones.
+// El renglón que reserva el layout es BTN_SLOT = BTN_H + BTN_GAP.
+// LiteGraph suma 4 px al computeSize del widget para obtener computedHeight,
+// así que el computeSize devuelve BTN_SLOT - 4.
+const BTN_H = 16;
+const BTN_GAP = 3;
+const BTN_SLOT = BTN_H + BTN_GAP;
+
+function compactButton(btn) {
+  if (!btn) return btn;
+  // _arrangeWidgets() de LiteGraph hace: computedHeight = computeSize()[1] + 4
+  // (si el widget no define computeSize, cae en NODE_WIDGET_HEIGHT = 20 → 24).
+  // Ese computedHeight es el paso entre renglones (BTN_SLOT).
+  btn.computeSize = (width) => [width ?? 140, BTN_SLOT - 4];
+  // ButtonWidget dibuja su rect con `this.height`, que por defecto es 20 y
+  // es un accessor de solo lectura: hay que redefinirlo en la instancia.
+  // Dibuja solo BTN_H y deja BTN_GAP libre debajo → separación visible
+  // sin widgets extra (no cambia widgets_values ni el orden de configure).
+  try {
+    Object.defineProperty(btn, "height", { get: () => BTN_H, configurable: true });
+  } catch (e) { /* no-op */ }
+  return btn;
+}
 
 function escReg(s) {
   return String(s ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -52,6 +78,7 @@ function collapseReplacement(text, replacement, caseSensitive) {
 
 function swapTags(text, pairs, caseSensitive) {
   let out = text == null ? "" : String(text);
+  const original = out;
   const alts = [];
   for (const [findRaw, repRaw] of pairs) {
     const rep = repRaw == null ? "" : cleanTag(repRaw);
@@ -75,7 +102,13 @@ function swapTags(text, pairs, caseSensitive) {
   }
 
   if (removedAny) {
-    out = out.split(",").map((p) => p.trim()).filter((p) => p !== "").join(", ");
+    // Conserva la coma colgante del prompt original: si el último tag
+    // terminaba en coma, el resultado debe seguir terminando en coma.
+    // Sin esto, al quitar un tag se reconstruía con join() y se perdía.
+    const tm = original.match(/,\s*$/);
+    const trailing = tm ? tm[0] : "";
+    const kept = out.split(",").map((p) => p.trim()).filter((p) => p !== "");
+    out = kept.join(", ") + trailing;
   }
 
   return out;
@@ -359,7 +392,9 @@ function rebuildButtons(node) {
   const cfg = readConfig(node);
   for (const entry of collectEntries(cfg)) {
     try {
-      const btn = node.addWidget("button", entry.label, null, () => applyEntry(node, entry, btn));
+      const btn = compactButton(
+        node.addWidget("button", entry.label, null, () => applyEntry(node, entry, btn))
+      );
       if (btn) node._mikaSwapButtons.push(btn);
     } catch (e) { /* no-op */ }
   }
@@ -375,8 +410,9 @@ function rebuildButtons(node) {
     }
   } catch (e) { /* no-op */ }
   try {
-    node._mikaSwapConfigBtn =
-      node.addWidget("button", "⚙ Configurar", null, () => openSwapModal(node));
+    node._mikaSwapConfigBtn = compactButton(
+      node.addWidget("button", "⚙ Configurar", null, () => openSwapModal(node))
+    );
   } catch (e) { /* no-op */ }
 
   // Tamaño: alto fórmula siempre (el contenido son botones fijos:
@@ -387,7 +423,7 @@ function rebuildButtons(node) {
   // manual libre; de fábrica sale en 240.
   const nBtnF = (node._mikaSwapButtons?.length ?? 0) +
     (node._mikaSwapConfigBtn ? 1 : 0);
-  const fH = 2 + Math.max(1, nBtnF) * 24 + 8;
+  const fH = 2 + Math.max(1, nBtnF) * BTN_SLOT + 8;
   try {
     node.computeSize = function () { return [140, fH]; };
   } catch (e) { /* no-op */ }
