@@ -1196,6 +1196,7 @@ export async function openPoseStudio3D(node) {
 	state.queueRebuild = queueRebuild;
 
 	state.rebuild = rebuild;
+	state.renderer = renderer;
 	state.save = () => {
 		const st = stateOf(node);
 		st.characters = state.characters.length || 1;
@@ -2106,6 +2107,10 @@ export async function openPoseStudio3D(node) {
 		applyOutlineWidth(Math.max(1, ui.viewport.clientHeight));
 		handlesGroup.visible = prevHandles;
 		if (state.selectionVolume) state.selectionVolume.visible = prevSelection;
+		// Restaurar el tamaño del renderer limpia el buffer de dibujo y el
+		// bucle solo renderiza cuando hay cambios: sin esto el visor se queda
+		// en blanco después de enviar al calco.
+		requestRender();
 		return off.toDataURL("image/png");
 	}
 	state.renderCapture = renderCapture;
