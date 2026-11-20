@@ -133,6 +133,7 @@ También ojo con el **trazo vacío**: si no dibujás nada y `FUERZA DEL TRAZO` e
 | **Anima Resolutions-Mika** | Resoluciones Anima (~1 MP, 19 ratios), **ordenadas por ancho**, con modo random. |
 | **Sampler/Scheduler Selector-Mika** | Lista los samplers y schedulers instalados. |
 | **Custom Sampler Tangent-Mika** | Sampler + scheduler **tangent afinado** (dos etapas) en un solo nodo: genera el latente y lo decodifica (salidas `image` y `latent`). Widgets en orden tipo KSampler (`seed`, `steps`, `cfg`, `sampler`, `denoise`, `add_noise`) y los ajustes del tangent (`start`, `middle`, `end`, `pivot_1`, `pivot_2`, `slope_1`, `slope_2`) plegados en la barra de opciones avanzadas. Previsualiza el latente como el KSampler (si el preview está activado en ComfyUI). Sin depender de was-node-suite. |
+| **Custom Sampler Scheduler-Mika** | El Custom Sampler Tangent-Mika, pero **con combo de scheduler**: mismas salidas (`image` + `latent`), mismos widgets (`seed`, `steps`, `cfg`, `sampler`, `denoise`, `add_noise`) y preview del latente, con el schedule de **cualquier scheduler del menú** (normal, karras, beta_1_1, shifted_tangent, los de otros custom nodes...). |
 | **KSampler VAE-Mika** | Un **KSampler normal** con el **VAE integrado**: mismos widgets que el KSampler (`seed`, `steps`, `cfg`, `sampler`, `scheduler`, `denoise`), más la entrada `vae`, y salidas `image` (ya decodificada) y `latent`. Preview del latente como el KSampler. |
 | **Combo PlotXY-Mika** | Listas tipadas para plots: x/y universales `*` ya con el producto cruzado (un valor sale normal, varios salen combo: texto, sampler, scheduler, cfg, steps, seed, denoise, **model**, **checkpoint**, **none**) directo al KSampler, sin loops; cada eje puede quedar vacío. `row/col_labels` a XY Grid-Mika o XYZ-GridPlot. Ojo: model/checkpoint cargan todo en RAM (2-4 como mucho) y checkpoint compara solo el MODEL con tu CLIP/VAE fijos. |
 | **Single PlotXY-Mika** | Versión de un eje: una salida universal `*` (normal/combo dinámica) + labels. Para plots 1D. |
@@ -144,6 +145,7 @@ También ojo con el **trazo vacío**: si no dibujás nada y `FUERZA DEL TRAZO` e
 
 ## Notas
 
+- Los samplers con curva (Tangent y Scheduler) traen un **combo de presets** junto a la barra de ajustes avanzados: `estable`, `medio`, `más tags`, `artístico` (meseta del shifted tangent con refino suave), `original` / `bong tangent` (defaults de RES4LYF/WAS) y `personalizado`. Elegir uno escribe los 7 ajustes; tocar cualquiera vuelve a `personalizado`.
 - El paquete **registra el scheduler `shifted_tangent`** (el del *Custom Sampler Tangent-Mika*) en el menú de schedulers de ComfyUI, con su propia matemática: los KSampler lo pueden usar **sin was-node-suite**. Si WAS está instalado, se respeta el que cargue primero (la curva es la misma), así que no se duplica.
 - Los nodos con avance (steppers, index) persisten su posición en el workflow.
 - Si instalás extensiones con samplers/schedulers nuevos, reiniciá ComfyUI

@@ -7,6 +7,9 @@
  * vive en `node.properties.mika_show_advanced` (se guarda en el workflow).
  * Un input cableado queda siempre visible.
  *
+ * El combo `preset` escribe los 7 valores de la curva al elegir uno; si se
+ * toca un ajuste a mano, el combo pasa a "personalizado".
+ *
  * Adaptado de was-node-suite-comfyui/web/was_advanced_inputs.js (MIT,
  * (c) WASasquatch), apoyado en `interface/decoration.js` y
  * `interface/visibility.js`.
@@ -17,8 +20,8 @@ import { isWidgetWired, setWidgetHidden } from "./interface/visibility.js";
 
 const EXT_NAME = "Mika.CustomSamplerTangent.AdvancedInputs";
 
-// Solo nuestros nodos.
-const OWNED = new Set(["CustomSamplerTangentMika"]);
+// Solo nuestros nodos: el Tangent y el Scheduler (misma barra de ajustes).
+const OWNED = new Set(["CustomSamplerTangentMika", "CustomSamplerSchedulerMika"]);
 
 const HEADER_NAME = "mika_advanced_header";
 const OPEN_PROPERTY = "mika_show_advanced";
@@ -71,6 +74,47 @@ function fold(node, names) {
   node.graph?.setDirtyCanvas(true, true);
 }
 
+// Presets rápidos de la curva: los mismos valores que _MIKA_TANGENT_PRESETS
+// en nodes.py. El preset se elige en el combo junto a la barra de ajustes.
+const CURVE_KEYS = ["start", "middle", "end", "pivot_1", "pivot_2", "slope_1", "slope_2"];
+const PRESET_WIDGET = "preset";
+const PRESETS = {
+  estable: { start: 1.0, middle: 0.50, end: 0.0, pivot_1: 0.50, pivot_2: 0.50, slope_1: 0.05, slope_2: 0.05 },
+  medio: { start: 1.0, middle: 0.55, end: 0.0, pivot_1: 0.50, pivot_2: 0.50, slope_1: 0.07, slope_2: 0.05 },
+  "más tags": { start: 1.0, middle: 0.58, end: 0.0, pivot_1: 0.50, pivot_2: 0.50, slope_1: 0.07, slope_2: 0.05 },
+  original: { start: 1.0, middle: 0.50, end: 0.0, pivot_1: 0.60, pivot_2: 0.60, slope_1: 0.20, slope_2: 0.20 },
+  // Meseta del shifted_tangent con refino suave (carácter artístico estable).
+  artístico: { start: 1.0, middle: 0.50, end: 0.0, pivot_1: 0.60, pivot_2: 0.50, slope_1: 0.20, slope_2: 0.05 },
+  // Defaults exactos de RES4LYF bong_tangent (misma curva que "original").
+  "bong tangent": { start: 1.0, middle: 0.50, end: 0.0, pivot_1: 0.60, pivot_2: 0.60, slope_1: 0.20, slope_2: 0.20 },
+};
+
+function widgetNamed(node, name) {
+  return (node.widgets ?? []).find((widget) => widget.name === name);
+}
+
+/** Escribe los 7 valores del preset en los widgets (sin disparar callbacks). */
+function applyPreset(node, name) {
+  const values = PRESETS[name];
+  if (!values) return;
+  for (const key of CURVE_KEYS) {
+    const widget = widgetNamed(node, key);
+    // Un input cableado manda: su valor viene de Sigma Curve-Mika.
+    if (!widget || isWidgetWired(widget, node)) continue;
+    widget.value = values[key];
+  }
+  node.setDirtyCanvas?.(true, true);
+}
+
+/** Un ajuste manual deja el combo en "personalizado" (sin disparar callbacks). */
+function markPersonalizado(node) {
+  const widget = widgetNamed(node, PRESET_WIDGET);
+  if (widget && widget.value !== "personalizado") {
+    widget.value = "personalizado";
+    node.setDirtyCanvas?.(true, true);
+  }
+}
+
 app.registerExtension({
   name: EXT_NAME,
 
@@ -91,6 +135,7 @@ app.registerExtension({
       try {
         this.properties = this.properties ?? {};
         if (!(OPEN_PROPERTY in this.properties)) this.properties[OPEN_PROPERTY] = false;
+        const node = this;
         const first = (this.widgets ?? []).find((widget) => names.has(widget.name));
         if (first) {
           addSectionHeader(this, {
@@ -107,6 +152,26 @@ app.registerExtension({
           });
         }
         fold(this, names);
+
+        // Combo de presets: escribe la curva y vuelve a "personalizado" si
+        // el usuario toca un ajuste a mano.
+        const preset = widgetNamed(node, PRESET_WIDGET);
+        if (preset) {
+          const originalPresetCb = preset.callback;
+          preset.callback = function (value) {
+            originalPresetCb?.apply(this, arguments);
+            applyPreset(node, value);
+          };
+        }
+        for (const key of CURVE_KEYS) {
+          const widget = widgetNamed(node, key);
+          if (!widget) continue;
+          const originalCb = widget.callback;
+          widget.callback = function (value) {
+            originalCb?.apply(this, arguments);
+            markPersonalizado(node);
+          };
+        }
       } catch (error) {
         console.error(`[${EXT_NAME}] Failed to fold ${this.type}:`, error);
       }

@@ -4646,6 +4646,83 @@ _MIKA_TANGENT_MENU_DEFAULTS = {
     "pivot_1": 0.6, "pivot_2": 0.6, "slope_1": 0.2, "slope_2": 0.2,
 }
 
+#: Defaults de los 7 ajustes de la curva en los nodos del paquete (Tangent,
+#: Scheduler y Sigma Curve). Es el orden de declaration y de salidas.
+_MIKA_TANGENT_NODE_DEFAULTS = {
+    "start": 1.0, "middle": 0.55, "end": 0.0,
+    "pivot_1": 0.4, "pivot_2": 0.55, "slope_1": 0.2, "slope_2": 0.2,
+}
+
+#: Presets rápidos de la curva. El frontend escribe estos 7 valores en los
+#: widgets al elegir uno; el backend los aplica si no hay ningún valor
+#: explícito (p. ej. uso por API sin pasar la curva). "personalizado" deja
+#: los valores tal cual vinieron.
+_MIKA_TANGENT_KEYS = ("start", "middle", "end", "pivot_1", "pivot_2",
+                      "slope_1", "slope_2")
+_MIKA_TANGENT_PRESETS = {
+    "personalizado": None,
+    "estable": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.50, 0.0, 0.50, 0.50, 0.05, 0.05))),
+    "medio": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.55, 0.0, 0.50, 0.50, 0.07, 0.05))),
+    "más tags": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.58, 0.0, 0.50, 0.50, 0.07, 0.05))),
+    "original": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.50, 0.0, 0.60, 0.60, 0.20, 0.20))),
+    # Meseta alta del shifted_tangent (slope_1/pivot_1) con refino suave
+    # (slope_2 bajo): carácter artístico sin el "cliff" que deforma.
+    "artístico": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.50, 0.0, 0.60, 0.50, 0.20, 0.05))),
+    # Defaults exactos de RES4LYF bong_tangent_scheduler. Es la misma curva
+    # del shifted_tangent leída por el modelo, así que coincide con "original".
+    "bong tangent": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.50, 0.0, 0.60, 0.60, 0.20, 0.20))),
+}
+_MIKA_TANGENT_PRESET_NAMES = list(_MIKA_TANGENT_PRESETS)
+
+
+def _mika_preset_input_type():
+    """El combo de presets, para los nodos que usan la curva."""
+    return (_MIKA_TANGENT_PRESET_NAMES,
+            {"default": "personalizado",
+             "tooltip": "Curva rápida: estable / medio / más tags / original. "
+                        "Al tocar cualquier ajuste pasa a 'personalizado'."})
+
+
+def _mika_apply_preset(preset, values):
+    """`values` es la tupla de 7; devuelve la del preset si corresponde.
+
+    Solo aplica si el preset existe y **ninguno** de los 7 valores vino
+    explícitamente (ni widget ni cable desde Sigma Curve-Mika).
+    """
+    preset_values = _MIKA_TANGENT_PRESETS.get(preset)
+    if preset_values is None or any(value is not None for value in values):
+        return values
+    return tuple(float(preset_values[key]) for key in _MIKA_TANGENT_KEYS)
+
+
+def _mika_curve_values(start, middle, end, pivot_1, pivot_2, slope_1, slope_2,
+                       preset="personalizado"):
+    """Los 7 valores de la curva; None (input convertido sin conectar) cae al
+    default del nodo. Devuelve la tupla en orden canónico."""
+    d = _MIKA_TANGENT_NODE_DEFAULTS
+    values = (start, middle, end, pivot_1, pivot_2, slope_1, slope_2)
+    values = _mika_apply_preset(preset, values)
+    return tuple(d[key] if value is None else float(value)
+                 for key, value in zip(d, values))
+
+
+def _mika_curve_input_types(**extra):
+    """Los 7 widgets de la curva como inputs opcionales (conectables y con
+    widget a la vez), plegables en la barra de ajustes avanzados."""
+    adv = {"advanced": True}
+    adv.update(extra)
+    d = _MIKA_TANGENT_NODE_DEFAULTS
+    specs = {
+        "start": ("FLOAT", {"default": d["start"], "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+        "middle": ("FLOAT", {"default": d["middle"], "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+        "end": ("FLOAT", {"default": d["end"], "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+        "pivot_1": ("FLOAT", {"default": d["pivot_1"], "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+        "pivot_2": ("FLOAT", {"default": d["pivot_2"], "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
+        "slope_1": ("FLOAT", {"default": d["slope_1"], "min": 0.01, "max": 10.0, "step": 0.01, **adv}),
+        "slope_2": ("FLOAT", {"default": d["slope_2"], "min": 0.01, "max": 10.0, "step": 0.01, **adv}),
+    }
+    return {name: (kind, spec) for name, (kind, spec) in specs.items()}
+
 
 def _mika_tangent_schedule(model_sampling, steps):
     """Handler del scheduler "shifted_tangent" para el menú de ComfyUI.
@@ -4660,6 +4737,106 @@ def _mika_tangent_schedule(model_sampling, steps):
         defaults["start"], defaults["middle"], defaults["end"],
         defaults["pivot_1"], defaults["pivot_2"],
         defaults["slope_1"], defaults["slope_2"])
+
+
+def _mika_scheduler_curve_sigmas(model_sampling, steps, denoise, scheduler,
+                                 start, middle, end, pivot_1, pivot_2,
+                                 slope_1, slope_2):
+    """Sigmas del scheduler elegido, re-repartidas por la curva del tangent.
+
+    1. Baja las sigmas base del scheduler (con el descarte del sigma
+       penúltimo que hacen algunos samplers y el recorte por `denoise`, tal
+       como los arma el KSampler del core).
+    2. La curva de dos etapas (start/middle/end + pivots/slopes) dice qué
+       punto del schedule usar en cada paso: cada fracción se interpola en
+       las sigmas base. Con start=1 y end=0 los extremos son los del
+       scheduler; los pivots y slopes deforman el medio.
+    """
+    import comfy.samplers
+
+    if denoise <= 0.0:
+        return torch.FloatTensor([])
+    new_steps = steps if denoise >= 1.0 else int(steps / denoise)
+    sched_steps = new_steps
+    discard = scheduler in comfy.samplers.KSampler.DISCARD_PENULTIMATE_SIGMA_SAMPLERS
+    if discard:
+        sched_steps += 1
+    sigmas = comfy.samplers.calculate_sigmas(model_sampling, scheduler, sched_steps)
+    if discard:
+        sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
+    base = [float(s) for s in sigmas][-(steps + 1):]
+
+    fractions = _mika_tangent_fractions(
+        steps, start=start, middle=middle, end=end,
+        pivot_1=pivot_1, pivot_2=pivot_2, slope_1=slope_1, slope_2=slope_2)
+
+    n = len(base) - 1
+
+    def at(fraction):
+        # Fracción [0..1] (1 = arranque del schedule, 0 = el final) -> punto
+        # del schedule base, interpolado.
+        x = (1.0 - min(max(float(fraction), 0.0), 1.0)) * n
+        i = int(x)
+        if i >= n:
+            return base[n]
+        t = x - i
+        return base[i] * (1.0 - t) + base[i + 1] * t
+
+    out = [at(f) for f in fractions]
+    if fractions and fractions[-1] <= 0:
+        out[-1] = 0.0
+    return torch.FloatTensor(out)
+
+
+def _mika_sample_custom_with_vae(model, seed, cfg, sampler_name, sigmas,
+                                 positive, negative, latent_image, vae,
+                                 add_noise=True):
+    """Muestreo custom con sigmas ya resueltas + decode del VAE.
+
+    El tramo común del Custom Sampler Tangent-Mika y del Scheduler-Mika:
+    ruido (o ruido cero con add_noise off), sample_custom con preview del
+    latente y la imagen decodificada. Devuelve (image, latent)."""
+    import latent_preview
+    import comfy.sample
+    import comfy.utils
+
+    latent = latent_image.copy()
+    samples_in = comfy.sample.fix_empty_latent_channels(
+        model, latent["samples"],
+        latent.get("downscale_ratio_spacial"), latent.get("downscale_ratio_temporal"))
+
+    total_steps = int(sigmas.shape[-1]) - 1
+    if total_steps <= 0:
+        # denoise 0: no hay nada que muestrear, sale el latente tal cual.
+        denoised = samples_in
+    else:
+        if add_noise:
+            batch_inds = latent["batch_index"] if "batch_index" in latent else None
+            noise = comfy.sample.prepare_noise(samples_in, seed, batch_inds)
+        else:
+            noise = comfy.sample.prepare_empty_noise(samples_in)
+        noise_mask = latent.get("noise_mask")
+        sampler = comfy.samplers.sampler_object(sampler_name)
+        # Igual que el KSampler: preview del latente durante el muestreo.
+        callback = latent_preview.prepare_callback(model, total_steps)
+        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+        denoised = comfy.sample.sample_custom(
+            model, noise, cfg, sampler, sigmas, positive, negative, samples_in,
+            noise_mask=noise_mask, callback=callback, disable_pbar=disable_pbar,
+            seed=seed)
+
+    out = latent.copy()
+    out.pop("downscale_ratio_spacial", None)
+    out.pop("downscale_ratio_temporal", None)
+    out["samples"] = denoised
+
+    image_latent = out["samples"]
+    if image_latent.is_nested:
+        image_latent = image_latent.unbind()[0]
+    images = vae.decode(image_latent)
+    if len(images.shape) == 5:  # combinar batch 5D
+        images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+    return (images, out)
 
 
 class CustomSamplerTangentMika:
@@ -4685,7 +4862,6 @@ class CustomSamplerTangentMika:
 
     @classmethod
     def INPUT_TYPES(cls):
-        adv = {"advanced": True}
         return {
             "required": {
                 "model": ("MODEL", {"tooltip": "El modelo a muestrear."}),
@@ -4707,65 +4883,76 @@ class CustomSamplerTangentMika:
                                       "tooltip": "Porción del schedule. 1 = desde ruido puro."}),
                 "add_noise": ("BOOLEAN", {"default": True,
                                           "tooltip": "Agregar ruido antes de muestrear."}),
-                "start": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
-                "middle": ("FLOAT", {"default": 0.55, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
-                "end": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
-                "pivot_1": ("FLOAT", {"default": 0.45, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
-                "pivot_2": ("FLOAT", {"default": 0.45, "min": 0.0, "max": 1.0, "step": 0.01, **adv}),
-                "slope_1": ("FLOAT", {"default": 0.2, "min": 0.01, "max": 10.0, "step": 0.01, **adv}),
-                "slope_2": ("FLOAT", {"default": 0.2, "min": 0.01, "max": 10.0, "step": 0.01, **adv}),
-            }
+            },
+            # Conectables: aceptan los valores de un nodo Sigma Curve-Mika y
+            # siguen teniendo su widget plegado cuando no están conectados.
+            "optional": {
+                **_mika_curve_input_types(),
+                "preset": _mika_preset_input_type(),
+            },
         }
 
     def sample(self, model, seed, steps, cfg, sampler_name, positive, negative,
-               latent_image, vae, denoise=1.0, add_noise=True, start=1.0, middle=0.55,
-               end=0.0, pivot_1=0.45, pivot_2=0.45, slope_1=0.2, slope_2=0.2):
-        import latent_preview
-        import comfy.sample
-        import comfy.utils
-
-        latent = latent_image.copy()
-        samples_in = comfy.sample.fix_empty_latent_channels(
-            model, latent["samples"],
-            latent.get("downscale_ratio_spacial"), latent.get("downscale_ratio_temporal"))
-        latent["samples"] = samples_in
+               latent_image, vae, denoise=1.0, add_noise=True,
+               start=None, middle=None, end=None, pivot_1=None, pivot_2=None,
+               slope_1=None, slope_2=None, preset="personalizado"):
+        start, middle, end, pivot_1, pivot_2, slope_1, slope_2 = _mika_curve_values(
+            start, middle, end, pivot_1, pivot_2, slope_1, slope_2, preset)
 
         sigmas = _mika_tangent_sigmas(
             model.get_model_object("model_sampling"), steps, denoise,
             start, middle, end, pivot_1, pivot_2, slope_1, slope_2)
+        return _mika_sample_custom_with_vae(
+            model, seed, cfg, sampler_name, sigmas, positive, negative,
+            latent_image, vae, add_noise)
 
-        total_steps = int(sigmas.shape[-1]) - 1
-        if total_steps <= 0:
-            # denoise 0: no hay nada que muestrear, sale el latente tal cual.
-            denoised = samples_in
-        else:
-            if add_noise:
-                batch_inds = latent["batch_index"] if "batch_index" in latent else None
-                noise = comfy.sample.prepare_noise(samples_in, seed, batch_inds)
-            else:
-                noise = comfy.sample.prepare_empty_noise(samples_in)
-            noise_mask = latent.get("noise_mask")
-            sampler = comfy.samplers.sampler_object(sampler_name)
-            # Igual que el KSampler: preview del latente durante el muestreo.
-            callback = latent_preview.prepare_callback(model, total_steps)
-            disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-            denoised = comfy.sample.sample_custom(
-                model, noise, cfg, sampler, sigmas, positive, negative, samples_in,
-                noise_mask=noise_mask, callback=callback,
-                disable_pbar=disable_pbar, seed=seed)
 
-        out = latent.copy()
-        out.pop("downscale_ratio_spacial", None)
-        out.pop("downscale_ratio_temporal", None)
-        out["samples"] = denoised
+def _mika_ksample_with_vae(model, seed, steps, cfg, sampler_name, scheduler,
+                           positive, negative, latent_image, vae, denoise=1.0,
+                           add_noise=True):
+    """El common_ksampler del core (sampler + scheduler del menú, con el
+    mismo recorte por denoise) + decode del VAE, en un solo paso.
 
-        image_latent = out["samples"]
-        if image_latent.is_nested:
-            image_latent = image_latent.unbind()[0]
-        images = vae.decode(image_latent)
-        if len(images.shape) == 5:  # combinar batch 5D
-            images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
-        return (images, out)
+    Devuelve (image, latent) como el Custom Sampler Tangent-Mika: IMAGE ya
+    decodificada y el LATENT muestreado. Con add_noise=False entra ruido
+    cero, igual que el disable_noise del KSamplerAdvanced.
+    """
+    import latent_preview
+    import comfy.sample
+    import comfy.utils
+
+    latent = latent_image.copy()
+    samples_in = comfy.sample.fix_empty_latent_channels(
+        model, latent["samples"],
+        latent.get("downscale_ratio_spacial"), latent.get("downscale_ratio_temporal"))
+
+    if add_noise:
+        batch_inds = latent["batch_index"] if "batch_index" in latent else None
+        noise = comfy.sample.prepare_noise(samples_in, seed, batch_inds)
+    else:
+        noise = comfy.sample.prepare_empty_noise(samples_in)
+    noise_mask = latent.get("noise_mask")
+    # Igual que el KSampler: preview del latente durante el muestreo.
+    callback = latent_preview.prepare_callback(model, steps)
+    disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+    denoised = comfy.sample.sample(
+        model, noise, steps, cfg, sampler_name, scheduler, positive, negative,
+        samples_in, denoise=denoise, disable_noise=not add_noise,
+        noise_mask=noise_mask, callback=callback, disable_pbar=disable_pbar,
+        seed=seed)
+
+    out = latent.copy()
+    out.pop("downscale_ratio_spacial", None)
+    out.pop("downscale_ratio_temporal", None)
+    out["samples"] = denoised
+
+    image_latent = out["samples"]
+    if image_latent.is_nested:
+        image_latent = image_latent.unbind()[0]
+    images = vae.decode(image_latent)
+    if len(images.shape) == 5:  # combinar batch 5D
+        images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+    return (images, out)
 
 
 class KSamplerVAEMika:
@@ -4817,38 +5004,139 @@ class KSamplerVAEMika:
 
     def sample(self, model, seed, steps, cfg, sampler_name, scheduler,
                positive, negative, latent_image, vae, denoise=1.0):
-        import latent_preview
-        import comfy.sample
-        import comfy.utils
+        return _mika_ksample_with_vae(
+            model, seed, steps, cfg, sampler_name, scheduler,
+            positive, negative, latent_image, vae, denoise, add_noise=True)
 
-        latent = latent_image.copy()
-        samples_in = comfy.sample.fix_empty_latent_channels(
-            model, latent["samples"],
-            latent.get("downscale_ratio_spacial"), latent.get("downscale_ratio_temporal"))
 
-        batch_inds = latent["batch_index"] if "batch_index" in latent else None
-        noise = comfy.sample.prepare_noise(samples_in, seed, batch_inds)
-        noise_mask = latent.get("noise_mask")
-        # Igual que el KSampler: preview del latente durante el muestreo.
-        callback = latent_preview.prepare_callback(model, steps)
-        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-        denoised = comfy.sample.sample(
-            model, noise, steps, cfg, sampler_name, scheduler, positive, negative,
-            samples_in, denoise=denoise, noise_mask=noise_mask, callback=callback,
-            disable_pbar=disable_pbar, seed=seed)
+class CustomSamplerSchedulerMika:
+    """Custom Sampler Scheduler-Mika: el Custom Sampler Tangent-Mika, pero
+    con combo de scheduler. Igual estructura (sampler + decode con el VAE
+    integrado, add_noise, preview del latente y los 7 ajustes de la curva
+    sigma plegados), solo que las sigmas salen del scheduler elegido del
+    menú de ComfyUI re-repartidas por la curva.
 
-        out = latent.copy()
-        out.pop("downscale_ratio_spacial", None)
-        out.pop("downscale_ratio_temporal", None)
-        out["samples"] = denoised
+    Entradas de conexión: model, positive, negative, latent_image, vae.
+    Salidas: image (IMAGE ya decodificada) y latent (LATENT).
+    """
 
-        image_latent = out["samples"]
-        if image_latent.is_nested:
-            image_latent = image_latent.unbind()[0]
-        images = vae.decode(image_latent)
-        if len(images.shape) == 5:  # combinar batch 5D
-            images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
-        return (images, out)
+    CATEGORY = "Mika Utilidades/sampling"
+    FUNCTION = "sample"
+    RETURN_TYPES = ("IMAGE", "LATENT")
+    RETURN_NAMES = ("image", "latent")
+    DESCRIPTION = (
+        "Como el Custom Sampler Tangent-Mika, pero con combo de scheduler: "
+        "elegís el sampler y cualquier scheduler del menú (normal, karras, "
+        "beta_1_1, shifted_tangent, los de otros custom nodes...) y la curva "
+        "sigma (start/middle/end + pivots/slopes) re-reparte ese schedule. "
+        "Genera el latente y lo decodifica con el VAE. Los ajustes de la "
+        "curva también aceptan los valores de un nodo Sigma Curve-Mika."
+    )
+    SEARCH_ALIASES = ["ksampler", "sampler", "scheduler", "vae", "decode",
+                      "txt2img", "img2img"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL", {"tooltip": "El modelo a muestrear."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
+                                 "control_after_generate": True,
+                                 "tooltip": "Semilla del ruido."}),
+                "steps": ("INT", {"default": 25, "min": 1, "max": 10000,
+                                  "tooltip": "Pasos de muestreo."}),
+                "cfg": ("FLOAT", {"default": 4.0, "min": 0.0, "max": 100.0, "step": 0.1,
+                                  "round": 0.01, "tooltip": "Escala de guidance (CFG)."}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,
+                                 {"default": "euler_ancestral",
+                                  "tooltip": "Algoritmo de muestreo."}),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,
+                              {"default": "normal",
+                               "tooltip": "Cómo se reparte el ruido entre los pasos. "
+                                          "Incluye los schedulers registrados por "
+                                          "otros custom nodes (shifted_tangent, beta_1_1...)."}),
+                "positive": ("CONDITIONING", {"tooltip": "Condicionamiento positivo."}),
+                "negative": ("CONDITIONING", {"tooltip": "Condicionamiento negativo."}),
+                "latent_image": ("LATENT", {"tooltip": "Latente a muestrear."}),
+                "vae": ("VAE", {"tooltip": "VAE para decodificar la imagen."}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                                      "tooltip": "Porción del schedule. 1 = desde ruido puro."}),
+                "add_noise": ("BOOLEAN", {"default": True,
+                                          "tooltip": "Agregar ruido antes de muestrear."}),
+            },
+            # Conectables: aceptan los valores de un nodo Sigma Curve-Mika y
+            # siguen teniendo su widget plegado cuando no están conectados.
+            "optional": {
+                **_mika_curve_input_types(
+                    tooltip="Re-reparto de las sigmas del scheduler (curva de dos etapas)."),
+                "preset": _mika_preset_input_type(),
+            },
+        }
+
+    def sample(self, model, seed, steps, cfg, sampler_name, scheduler,
+               positive, negative, latent_image, vae, denoise=1.0, add_noise=True,
+               start=None, middle=None, end=None, pivot_1=None, pivot_2=None,
+               slope_1=None, slope_2=None, preset="personalizado"):
+        start, middle, end, pivot_1, pivot_2, slope_1, slope_2 = _mika_curve_values(
+            start, middle, end, pivot_1, pivot_2, slope_1, slope_2, preset)
+
+        sigmas = _mika_scheduler_curve_sigmas(
+            model.get_model_object("model_sampling"), steps, denoise, scheduler,
+            start, middle, end, pivot_1, pivot_2, slope_1, slope_2)
+        return _mika_sample_custom_with_vae(
+            model, seed, cfg, sampler_name, sigmas, positive, negative,
+            latent_image, vae, add_noise)
+
+
+class SigmaCurveMika:
+    """Sigma Curve-Mika: los 7 ajustes de la curva sigma como salidas
+    conectables. Una sola curva alimenta varios Custom Sampler Tangent-Mika
+    / Scheduler-Mika (sus inputs avanzados aceptan estos valores)."""
+
+    CATEGORY = "Mika Utilidades/sampling"
+    FUNCTION = "get"
+    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT")
+    RETURN_NAMES = ("start", "middle", "end", "pivot_1", "pivot_2",
+                    "slope_1", "slope_2")
+    OUTPUT_TOOLTIPS = (
+        "Dónde arranca la curva (fracción del schedule).",
+        "Valor del tramo intermedio.",
+        "Dónde termina la curva (0 = sigma cero).",
+        "Centro de la primera etapa (arctan).",
+        "Centro de la segunda etapa (arctan).",
+        "Pendiente de la primera etapa.",
+        "Pendiente de la segunda etapa.",
+    )
+    DESCRIPTION = (
+        "Los ajustes de la curva sigma (dos etapas arctan) como salidas "
+        "FLOAT: conectalos a los inputs avanzados de uno o varios Custom "
+        "Sampler Tangent-Mika / Scheduler-Mika para usar la misma curva en "
+        "todos. Con None en un input conectado, cada sampler usa su default."
+    )
+    SEARCH_ALIASES = ["sampler", "scheduler", "curve", "sigma", "tangent"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        d = _MIKA_TANGENT_NODE_DEFAULTS
+        return {"required": {
+            "start": ("FLOAT", {"default": d["start"], "min": 0.0, "max": 1.0, "step": 0.01,
+                                "tooltip": "Dónde arranca la curva (fracción del schedule)."}),
+            "middle": ("FLOAT", {"default": d["middle"], "min": 0.0, "max": 1.0, "step": 0.01,
+                                 "tooltip": "Valor del tramo intermedio."}),
+            "end": ("FLOAT", {"default": d["end"], "min": 0.0, "max": 1.0, "step": 0.01,
+                              "tooltip": "Dónde termina la curva (0 = sigma cero)."}),
+            "pivot_1": ("FLOAT", {"default": d["pivot_1"], "min": 0.0, "max": 1.0, "step": 0.01,
+                                  "tooltip": "Centro de la primera etapa (arctan)."}),
+            "pivot_2": ("FLOAT", {"default": d["pivot_2"], "min": 0.0, "max": 1.0, "step": 0.01,
+                                  "tooltip": "Centro de la segunda etapa (arctan)."}),
+            "slope_1": ("FLOAT", {"default": d["slope_1"], "min": 0.01, "max": 10.0, "step": 0.01,
+                                  "tooltip": "Pendiente de la primera etapa."}),
+            "slope_2": ("FLOAT", {"default": d["slope_2"], "min": 0.01, "max": 10.0, "step": 0.01,
+                                  "tooltip": "Pendiente de la segunda etapa."}),
+        }}
+
+    def get(self, start, middle, end, pivot_1, pivot_2, slope_1, slope_2):
+        return (start, middle, end, pivot_1, pivot_2, slope_1, slope_2)
 
 
 class SamplerSelectorMika:
@@ -9571,6 +9859,8 @@ NODE_CLASS_MAPPINGS = {
     "SchedulerSelectorMika": SchedulerSelectorMika,
     "CustomSamplerTangentMika": CustomSamplerTangentMika,
     "KSamplerVAEMika": KSamplerVAEMika,
+    "CustomSamplerSchedulerMika": CustomSamplerSchedulerMika,
+    "SigmaCurveMika": SigmaCurveMika,
     "ImageSaveAutoMika": ImageSaveAutoMika,
     "IndexIntMika": IndexIntMika,
     "IndexStepperMika": IndexStepperMika,
@@ -9658,6 +9948,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SchedulerSelectorMika": "Scheduler Selector-Mika",
     "CustomSamplerTangentMika": "Custom Sampler Tangent-Mika",
     "KSamplerVAEMika": "KSampler VAE-Mika",
+    "CustomSamplerSchedulerMika": "Custom Sampler Scheduler-Mika",
+    "SigmaCurveMika": "Sigma Curve-Mika",
     "ImageSaveAutoMika": "Image Save Auto-Mika",
     "IndexIntMika": "Index Int-Mika",
     "IndexStepperMika": "Index Stepper-Mika",
