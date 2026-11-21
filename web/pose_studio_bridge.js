@@ -1928,28 +1928,17 @@ export async function openPoseStudio3D(node) {
 			start: pointerOnPlane(event, plane),
 		};
 		if (bone.name === "penis_tip") {
-			// El punto azul se lleva hasta el cursor: la dirección ancla→punta
-			// sigue al ratón en el plano de la cámara, sin ejes invertidos.
-			const pivot = bone.parent;
-			const anchor = new THREE.Vector3();
-			pivot.getWorldPosition(anchor);
-			const parentQ = new THREE.Quaternion();
-			pivot.parent.getWorldQuaternion(parentQ);
-			const throughAnchor = new THREE.Plane()
-				.setFromNormalAndCoplanarPoint(normal, anchor);
-			state.drag.plane = throughAnchor;
-			const tipWorld = new THREE.Vector3();
-			bone.getWorldPosition(tipWorld);
+			// El miembro es corto: el tirador está a ~17px del ancla en pantalla.
+			// "Apuntar hacia el cursor" amplificaba cada píxel ~13° y daba
+			// saltos bruscos. Se usa un mapeo proporcional del delta del ratón
+			// (como un control orbital): horizontal → guiño (Y), vertical →
+			// cabeceo (X), sin roll. Así responde igual que brazos y piernas.
 			const a0 = activeSlot(stateOf(node)).anatomy;
-			const q0 = new THREE.Quaternion()
-				.setFromAxisAngle(new THREE.Vector3(1, 0, 0), (a0.penisRotX || 0) * Math.PI / 180)
-				.multiply(new THREE.Quaternion().setFromAxisAngle(
-					new THREE.Vector3(0, 1, 0), (a0.penisRotY || 0) * Math.PI / 180))
-				.multiply(new THREE.Quaternion().setFromAxisAngle(
-					new THREE.Vector3(0, 0, 1), (a0.penisRotZ || 0) * Math.PI / 180));
 			state.drag.penis = {
-				anchor, parentQ, q: q0,
-				dir: tipWorld.sub(anchor).normalize(),
+				startX: event.clientX, startY: event.clientY,
+				rotX: a0.penisRotX || 0,
+				rotY: a0.penisRotY || 0,
+				rotZ: a0.penisRotZ || 0,
 			};
 		}
 		hit.mesh.material = hit.matActive;
@@ -1997,33 +1986,17 @@ export async function openPoseStudio3D(node) {
 		if (!raycaster.ray.intersectPlane(state.drag.plane, target)) return;
 
 		if (state.drag.penis) {
-			// Igual que los otros tiradores: rotación INCREMENTAL desde la
-			// dirección actual hasta el cursor. Nunca se calcula un ángulo
-			// absoluto desde el reposo, que daba saltos y marchas atrás al
-			// cruzar el ancla o cambiar de lado.
-			const drag = state.drag.penis;
-			const desired = target.clone().sub(drag.anchor);
-			if (desired.lengthSq() < 1e-6) return;
-			desired.normalize();
-			let dq = new THREE.Quaternion().setFromUnitVectors(drag.dir, desired);
-			const angle = 2 * Math.acos(Math.max(-1, Math.min(1, dq.w)));
-			if (angle < 0.02) return;
-			if (angle > 1.0) {
-				dq = new THREE.Quaternion().setFromAxisAngle(
-					new THREE.Vector3(dq.x, dq.y, dq.z).normalize(), 1.0);
-			}
-			// El delta se mide en mundo y se lleva al marco local del pelvis.
-			const inv = drag.parentQ.clone().invert();
-			const localDelta = inv.clone().multiply(dq).multiply(drag.parentQ);
-			const next = localDelta.multiply(drag.q).normalize();
-			const e = new THREE.Euler().setFromQuaternion(next, "XYZ");
+			// Mapeo directo y proporcional: cada píxel mueve el miembro un
+			// ángulo fijo, sin depender de lo corto que sea en pantalla ni de
+			// conversions quaternion→Euler que daban saltos de decenas de grados.
+			const d = state.drag.penis;
+			const SENS = 0.6; // grados por píxel
+			const clampAngle = (v) => Math.max(-180, Math.min(180, v));
 			const a = activeSlot(stateOf(node)).anatomy;
-			a.penisRotX = e.x * 180 / Math.PI;
-			a.penisRotY = e.y * 180 / Math.PI;
-			a.penisRotZ = e.z * 180 / Math.PI;
-			drag.q.copy(next);
-			drag.dir.copy(desired);
-			state.save();
+			a.penisRotY = clampAngle(d.rotY + (event.clientX - d.startX) * SENS);
+			// rotX positivo baja la punta: arriba (dy negativo) debe restar.
+			a.penisRotX = clampAngle(d.rotX + (event.clientY - d.startY) * SENS);
+			a.penisRotZ = d.rotZ;
 			queueRebuild();
 			requestRender();
 			return;
