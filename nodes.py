@@ -4471,8 +4471,14 @@ class AnimaResolutionsMika:
     en diferentes proporciones de aspecto.
     Basado en https://github.com/cyberdelailAI/ComfyUI-anima-Resolutions
 
-    Con random=True, selecciona una resolución aleatoria de la lista.
-    Con random=False, usa el ratio seleccionado manualmente.
+    El widget "control_after_generate" (como el de los nodos INT/seed) decide
+    qué hacer con el ratio después de cada generación:
+      - fixed: mantiene el ratio elegido.
+      - increment: avanza al siguiente de la lista (ordenado por ancho).
+      - decrement: retrocede al anterior.
+      - randomize: elige uno al azar.
+    El frontend cambia el valor del ratio antes de encolar, así que cada
+    ejecución usa la resolución resultante sin lógica extra en el backend.
     """
 
     # Resoluciones de ~1 MP válidas para Anima (todas múltiplo de 16), ordenadas
@@ -4507,8 +4513,15 @@ class AnimaResolutionsMika:
 
         return {
             "required": {
-                "ratio": (ratios, {"default": "1024x1024 (1:1)"}),
-                "random": ("BOOLEAN", {"default": False}),
+                "ratio": (ratios, {
+                    "default": "1024x1024 (1:1)",
+                    # El frontend añade el combo fixed/increment/decrement/
+                    # randomize y mueve "ratio" después de cada generación.
+                    "control_after_generate": "fixed",
+                    "tooltip":
+                        "Resolución Anima. El modo junto al widget controla si "
+                        "se mantiene, avanza, retrocede o se aleatoriza al generar.",
+                }),
             },
         }
 
@@ -4517,42 +4530,16 @@ class AnimaResolutionsMika:
     FUNCTION = "get_dimensions"
     CATEGORY = "Mika Utilidades/resolucion"
 
-    def get_dimensions(self, ratio, random=False):
-        ratios = self.RESOLUTIONS["1024"]
-
-        # Lectura defensiva del boolean (por si viene linkeado como string)
-        if isinstance(random, str):
-            random = random.strip().lower() in ("true", "1", "yes", "on")
-        else:
-            random = bool(random)
-
-        if random:
-            selected_ratio = random_module.choice(ratios)
-        else:
-            selected_ratio = ratio
-
-        dimensions = selected_ratio.split(" ")[0]
+    def get_dimensions(self, ratio):
+        dimensions = ratio.split(" ")[0]
         width, height = dimensions.split("x")
-
         return (int(width), int(height))
 
     @classmethod
-    def IS_CHANGED(cls, ratio, random=False):
-        """
-        Cuando random=True, devuelve NaN para que ComfyUI NO cachee el
-        resultado y re-ejecute el nodo en cada generación, obteniendo
-        una resolución aleatoria nueva cada vez.
-
-        Cuando random=False, el resultado es determinista y cacheable.
-        """
-        if isinstance(random, str):
-            random = random.strip().lower() in ("true", "1", "yes", "on")
-        else:
-            random = bool(random)
-
-        if random:
-            return float("nan")
-
+    def IS_CHANGED(cls, ratio):
+        # Con control_after_generate el propio frontend modifica `ratio`
+        # después de encolar: si cambió, este valor cambia y el nodo se
+        # re-ejecuta; con "fixed" se queda cacheado como cualquier nodo INT.
         return ratio
 
 
