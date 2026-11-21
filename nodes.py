@@ -4673,6 +4673,13 @@ _MIKA_TANGENT_PRESETS = {
     # bong raw (fracciones directas). Calibrado para shift 3; error medio
     # ~0.01 sigmas y válido de 12 a 50 pasos.
     "bong (simulado)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.22, 0.0, 0.65, 0.55, 0.10, 0.20))),
+    # Bong con la cola mas suave: baja el salto en sigma media-baja (el que
+    # desarma manos, dedos y pies) de 0.140 a 0.102 y el de la cola de 0.087
+    # a 0.053, conservando el "middle" bajo y el pivot alto del bong.
+    "bong (estable)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.24, 0.0, 0.62, 0.58, 0.07, 0.05))),
+    # Variante del artistico con un poco mas de expresion de estilo (middle y
+    # slope_1 mas altos) sin repetir ninguna tupla de los otros presets.
+    "artístico 2": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.52, 0.0, 0.62, 0.52, 0.22, 0.06))),
 }
 _MIKA_TANGENT_PRESET_NAMES = list(_MIKA_TANGENT_PRESETS)
 

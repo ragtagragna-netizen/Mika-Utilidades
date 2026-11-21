@@ -147,7 +147,7 @@ También ojo con el **trazo vacío**: si no dibujás nada y `FUERZA DEL TRAZO` e
 ## Notas
 
 - El workflow `workflows/custom_samplers_schedulers_mika.json` trae **un nodo por cada scheduler** del menú (los 7 del core + `beta_1_1` y `shifted_tangent`), todos con sus valores por default y alimentados por una única **Sigma Curve-Mika**, para compararlos de un vistazo.
-- Los samplers con curva (Tangent y Scheduler) traen un **combo de presets** junto a la barra de ajustes avanzados: `estable`, `medio`, `más tags`, `artístico` (meseta del shifted tangent con refino suave), `original` (defaults de RES4LYF/WAS) y `bong (simulado)` (imita al bong raw invirtiendo el shift del modelo), entre otros. Elegir uno escribe los 7 ajustes; tocar cualquiera vuelve a `personalizado`.
+- Los samplers con curva (Tangent y Scheduler) traen un **combo de presets** junto a la barra de ajustes avanzados: `estable`, `medio`, `más tags`, `artístico` (meseta del shifted tangent con refino suave), `original` (defaults de RES4LYF/WAS), `bong (simulado)` (imita al bong raw invirtiendo el shift del modelo), `bong (estable)` (variante con la cola más suave para manos, dedos y pies) y `artístico 2` (más expresión de estilo), entre otros. Elegir uno escribe los 7 ajustes; tocar cualquiera vuelve a `personalizado`.
 - El paquete **registra el scheduler `shifted_tangent`** (el del *Custom Sampler Tangent-Mika*) en el menú de schedulers de ComfyUI, con su propia matemática: los KSampler lo pueden usar **sin was-node-suite**. Si WAS está instalado, se respeta el que cargue primero (la curva es la misma), así que no se duplica.
 - Los nodos con avance (steppers, index) persisten su posición en el workflow.
 - Si instalás extensiones con samplers/schedulers nuevos, reiniciá ComfyUI

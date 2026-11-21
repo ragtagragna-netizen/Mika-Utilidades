@@ -88,6 +88,10 @@ const PRESETS = {
   // Bong simulado con la curva del modelo (shift 3 de Anima): imita al
   // bong raw con error ~0.01 sigmas, de 12 a 50 pasos.
   "bong (simulado)": { start: 1.0, middle: 0.22, end: 0.0, pivot_1: 0.65, pivot_2: 0.55, slope_1: 0.10, slope_2: 0.20 },
+  // Bong con cola mas suave para manos/dedos/pies (salto 0.140 -> 0.102).
+  "bong (estable)": { start: 1.0, middle: 0.24, end: 0.0, pivot_1: 0.62, pivot_2: 0.58, slope_1: 0.07, slope_2: 0.05 },
+  // Artistico con un poco mas de expresion de estilo.
+  "artístico 2": { start: 1.0, middle: 0.52, end: 0.0, pivot_1: 0.62, pivot_2: 0.52, slope_1: 0.22, slope_2: 0.06 },
 };
 
 function widgetNamed(node, name) {
