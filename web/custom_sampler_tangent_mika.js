@@ -94,6 +94,9 @@ const PRESETS = {
   "artístico 2": { start: 1.0, middle: 0.52, end: 0.0, pivot_1: 0.62, pivot_2: 0.52, slope_1: 0.22, slope_2: 0.06 },
   // 50/50 entre bong (estable) y artístico 2: estilo + obediencia al prompt.
   "equilibrado": { start: 1.0, middle: 0.38, end: 0.0, pivot_1: 0.62, pivot_2: 0.55, slope_1: 0.15, slope_2: 0.06 },
+  // Del equilibrado: arranque y cota final ligeramente por debajo del ruido
+  // puro. Colores mas mates y cola de refino suave (menos dedos extra).
+  "natural": { start: 0.98, middle: 0.36, end: 0.002, pivot_1: 0.58, pivot_2: 0.52, slope_1: 0.14, slope_2: 0.045 },
 };
 
 function widgetNamed(node, name) {

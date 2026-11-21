@@ -4671,6 +4671,10 @@ _MIKA_TANGENT_PRESETS = {
     # meseta artística del primero, gana obediencia al prompt del segundo y
     # sigue con la cola suave (salto max 0.102, cola 0.065 en Anima 25 pasos).
     "equilibrado": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.38, 0.0, 0.62, 0.55, 0.15, 0.06))),
+    # Deriva del equilibrado con arranque y cota final apenas por debajo del
+    # ruido puro: menos acabado "plástico", color más mates y cola de refino
+    # más suave para no inventar dedos en manos y pies.
+    "natural": dict(zip(_MIKA_TANGENT_KEYS, (0.98, 0.36, 0.002, 0.58, 0.52, 0.14, 0.045))),
 }
 _MIKA_TANGENT_PRESET_NAMES = list(_MIKA_TANGENT_PRESETS)
 
