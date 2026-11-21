@@ -881,10 +881,34 @@ export async function openPoseStudio3D(node) {
 			try { state.gizmoResources?.forEach((r) => r.dispose()); } catch (e) { /* no-op */ }
 			try { orbit.dispose(); } catch (e) { /* no-op */ }
 			try { renderer.dispose(); } catch (e) { /* no-op */ }
+			if (state.outsideHandler) {
+				document.removeEventListener("pointerdown", state.outsideHandler, true);
+				state.outsideHandler = null;
+			}
 			ui.root.remove();
 		},
 	};
 	active = state;
+
+	// Clic fuera = cerrar (misma edición que la ✕: guarda cámara y geometría).
+	// Se excluyen el propio estudio (incluido el popup de dedos), el nodo que
+	// lo abrió, su editor flotante y el botón 🧊, para que sigan utilizables.
+	// El evento no se consume: el clic hace su acción normal en ComfyUI.
+	const onDocDown = (e) => {
+		if (active !== state) return;
+		const t = e.target;
+		if (!(t instanceof Node)) return;
+		if (ui.root.contains(t)) return;
+		if (t.nodeType !== 1) return;
+		if (t.closest('[data-mika="pose-studio-3d-root"]')) return;
+		if (t.closest('[data-mika-pose-studio-toggle]')) return;
+		if (t.closest('[data-mika="editor-root"]')) return;
+		const stage = node._mikaLineart?.surfaceNode?.stage;
+		if (stage?.contains(t)) return;
+		closePoseStudio3D();
+	};
+	document.addEventListener("pointerdown", onDocDown, true);
+	state.outsideHandler = onDocDown;
 
 	// Tres flechas en la esquina de la base azul para mover el personaje.
 	// Viven en handlesGroup, así que la captura las oculta igual que los puntos.

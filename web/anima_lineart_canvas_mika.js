@@ -1681,6 +1681,7 @@ app.registerExtension({
 			};
 			const pose3dBtn = mkButton(
 				"🧊", "Abrir Pose Studio 3D: maniquí anatómico, articulaciones y cámara");
+			pose3dBtn.dataset.mikaPoseStudioToggle = "1";
 			pose3dBtn.onclick = async () => {
 				try {
 					const bridge = await import("./pose_studio_bridge.js");
