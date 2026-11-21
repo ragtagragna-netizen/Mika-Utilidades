@@ -92,6 +92,8 @@ const PRESETS = {
   "bong (estable)": { start: 1.0, middle: 0.24, end: 0.0, pivot_1: 0.62, pivot_2: 0.58, slope_1: 0.07, slope_2: 0.05 },
   // Artistico con un poco mas de expresion de estilo.
   "artístico 2": { start: 1.0, middle: 0.52, end: 0.0, pivot_1: 0.62, pivot_2: 0.52, slope_1: 0.22, slope_2: 0.06 },
+  // 50/50 entre bong (estable) y artístico 2: estilo + obediencia al prompt.
+  "equilibrado": { start: 1.0, middle: 0.38, end: 0.0, pivot_1: 0.62, pivot_2: 0.55, slope_1: 0.15, slope_2: 0.06 },
 };
 
 function widgetNamed(node, name) {
