@@ -97,6 +97,8 @@ const PRESETS = {
   // Del equilibrado: arranque y cota final ligeramente por debajo del ruido
   // puro. Colores mas mates y cola de refino suave (menos dedos extra).
   "natural": { start: 0.98, middle: 0.36, end: 0.002, pivot_1: 0.58, pivot_2: 0.52, slope_1: 0.14, slope_2: 0.045 },
+  // Mas suave que natural: pendientes/pivotes bajos, salto max 0.087.
+  "suave": { start: 0.97, middle: 0.34, end: 0.002, pivot_1: 0.55, pivot_2: 0.50, slope_1: 0.10, slope_2: 0.03 },
 };
 
 function widgetNamed(node, name) {

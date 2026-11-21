@@ -4675,6 +4675,9 @@ _MIKA_TANGENT_PRESETS = {
     # ruido puro: menos acabado "plástico", color más mates y cola de refino
     # más suave para no inventar dedos en manos y pies.
     "natural": dict(zip(_MIKA_TANGENT_KEYS, (0.98, 0.36, 0.002, 0.58, 0.52, 0.14, 0.045))),
+    # Variante mas suave que "natural": pendientes y pivotes mas bajos. El
+    # salto maximo baja de 0.104 a 0.087 manteniendo los 4 pasos de detalle.
+    "suave": dict(zip(_MIKA_TANGENT_KEYS, (0.97, 0.34, 0.002, 0.55, 0.50, 0.10, 0.03))),
 }
 _MIKA_TANGENT_PRESET_NAMES = list(_MIKA_TANGENT_PRESETS)
 
