@@ -99,6 +99,11 @@ const PRESETS = {
   "natural": { start: 0.98, middle: 0.36, end: 0.002, pivot_1: 0.58, pivot_2: 0.52, slope_1: 0.14, slope_2: 0.045 },
   // Mas suave que natural: pendientes/pivotes bajos, salto max 0.087.
   "suave": { start: 0.97, middle: 0.34, end: 0.002, pivot_1: 0.55, pivot_2: 0.50, slope_1: 0.10, slope_2: 0.03 },
+  // Igual que artistico 2 pero con slope_2=0.10: mas pasos de sigma baja
+  // para dedos y cola menos brusca.
+  "artístico 2 (dedos)": { start: 1.0, middle: 0.52, end: 0.0, pivot_1: 0.62, pivot_2: 0.52, slope_1: 0.22, slope_2: 0.10 },
+  // Igual que artistico 2 (dedos) con slope_1 = 0.26: mas meseta creativa.
+  "artístico 2 (creativo)": { start: 1.0, middle: 0.52, end: 0.0, pivot_1: 0.62, pivot_2: 0.52, slope_1: 0.26, slope_2: 0.10 },
 };
 
 function widgetNamed(node, name) {

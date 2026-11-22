@@ -4678,6 +4678,14 @@ _MIKA_TANGENT_PRESETS = {
     # Variante mas suave que "natural": pendientes y pivotes mas bajos. El
     # salto maximo baja de 0.104 a 0.087 manteniendo los 4 pasos de detalle.
     "suave": dict(zip(_MIKA_TANGENT_KEYS, (0.97, 0.34, 0.002, 0.55, 0.50, 0.10, 0.03))),
+    # Refinamiento de "artístico 2" manteniendo TODOS sus valores salvo
+    # slope_2: 0.06 -> 0.10. Refina los dedos con mas pasos de sigma baja
+    # (3 -> 4) y cola menos brusca (salto 0.088 -> 0.075).
+    "artístico 2 (dedos)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.52, 0.0, 0.62, 0.52, 0.22, 0.10))),
+    # Igual que "artístico 2 (dedos)" pero con slope_1 = 0.26: meseta mas
+    # larga en ruido alto (un poco mas de creatividad) manteniendo los 4
+    # pasos de detalle y la misma cola de refino (0.075).
+    "artístico 2 (creativo)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.52, 0.0, 0.62, 0.52, 0.26, 0.10))),
 }
 _MIKA_TANGENT_PRESET_NAMES = list(_MIKA_TANGENT_PRESETS)
 
