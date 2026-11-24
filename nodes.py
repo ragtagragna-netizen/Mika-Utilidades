@@ -4692,6 +4692,10 @@ _MIKA_TANGENT_PRESETS = {
     "artístico (manos)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.50, 0.0, 0.60, 0.50, 0.20, 0.08))),
     "bong (manos)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.24, 0.0, 0.62, 0.55, 0.07, 0.08))),
     "equilibrado (manos)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.38, 0.0, 0.62, 0.50, 0.15, 0.08))),
+    # Igual que "bong (manos)" pero solo con start y end reducidos: arranque
+    # 0.98 y cota final 0.002 (sigma residual ~0.006). Es el ajuste anti
+    # plástico: colores y piel más mates, sin tocar la curva de refino.
+    "bong (natural)": dict(zip(_MIKA_TANGENT_KEYS, (0.98, 0.24, 0.002, 0.62, 0.55, 0.07, 0.08))),
 }
 _MIKA_TANGENT_PRESET_NAMES = list(_MIKA_TANGENT_PRESETS)
 

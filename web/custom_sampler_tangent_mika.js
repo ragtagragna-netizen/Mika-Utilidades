@@ -109,6 +109,8 @@ const PRESETS = {
   "artístico (manos)": { start: 1.0, middle: 0.50, end: 0.0, pivot_1: 0.60, pivot_2: 0.50, slope_1: 0.20, slope_2: 0.08 },
   "bong (manos)": { start: 1.0, middle: 0.24, end: 0.0, pivot_1: 0.62, pivot_2: 0.55, slope_1: 0.07, slope_2: 0.08 },
   "equilibrado (manos)": { start: 1.0, middle: 0.38, end: 0.0, pivot_1: 0.62, pivot_2: 0.50, slope_1: 0.15, slope_2: 0.08 },
+  // Igual que bong (manos) pero con start/end reducidos: menos plastico.
+  "bong (natural)": { start: 0.98, middle: 0.24, end: 0.002, pivot_1: 0.62, pivot_2: 0.55, slope_1: 0.07, slope_2: 0.08 },
 };
 
 function widgetNamed(node, name) {
