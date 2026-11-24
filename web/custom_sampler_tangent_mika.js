@@ -104,6 +104,11 @@ const PRESETS = {
   "artístico 2 (dedos)": { start: 1.0, middle: 0.52, end: 0.0, pivot_1: 0.62, pivot_2: 0.52, slope_1: 0.22, slope_2: 0.10 },
   // Igual que artistico 2 (dedos) con slope_1 = 0.26: mas meseta creativa.
   "artístico 2 (creativo)": { start: 1.0, middle: 0.52, end: 0.0, pivot_1: 0.62, pivot_2: 0.52, slope_1: 0.26, slope_2: 0.10 },
+  // Refinamientos para manos y pies (sin dedos extras), conservando los
+  // colores, la representacion del artista y la creatividad de cada base.
+  "artístico (manos)": { start: 1.0, middle: 0.50, end: 0.0, pivot_1: 0.60, pivot_2: 0.50, slope_1: 0.20, slope_2: 0.08 },
+  "bong (manos)": { start: 1.0, middle: 0.24, end: 0.0, pivot_1: 0.62, pivot_2: 0.55, slope_1: 0.07, slope_2: 0.08 },
+  "equilibrado (manos)": { start: 1.0, middle: 0.38, end: 0.0, pivot_1: 0.62, pivot_2: 0.50, slope_1: 0.15, slope_2: 0.08 },
 };
 
 function widgetNamed(node, name) {

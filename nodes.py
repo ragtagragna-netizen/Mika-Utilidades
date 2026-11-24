@@ -4686,6 +4686,12 @@ _MIKA_TANGENT_PRESETS = {
     # larga en ruido alto (un poco mas de creatividad) manteniendo los 4
     # pasos de detalle y la misma cola de refino (0.075).
     "artístico 2 (creativo)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.52, 0.0, 0.62, 0.52, 0.26, 0.10))),
+    # Refinamientos para manos y pies (sin dedos extras), conservando los
+    # colores, la representacion del artista y la creatividad de cada base:
+    # sube slope_2 y baja pivot_2 para sumar pasos de sigma baja.
+    "artístico (manos)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.50, 0.0, 0.60, 0.50, 0.20, 0.08))),
+    "bong (manos)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.24, 0.0, 0.62, 0.55, 0.07, 0.08))),
+    "equilibrado (manos)": dict(zip(_MIKA_TANGENT_KEYS, (1.0, 0.38, 0.0, 0.62, 0.50, 0.15, 0.08))),
 }
 _MIKA_TANGENT_PRESET_NAMES = list(_MIKA_TANGENT_PRESETS)
 
