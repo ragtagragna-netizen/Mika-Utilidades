@@ -7,16 +7,17 @@
 // espalda y las caderas el estómago.
 
 export const ANATOMY_KEYS = [
-	"age", "weight", "height", "width", "bust", "firmness", "waist", "stomach", "hips", "glutes",
-	"armLength", "legLength", "armThickness", "thighThickness",
-	"calfThickness", "handSize", "footSize", "handGripL", "handGripR",
+	"age", "weight", "height", "width", "bust", "firmness", "waist", "stomach", "hips", "glutes", "gluteWidth", "gluteHeight",
+	"armLength", "legLength", "armThickness", "thighThickness", "thighLength",
+	"calfThickness", "calfLength", "handSize", "footSize", "handGripL", "handGripR",
 	"handLSpread", "handLThumb", "handLIndex", "handLMiddle", "handLRing", "handLPinky",
 	"handRSpread", "handRThumb", "handRIndex", "handRMiddle", "handRRing", "handRPinky",
 	"handLPosX", "handLPosY", "handLPosZ",
 	"handRPosX", "handRPosY", "handRPosZ",
-	"handLRotX", "handLRotY", "handLRotZ",
-	"handRRotX", "handRRotY", "handRRotZ",
+	"handLRotX", "handLRotY", "handLRotZ", "handLTwist",
+	"handRRotX", "handRRotY", "handRRotZ", "handRTwist",
 	"footRotX", "footRotY", "footRotZ",
+	"headRotX", "headRotY", "headRotZ",
 	"headSize", "genitalSize", "openingSize", "anusSize",
 	"penisLength", "penisGirth",
 ];
@@ -25,9 +26,11 @@ export const ANATOMY_KEYS = [
 // para que no queden valores del maniquí anterior.
 const preset = (o = {}) => ({
 	gender: 0, age: 30, weight: 0.5, height: 0.6, width: 0.5,
-	bust: 0.5, firmness: 0.5, waist: 0.5, stomach: 0.5, hips: 0.5, glutes: 0.5,
+	bust: 0.5, firmness: 0.5, waist: 0.5, stomach: 0.5, hips: 0.5,
+	glutes: 0.5, gluteWidth: 0.5, gluteHeight: 0.5,
 	armLength: 0.5, legLength: 0.5, armThickness: 0.5,
-	thighThickness: 0.5, calfThickness: 0.5, handSize: 0.5, footSize: 0.5,
+	thighThickness: 0.5, thighLength: 0.5, calfThickness: 0.5, calfLength: 0.5,
+	handSize: 0.5, footSize: 0.5,
 	handGripL: 0.5, handGripR: 0.5,
 	handLSpread: 0.5, handLThumb: 0.25, handLIndex: 0.25, handLMiddle: 0.25,
 	handLRing: 0.25, handLPinky: 0.25,
@@ -35,9 +38,10 @@ const preset = (o = {}) => ({
 	handRRing: 0.25, handRPinky: 0.25,
 	handLPosX: 0, handLPosY: 0, handLPosZ: 0,
 	handRPosX: 0, handRPosY: 0, handRPosZ: 0,
-	handLRotX: 0, handLRotY: 0, handLRotZ: 0,
-	handRRotX: 0, handRRotY: 0, handRRotZ: 0,
+	handLRotX: 0, handLRotY: 0, handLRotZ: 0, handLTwist: 0,
+	handRRotX: 0, handRRotY: 0, handRRotZ: 0, handRTwist: 0,
 	footRotX: 0, footRotY: 0, footRotZ: 0,
+	headRotX: 0, headRotY: 0, headRotZ: 0,
 	headSize: 0.45, genitalSize: 0.5, openingSize: 0.5, anusSize: 0.5,
 	penisLength: 0.5, penisGirth: 0.5,
 	...o,
@@ -112,6 +116,17 @@ export const BODY_PRESETS = {
 	body_16: preset({ bust: 0.8, waist: 0.5, stomach: 1.3, hips: 1.2, glutes: 0.9, thighThickness: 0.8, armThickness: 0.6, height: 0.56 }), // Barriga redonda
 	body_17: preset({ bust: 1.8, waist: 0.7, stomach: 1.0, hips: 1.6, glutes: 1.4, thighThickness: 1.3, armThickness: 0.95, height: 0.6 }), // Ancha y maciza
 	body_18: preset({ bust: 1.5, waist: 1.0, stomach: 0.7, hips: 2.1, glutes: 1.9, thighThickness: 1.4, armThickness: 0.7, height: 0.58 }), // Caderas xx
+	// Referencias de silueta (anime hourglass/pera). Objetivo alcanzable a media
+	// escala; hasta 2.5 el recorrido los supera ampliamente.
+	ref_hourglass: preset({ gender: 0, height: 0.66, bust: 1.3,
+		waist: 0.15, stomach: 0.35, hips: 1.15, glutes: 1.1, thighThickness: 0.85,
+		armThickness: 0.4, legLength: 0.72, headSize: 0.42 }),
+	ref_pear: preset({ gender: 0, height: 0.62, bust: 0.9,
+		waist: 0.2, stomach: 0.4, hips: 1.4, glutes: 1.35, thighThickness: 1.15,
+		armThickness: 0.4, legLength: 0.66, headSize: 0.45 }),
+	ref_extreme: preset({ gender: 0, height: 0.68, bust: 1.9,
+		waist: 0.05, stomach: 0.35, hips: 1.9, glutes: 1.8, thighThickness: 1.3,
+		armThickness: 0.45, legLength: 0.78, headSize: 0.42 }),
 };
 
 const clamp01 = (v) => Math.min(1, Math.max(0, Number(v) || 0));
@@ -154,11 +169,15 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 		stomach: size("stomach"),
 		hips: size("hips"),
 		glutes: size("glutes"),
+		gluteWidth: size("gluteWidth"),
+		gluteHeight: size("gluteHeight"),
 		armLength: size("armLength"),
 		legLength: size("legLength"),
 		armThickness: size("armThickness"),
 		thighThickness: size("thighThickness"),
+		thighLength: size("thighLength"),
 		calfThickness: size("calfThickness"),
+		calfLength: size("calfLength"),
 		handSize: size("handSize"),
 		footSize: size("footSize"),
 		handGripL: size("handGripL"),
@@ -172,7 +191,7 @@ export function applyAnatomy(anatomy = {}, base = {}) {
 		penisRotY: Number(anatomy.penisRotY ?? 0),
 		penisRotZ: Number(anatomy.penisRotZ ?? 0),
 		// El morph nativo llega a 1; por encima el target procedural escala
-		// el miembro hasta ×1.5 de largo y ×3 de grosor en el slider 2.5.
+		// el miembro hasta ×2 de largo y ×5 de grosor en el slider 2.5.
 		penisLength: Number(anatomy.penisLength ?? 0.5),
 		penisGirth: Number(anatomy.penisGirth ?? 0.5),
 	};

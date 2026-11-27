@@ -9,7 +9,14 @@ import {
 	loadMorphPack, solveMorph, buildStaticModelData,
 } from "./pose_studio/morph_runtime.mjs";
 import { applyAnatomy, BODY_PRESETS } from "./pose_studio_anatomy.js";
-import { buildCustomMorphs } from "./pose_studio_morphs.js";
+import { adjustLimbLengthBonePositions, buildCustomMorphs } from "./pose_studio_morphs.js";
+import { attachShoulderCorrectives } from "./pose_studio_pose_correctives.js";
+import { applyAgeProportions } from "./pose_studio_proportions.js";
+import { createPovAnchor, updatePovCamera } from "./pose_studio_pov.js";
+import {
+	BODY_VISIBILITY_KEYS, bodyZoneForBone, createDefaultBodyVisibility,
+	filterVisibleBodyIndices, isVisibleBodyBone,
+} from "./pose_studio_visibility.js";
 
 // Rango de desplazamiento del personaje. Antes era ±8 en X/Z y ±3 en Y,
 // demasiado corto para armar una escena; ahora es prácticamente libre.
@@ -50,8 +57,9 @@ const buttonCss =
 // morph que daba un cuerpo plano y sin pecho.
 const DEFAULT_ANATOMY = {
 	gender: 0, age: 30, weight: 0.5,
-	bust: 0.75, waist: 0.35, stomach: 0.5,
-	hips: 0.65, glutes: 0.6, headSize: 0.45,
+	bust: 0.75, firmness: 0.5, waist: 0.35, stomach: 0.5,
+	hips: 0.65, glutes: 0.6, gluteWidth: 0.5, gluteHeight: 0.5, headSize: 0.45,
+	thighLength: 0.5, calfLength: 0.5,
 	handGripL: 0.5, handGripR: 0.5, handSize: 0.5, footSize: 0.5,
 	handLSpread: 0.5, handLThumb: 0.25, handLIndex: 0.25, handLMiddle: 0.25,
 	handLRing: 0.25, handLPinky: 0.25,
@@ -59,9 +67,10 @@ const DEFAULT_ANATOMY = {
 	handRRing: 0.25, handRPinky: 0.25,
 	handLPosX: 0, handLPosY: 0, handLPosZ: 0,
 	handRPosX: 0, handRPosY: 0, handRPosZ: 0,
-	handLRotX: 0, handLRotY: 0, handLRotZ: 0,
-	handRRotX: 0, handRRotY: 0, handRRotZ: 0,
+	handLRotX: 0, handLRotY: 0, handLRotZ: 0, handLTwist: 0,
+	handRRotX: 0, handRRotY: 0, handRRotZ: 0, handRTwist: 0,
 	footRotX: 0, footRotY: 0, footRotZ: 0,
+	headRotX: 0, headRotY: 0, headRotZ: 0,
 	penisLength: 0.5, penisGirth: 0.5,
 };
 
@@ -72,7 +81,7 @@ const DEFAULT_ANATOMY = {
 const FINGERS = ["index", "middle", "ring", "pinky", "thumb"];
 const PHALANGES = ["01", "02", "03"];
 const PROCEDURAL_BONES = new Set([
-	"hand_l", "hand_r", "foot_l", "foot_r", "penis", "penis_tip",
+	"hand_l", "hand_r", "foot_l", "foot_r", "head", "penis", "penis_tip",
 ]);
 for (const finger of FINGERS) {
 	for (const ph of PHALANGES) {
@@ -144,6 +153,7 @@ function defaultSlot(anatomy, nsfw) {
 		pose: {},
 		offset: [0, 0, 0],
 		rotationY: 0,
+		visibility: createDefaultBodyVisibility(),
 		nsfw: !!nsfw,
 	};
 }
@@ -204,6 +214,9 @@ function stateOf(node) {
 			slot.offset = [o[0] || 0, o[1] || 0, o[2] || 0];
 		}
 		if (typeof slot.rotationY !== "number") slot.rotationY = 0;
+		const visibility = slot.visibility || {};
+		slot.visibility = Object.fromEntries(
+			BODY_VISIBILITY_KEYS.map((key) => [key, visibility[key] !== false]));
 	}
 	st.characters = st.slots.length;
 	st.selected = Math.max(0, Math.min(st.slots.length - 1, Number(st.selected) || 0));
@@ -226,6 +239,20 @@ function morphParams(slot) {
 	return params;
 }
 
+function characterGeometrySignature(params, visibility) {
+	// Manos, cabeza y dedos articulan huesos; no deben volver a mallar el cuerpo.
+	const { handGripL, handGripR, ...localDeform } = params.localDeform || {};
+	return JSON.stringify({
+		...params,
+		visibility,
+		localDeform,
+		rawAnatomy: {
+			bust: params.rawAnatomy?.bust,
+			height: params.rawAnatomy?.height,
+		},
+	});
+}
+
 function boundsY(vertices) {
 	let minY = Infinity, maxY = -Infinity;
 	for (let i = 1; i < vertices.length; i += 3) {
@@ -233,6 +260,38 @@ function boundsY(vertices) {
 		if (vertices[i] > maxY) maxY = vertices[i];
 	}
 	return { minY, maxY };
+}
+
+// BufferGeometry.computeBoundingBox incluye también vértices huérfanos del
+// índice. Esta caja usa solo triángulos visibles para cámara, selección y gizmo.
+function visibleMeshBox(mesh) {
+	const box = new THREE.Box3();
+	const position = mesh.geometry?.attributes?.position;
+	if (!position) return box;
+	const index = mesh.geometry.index?.array;
+	const point = new THREE.Vector3();
+	if (index) {
+		for (const v of index) box.expandByPoint(point.fromBufferAttribute(position, v));
+	} else {
+		for (let v = 0; v < position.count; v++) box.expandByPoint(point.fromBufferAttribute(position, v));
+	}
+	return box.applyMatrix4(mesh.matrixWorld);
+}
+
+function visibleBoneNames(mesh) {
+	const names = new Set();
+	const index = mesh.geometry?.index?.array;
+	const skinIndex = mesh.geometry?.attributes?.skinIndex;
+	const skinWeight = mesh.geometry?.attributes?.skinWeight;
+	if (!index || !skinIndex || !skinWeight) return names;
+	for (const v of index) {
+		for (let k = 0; k < 4; k++) {
+			if (skinWeight.getComponent(v, k) <= 0.01) continue;
+			const bone = mesh.skeleton?.bones?.[skinIndex.getComponent(v, k)];
+			if (bone) names.add(bone.name);
+		}
+	}
+	return names;
 }
 
 // Textura de lineart para los volúmenes íntimos: sobre fondo blanco, trazos
@@ -306,42 +365,56 @@ function outlineWidthFor(camera, target, viewportPx, px = 1.6) {
 	return px * worldPerPx;
 }
 
-function buildCharacter(pack, params, pose) {
+function solveCharacterGeometry(pack, params, visibility) {
 	const solved = solveMorph(pack, params);
 	const staticData = buildStaticModelData(pack, solved.includeGenitals);
-	const shape = buildCustomMorphs(pack, solved, staticData, params);
+	applyAgeProportions(pack, solved, staticData, params);
+	const originalBonePositions = solved.bonePositions.slice();
+	const originalMinY = boundsY(solved.vertices).minY;
+	buildCustomMorphs(pack, solved, staticData, params);
+	const boneNames = pack.bones.map((b) => b.name);
+	adjustLimbLengthBonePositions(solved.bonePositions, boneNames, params.localDeform);
+	const visibleIndices = filterVisibleBodyIndices(
+		staticData.indices, staticData.skinIndices, staticData.skinWeights,
+		boneNames, visibility, pack.genitalIndices);
+	const height = boundsY(solved.vertices);
+	const heightUnits = Math.max(0.001, height.maxY - height.minY);
+
+	// Los pivotes reciben exactamente los mismos residuos que los vértices.
+	const hd = params.localDeform?.height ?? 0.5;
+	const hExtra = hd > 1 ? hd - 1 : hd < 0 ? hd : 0;
+	const hStretch = 1 + hExtra * 0.22;
+	if (hStretch !== 1) {
+		for (let i = 0; i < solved.bonePositions.length; i += 6) {
+			solved.bonePositions[i + 1] += (originalBonePositions[i + 1] - originalMinY) * (hStretch - 1);
+			solved.bonePositions[i + 4] += (originalBonePositions[i + 4] - originalMinY) * (hStretch - 1);
+		}
+	}
+	const wStretch = 1 + ((params.localDeform?.width ?? 0.5) - 0.5) * 0.45;
+	if (wStretch !== 1) {
+		for (let i = 0; i < solved.bonePositions.length; i += 6) {
+			solved.bonePositions[i] += originalBonePositions[i] * (wStretch - 1);
+			solved.bonePositions[i + 3] += originalBonePositions[i + 3] * (wStretch - 1);
+		}
+	}
+	return { solved, staticData, visibleIndices, height, heightUnits };
+}
+
+function buildCharacter(pack, params, pose, visibility = {}, previous = null) {
+	const { solved, staticData, visibleIndices, height, heightUnits } =
+		solveCharacterGeometry(pack, params, visibility);
+	if (previous && !solved.includeGenitals && !params.genitalMeshes && !previous.genitals?.children.length &&
+		updateCharacterGeometry(previous, pack, params, { solved, staticData, visibleIndices, heightUnits, visibility })) {
+		return previous;
+	}
 
 	const geometry = new THREE.BufferGeometry();
 	geometry.setAttribute("position", new THREE.BufferAttribute(solved.vertices, 3));
 	geometry.setAttribute("uv", new THREE.BufferAttribute(staticData.uvs, 2));
 	geometry.setAttribute("skinIndex", new THREE.BufferAttribute(staticData.skinIndices, 4));
 	geometry.setAttribute("skinWeight", new THREE.BufferAttribute(staticData.skinWeights, 4));
-	geometry.setIndex(new THREE.BufferAttribute(staticData.indices, 1));
+	geometry.setIndex(new THREE.BufferAttribute(visibleIndices, 1));
 	geometry.computeVertexNormals();
-
-	const height = boundsY(solved.vertices);
-	const heightUnits = Math.max(0.001, height.maxY - height.minY);
-
-	// solveMorph calcula las posiciones de huesos antes de nuestra deformación
-	// de vértices: si la altura se estira fuera de 0..1 hay aplicar el mismo
-	// escalado desde los pies, o los pivotes de pose quedan desalineados.
-	const hd = params.localDeform?.height ?? 0.5;
-	const hExtra = hd > 1 ? hd - 1 : hd < 0 ? hd : 0;
-	const hStretch = 1 + hExtra * 0.22;
-	if (hStretch !== 1) {
-		for (let i = 0; i < solved.bonePositions.length; i += 6) {
-			solved.bonePositions[i + 1] = height.minY + (solved.bonePositions[i + 1] - height.minY) * hStretch;
-			solved.bonePositions[i + 4] = height.minY + (solved.bonePositions[i + 4] - height.minY) * hStretch;
-		}
-	}
-	// La anchura global escala X de vértices y pivotes por igual, centrada en 0.
-	const wStretch = 1 + ((params.localDeform?.width ?? 0.5) - 0.5) * 0.45;
-	if (wStretch !== 1) {
-		for (let i = 0; i < solved.bonePositions.length; i += 6) {
-			solved.bonePositions[i] *= wStretch;
-			solved.bonePositions[i + 3] *= wStretch;
-		}
-	}
 
 	const bodyMaterial = new THREE.MeshBasicMaterial({
 		color: BODY_COLOR, side: THREE.DoubleSide,
@@ -543,10 +616,94 @@ function buildCharacter(pack, params, pose) {
 	if (maleSurplus !== 1) genitals.scale.setScalar(maleSurplus);
 	group.add(genitals);
 
-	return {
+	const character = {
 		group, mesh, outline, bones, byName, skeleton, solved, genitals,
-		heightUnits, outlineUniform: outline.userData.outlineUniform,
+		heightUnits, outlineUniform: outline.userData.outlineUniform, visibility,
 	};
+	character.shoulderCorrectives = attachShoulderCorrectives(character, pack, staticData);
+	character.povAnchor = createPovAnchor(character);
+	character.restPose = bones.map((bone) => ({
+		bone,
+		position: bone.position.clone(),
+		quaternion: bone.quaternion.clone(),
+		scale: bone.scale.clone(),
+	}));
+	return character;
+}
+
+function updateCharacterGeometry(character, pack, params, data) {
+	const { solved, staticData, visibleIndices, heightUnits, visibility } = data;
+	const geometry = character.mesh.geometry;
+	const position = geometry.attributes.position;
+	if (!position || position.count * 3 !== solved.vertices.length ||
+		geometry.index?.array.length !== visibleIndices.length) return false;
+
+	resetCharacterPose(character);
+	character.group.position.set(0, 0, 0);
+	character.group.rotation.set(0, 0, 0);
+	for (let i = 0; i < pack.bones.length; i++) {
+		const bone = character.bones[i];
+		const parentName = pack.bones[i].parent;
+		const parentIndex = parentName ? pack.bones.findIndex((b) => b.name === parentName) : -1;
+		const parentOffset = parentIndex >= 0 ? parentIndex * 6 : 0;
+		const o = i * 6;
+		bone.position.set(
+			solved.bonePositions[o] - (parentIndex >= 0 ? solved.bonePositions[parentOffset] : 0),
+			solved.bonePositions[o + 1] - (parentIndex >= 0 ? solved.bonePositions[parentOffset + 1] : 0),
+			solved.bonePositions[o + 2] - (parentIndex >= 0 ? solved.bonePositions[parentOffset + 2] : 0),
+		);
+	}
+	const headScale = 1 + ((params.localDeform?.headSize ?? 0.5) - 0.5) * 0.25;
+	if (character.byName.head) character.byName.head.scale.setScalar(headScale);
+
+	position.array.set(solved.vertices);
+	position.needsUpdate = true;
+	geometry.index.array.set(visibleIndices);
+	geometry.index.needsUpdate = true;
+	geometry.computeVertexNormals();
+	geometry.boundingBox = null;
+	geometry.boundingSphere = null;
+	character.solved = solved;
+	character.heightUnits = heightUnits;
+	character.visibility = visibility || {};
+	character.group.updateMatrixWorld(true);
+	character.mesh.bind(character.skeleton);
+	character.outline.bind(character.skeleton);
+	character.shoulderCorrectives = attachShoulderCorrectives(
+		character, pack, staticData, character.shoulderCorrectives);
+	character.povAnchor?.removeFromParent();
+	character.povAnchor = createPovAnchor(character);
+	character.restPose = character.bones.map((bone) => ({
+		bone,
+		position: bone.position.clone(),
+		quaternion: bone.quaternion.clone(),
+		scale: bone.scale.clone(),
+	}));
+	return true;
+}
+
+function resetCharacterPose(character) {
+	for (const rest of character.restPose || []) {
+		rest.bone.position.copy(rest.position);
+		rest.bone.quaternion.copy(rest.quaternion);
+		rest.bone.scale.copy(rest.scale);
+	}
+}
+
+function disposeCharacter(character) {
+	if (!character?.group) return;
+	const geometries = new Set();
+	const materials = new Set();
+	character.group.traverse((object) => {
+		if (object.geometry) geometries.add(object.geometry);
+		if (object.material) {
+			for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+				materials.add(material);
+			}
+		}
+	});
+	for (const geometry of geometries) geometry.dispose();
+	for (const material of materials) material.dispose();
 }
 
 function applyPose(character, pose) {
@@ -560,8 +717,15 @@ function applyPose(character, pose) {
 function capturePose(character) {
 	const out = {};
 	for (const bone of character.bones) {
-		if (PROCEDURAL_BONES.has(bone.name)) continue;
-		const q = bone.quaternion;
+		const head = bone.name === "head";
+		if (PROCEDURAL_BONES.has(bone.name) && !head) continue;
+		const q = bone.quaternion.clone();
+		if (head) {
+			// En rebuild: qLive = qPose * qHeadSlider. Guardamos solo qPose para
+			// conservar poses legacy/directas sin duplicar el slider al reconstruir.
+			const procedural = character.headProceduralQuaternion?.clone() || new THREE.Quaternion();
+			q.multiply(procedural.invert());
+		}
 		if (Math.abs(q.x) + Math.abs(q.y) + Math.abs(q.z) > 1e-4) {
 			out[bone.name] = [q.x, q.y, q.z, q.w];
 		}
@@ -599,9 +763,7 @@ function sceneBox(scene, onlyCharacters = true) {
 		if (!o.isSkinnedMesh && !o.isMesh) return;
 		if (onlyCharacters && !o.userData.mikaCharacter) return;
 		if (!o.geometry) return;
-		o.geometry.computeBoundingBox();
-		const b = o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld);
-		box.union(b);
+		box.union(visibleMeshBox(o));
 	});
 	if (onlyCharacters) {
 		// La caja de la geometría está en espacio de bind: al doblar brazos o
@@ -609,6 +771,9 @@ function sceneBox(scene, onlyCharacters = true) {
 		const p = new THREE.Vector3();
 		scene.traverse((o) => {
 			if (!o.isBone) return;
+			let owner = o;
+			while (owner && !owner.userData.mikaCharacter) owner = owner.parent;
+			if (owner && !visibleBoneNames(owner).has(o.name)) return;
 			o.getWorldPosition(p);
 			box.expandByPoint(p);
 		});
@@ -800,9 +965,10 @@ function sliderRow(panel, label, key, state, onInput) {
 		rotationY: [-180, 180],
 		handLPosX: [-4, 4], handLPosY: [-4, 4], handLPosZ: [-4, 4],
 		handRPosX: [-4, 4], handRPosY: [-4, 4], handRPosZ: [-4, 4],
-		handLRotX: [-180, 180], handLRotY: [-180, 180], handLRotZ: [-180, 180],
-		handRRotX: [-180, 180], handRRotY: [-180, 180], handRRotZ: [-180, 180],
+		handLRotX: [-180, 180], handLRotY: [-180, 180], handLRotZ: [-180, 180], handLTwist: [-180, 180],
+		handRRotX: [-180, 180], handRRotY: [-180, 180], handRRotZ: [-180, 180], handRTwist: [-180, 180],
 		footRotX: [-180, 180], footRotY: [-180, 180], footRotZ: [-180, 180],
+		headRotX: [-180, 180], headRotY: [-180, 180], headRotZ: [-180, 180],
 	};
 	const [mn, mx] = RANGES[key] || [-1, 2.5];
 	input.min = String(mn);
@@ -850,9 +1016,12 @@ export async function openPoseStudio3D(node) {
 	// Se crean una vez por estudio: rebuild() corre en cada frame mientras se
 	// arrastra un slider, y crear geometría/materiales allí fugaba recursos.
 	const handleGeo = new THREE.SphereGeometry(0.16, 10, 8);
-	const handleMat = new THREE.MeshBasicMaterial({
-		color: 0x1e88e5, depthTest: false, depthWrite: false, transparent: true,
-	});
+	const handleMaterials = Object.fromEntries(Object.entries({
+		head: 0xab47bc, torso: 0x00acc1, arms: 0xffa726,
+		legs: 0x66bb6a, penis: 0xec407a,
+	}).map(([zone, color]) => [zone, new THREE.MeshBasicMaterial({
+		color, depthTest: false, depthWrite: false, transparent: true,
+	})]));
 	const handleMatActive = new THREE.MeshBasicMaterial({
 		color: 0xff7043, depthTest: false, depthWrite: false, transparent: true,
 	});
@@ -861,7 +1030,7 @@ export async function openPoseStudio3D(node) {
 		node, ui, renderer, scene, camera, orbit,
 		charactersGroup, handlesGroup, characters: [], handles: [], params: null,
 		selected: stateOf(node).selected, moveMode: false, selectionVolume: null,
-		drag: null, pack: null, dirty: true, anim: null,
+		drag: null, pack: null, dirty: true, anim: null, pov: null,
 		dispose() {
 			if (state.anim) cancelAnimationFrame(state.anim);
 			try { state.resizeObserver?.disconnect(); } catch (e) { /* no-op */ }
@@ -877,8 +1046,12 @@ export async function openPoseStudio3D(node) {
 					state.selectionVolume.material.dispose();
 				}
 			} catch (e) { /* no-op */ }
-			try { handleGeo.dispose(); handleMat.dispose(); handleMatActive.dispose(); } catch (e) { /* no-op */ }
+			try {
+				handleGeo.dispose(); handleMatActive.dispose();
+				Object.values(handleMaterials).forEach((material) => material.dispose());
+			} catch (e) { /* no-op */ }
 			try { state.gizmoResources?.forEach((r) => r.dispose()); } catch (e) { /* no-op */ }
+			try { state.characters.forEach(disposeCharacter); } catch (e) { /* no-op */ }
 			try { orbit.dispose(); } catch (e) { /* no-op */ }
 			try { renderer.dispose(); } catch (e) { /* no-op */ }
 			if (state.outsideHandler) {
@@ -949,7 +1122,10 @@ export async function openPoseStudio3D(node) {
 	state.requestRender = requestRender;
 
 	const applyOutlineWidth = (viewportPx, px = 1.6) => {
-		const width = outlineWidthFor(camera, orbit.target, viewportPx, px);
+		const target = state.pov
+			? camera.position.clone().add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(2))
+			: orbit.target;
+		const width = outlineWidthFor(camera, target, viewportPx, px);
 		for (const c of state.characters) {
 			if (c.outlineUniform) c.outlineUniform.value = width;
 		}
@@ -997,11 +1173,12 @@ export async function openPoseStudio3D(node) {
 		const model = state.characters[state.selected] || state.characters[0];
 		const helper = state.selectionVolume;
 		if (model && helper) {
-			helper.update();
-			const b = new THREE.Box3().setFromBufferAttribute(
-				helper.geometry.attributes.position);
-			moveGizmo.position.set(b.max.x, b.min.y, b.max.z);
-			moveGizmo.scale.setScalar(Math.max(0.6, model.heightUnits * 0.09));
+			helper.box.copy(visibleMeshBox(model.mesh));
+			helper.updateMatrixWorld(true);
+			const b = helper.box;
+			if (model.byName.pelvis) model.byName.pelvis.getWorldPosition(moveGizmo.position);
+			else moveGizmo.position.set(b.max.x, b.min.y, b.max.z);
+			moveGizmo.scale.setScalar(Math.max(0.6, (b.max.y - b.min.y) * 0.09));
 			moveGizmo.visible = true;
 		} else {
 			moveGizmo.visible = false;
@@ -1010,13 +1187,15 @@ export async function openPoseStudio3D(node) {
 
 	const render = () => {
 		refreshHandles();
-		if (state.selectionVolume?.visible) state.selectionVolume.update();
+		for (const character of state.characters) character.shoulderCorrectives?.update();
+		if (state.pov) updatePovCamera(camera, state.characters[state.selected]?.povAnchor);
+		if (state.selectionVolume?.visible) state.selectionVolume.updateMatrixWorld(true);
 		renderer.render(scene, camera);
 	};
 
 	const frame = () => {
 		state.anim = requestAnimationFrame(frame);
-		orbit.update();
+		if (!state.pov && !state.skipOrbitUpdate) orbit.update();
 		if (needsRender) {
 			needsRender = false;
 			render();
@@ -1024,8 +1203,11 @@ export async function openPoseStudio3D(node) {
 	};
 	frame();
 	let camSaveTimer = null;
-	state.saveCamera = () => writeCamera(node, camera, orbit);
+	state.saveCamera = () => {
+		if (!state.pov) writeCamera(node, camera, orbit);
+	};
 	orbit.addEventListener("change", () => {
+		state.skipOrbitUpdate = false;
 		requestRender();
 		// El contorno se mide en unidades de mundo según la distancia: sin
 		// recalcularlo al hacer zoom engorda y se enreda en los dedos/muslos.
@@ -1045,14 +1227,15 @@ export async function openPoseStudio3D(node) {
 		if (activeModel) {
 			for (const name of HANDLE_BONES) {
 				const bone = activeModel.byName[name];
-				if (!bone) continue;
-				const mesh = new THREE.Mesh(handleGeo, handleMat);
+				if (!bone || !isVisibleBodyBone(name, activeModel.visibility)) continue;
+				const mat = handleMaterials[bodyZoneForBone(name)] || handleMaterials.torso;
+				const mesh = new THREE.Mesh(handleGeo, mat);
 				mesh.userData.bone = bone;
 				mesh.userData.character = activeModel;
 				mesh.renderOrder = 10;
 				mesh.visible = false;
 				handlesGroup.add(mesh);
-				state.handles.push({ bone, mesh, mat: handleMat, matActive: handleMatActive });
+				state.handles.push({ bone, mesh, mat, matActive: handleMatActive });
 			}
 		}
 		handlesGroup.updateMatrixWorld(true);
@@ -1063,7 +1246,7 @@ export async function openPoseStudio3D(node) {
 			state.selectionVolume = null;
 		}
 		if (activeModel) {
-			const box = new THREE.BoxHelper(activeModel.mesh, 0x1e88e5);
+			const box = new THREE.Box3Helper(visibleMeshBox(activeModel.mesh), 0x1e88e5);
 			box.material.depthTest = false;
 			box.renderOrder = 9;
 			scene.add(box);
@@ -1078,16 +1261,11 @@ export async function openPoseStudio3D(node) {
 		if (!state.pack) return;
 		const st0 = stateOf(node);
 		state.params = morphParams(activeSlot(st0));
+		const previousCharacters = state.characters;
+		const previousSelection = previousCharacters[st0.selected];
 		while (charactersGroup.children.length) {
-			const c = charactersGroup.children[0];
-			charactersGroup.remove(c);
-			c.traverse?.((o) => {
-				if (o.geometry) o.geometry.dispose();
-				if (o.material) o.material.dispose();
-			});
+			charactersGroup.remove(charactersGroup.children[0]);
 		}
-		for (const h of state.handles) handlesGroup.remove(h.mesh);
-		state.handles = [];
 		state.characters = [];
 
 		const st = stateOf(node);
@@ -1096,18 +1274,27 @@ export async function openPoseStudio3D(node) {
 		const poses = st.slots.map((slot) => slot.pose || {});
 		const models = [];
 		for (let i = 0; i < count; i++) {
-			// Todos se construyen con SU propia anatomía: usar state.params
-			// para el seleccionado cambiaba el ancho de models[0] al cambiar
-			// de personaje y desplazaba a los demás por el espaciado.
-			models.push(buildCharacter(state.pack, morphParams(st.slots[i]), poses[i]));
+			// Solo se vuelve a mallar el personaje cuya geometría cambió. Los
+			// demás conservan malla, rig, correctores y landmarks por identidad.
+			const params = morphParams(st.slots[i]);
+			const signature = characterGeometrySignature(params, st.slots[i].visibility);
+			const previous = previousCharacters[i];
+			let built = previous;
+			if (!previous || previous.geometrySignature !== signature) {
+				built = buildCharacter(state.pack, params, poses[i], st.slots[i].visibility, previous);
+				built.geometrySignature = signature;
+				if (built !== previous) disposeCharacter(previous);
+			}
+			resetCharacterPose(built);
+			models.push(built);
 		}
+		for (let i = count; i < previousCharacters.length; i++) disposeCharacter(previousCharacters[i]);
 
 		// Los personajes no pueden solaparse: el espaciado sale del ancho real
 		// del modelo (brazos incluidos), no de una constante inventada.
 		let spacing = 10;
 		if (models[0]) {
-			models[0].mesh.geometry.computeBoundingBox();
-			const bb = models[0].mesh.geometry.boundingBox;
+			const bb = visibleMeshBox(models[0].mesh);
 			spacing = Math.max(6, bb.max.x - bb.min.x) + 1.4;
 		}
 		models.forEach((built, i) => {
@@ -1117,6 +1304,7 @@ export async function openPoseStudio3D(node) {
 			built.group.position.z = slot.offset?.[2] || 0;
 			built.group.rotation.y = slot.rotationY || 0;
 			built.mesh.userData.mikaCharacter = true;
+			built.mesh.userData.visibility = built.visibility;
 			built.outline.userData.mikaCharacter = true;
 			built.mesh.userData.slot = i;
 			charactersGroup.add(built.group);
@@ -1152,6 +1340,15 @@ export async function openPoseStudio3D(node) {
 					anatomy[p + "RotZ"] ?? anatomy.handRotZ ?? 0);
 				const bone = built.byName[name];
 				if (!bone) continue;
+				const twist = anatomy[p + "Twist"] ?? 0;
+				if (Math.abs(twist) > 0.01) {
+					const bi = state.pack.bones.findIndex((b) => b.name === name) * 6;
+					const bp = built.solved.bonePositions;
+					const axis = new THREE.Vector3(bp[bi + 3] - bp[bi], bp[bi + 4] - bp[bi + 1],
+						bp[bi + 5] - bp[bi + 2]).normalize();
+					bone.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(
+						axis, twist * Math.PI / 180));
+				}
 				const dx = anatomy[p + "PosX"] ?? 0;
 				const dy = anatomy[p + "PosY"] ?? 0;
 				const dz = anatomy[p + "PosZ"] ?? 0;
@@ -1159,6 +1356,12 @@ export async function openPoseStudio3D(node) {
 			}
 			rotatePair("foot", anatomy.footRotX ?? 0,
 				anatomy.footRotY ?? oldFoot, anatomy.footRotZ ?? 0);
+			rotateBone("head", anatomy.headRotX ?? 0,
+				anatomy.headRotY ?? 0, anatomy.headRotZ ?? 0);
+			built.headProceduralQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+				(anatomy.headRotX ?? 0) * Math.PI / 180,
+				(anatomy.headRotY ?? 0) * Math.PI / 180,
+				(anatomy.headRotZ ?? 0) * Math.PI / 180, "XYZ"));
 
 			// Dedos como en Pose Studio 3D: Spread (separación) + Grasp (cierre
 			// global) + un slider por dedo. Se articulan huesos reales.
@@ -1215,9 +1418,22 @@ export async function openPoseStudio3D(node) {
 			fitCamera(camera, orbit, sceneBox(scene));
 		}
 
-		// Solo el personaje seleccionado expone tiradores: con 4 personajes
-		// serían 80 esferas solapadas y seleccionar se volvería imposible.
-		rebuildSelectionVisuals();
+		// Solo el personaje seleccionado expone tiradores. Si el rig se ha
+		// actualizado in situ, los tiradores ya apuntan a los huesos correctos.
+		const activeModel = state.characters[st.selected] || state.characters[0];
+		const expectedHandles = activeModel ? HANDLE_BONES
+			.map((name) => activeModel.byName[name])
+			.filter((bone) => bone && isVisibleBodyBone(bone.name, activeModel.visibility)) : [];
+		const reuseSelection = activeModel && activeModel === previousSelection && state.selectionVolume &&
+			state.handles.length === expectedHandles.length &&
+			state.handles.every((handle, i) => handle.bone === expectedHandles[i] &&
+				handle.mesh.parent === handlesGroup);
+		if (reuseSelection) {
+			state.selectionVolume.box.copy(visibleMeshBox(activeModel.mesh));
+			refreshHandles();
+		} else {
+			rebuildSelectionVisuals();
+		}
 		applyOutlineWidth(Math.max(1, ui.viewport.clientHeight));
 		state.dirty = true;
 		requestRender();
@@ -1246,6 +1462,13 @@ export async function openPoseStudio3D(node) {
 			if (c) slot.pose = capturePose(c);
 		});
 		node.properties.mikaPoseStudio3D = JSON.parse(JSON.stringify(st));
+	};
+	const visibilityInputs = [];
+	const syncVisibilityControls = () => {
+		const visibility = activeSlot(stateOf(node)).visibility;
+		for (const input of visibilityInputs) {
+			input.checked = visibility[input.dataset.visibilityKey] !== false;
+		}
 	};
 	state.refresh = () => {
 		const st = stateOf(node);
@@ -1278,6 +1501,51 @@ export async function openPoseStudio3D(node) {
 	}
 	ui.panel.appendChild(selector);
 
+	// --- Visibilidad de partes (también se aplica a la captura) ---
+	const visibilitySection = document.createElement("details");
+	visibilitySection.dataset.visibilitySection = "";
+	visibilitySection.open = false;
+	visibilitySection.style.cssText = "width:100%;border-top:1px solid " + THEME.border + ";padding-top:5px;";
+	const visibilitySummary = document.createElement("summary");
+	visibilitySummary.textContent = "Visibilidad del cuerpo";
+	visibilitySummary.style.cssText = "cursor:pointer;font-weight:600;font-size:11px;color:" + THEME.fg + ";";
+	visibilitySection.appendChild(visibilitySummary);
+	const visibilityBox = document.createElement("div");
+	visibilityBox.style.cssText = "display:flex;gap:7px;width:100%;flex-wrap:wrap;align-items:center;padding-top:7px;";
+	const visibilityTitle = document.createElement("span");
+	visibilityTitle.textContent = "Mostrar:";
+	visibilityTitle.style.cssText = "font-weight:600;font-size:11px;color:" + THEME.fg + ";";
+	visibilityBox.appendChild(visibilityTitle);
+	for (const [key, label] of [
+		["hands", "Manos"], ["feet", "Pies"], ["head", "Cabeza"],
+		["armL", "Brazo izq."], ["armR", "Brazo der."],
+		["legL", "Pierna izq."], ["legR", "Pierna der."],
+		["thighL", "Muslo izq."], ["thighR", "Muslo der."],
+		["calfL", "Pantorr. izq."], ["calfR", "Pantorr. der."],
+		["torso", "Torso"], ["neck", "Cuello"], ["penis", "Pene"],
+	]) {
+		const row = document.createElement("label");
+		row.style.cssText = "display:flex;align-items:center;gap:3px;font-size:11px;color:" + THEME.fg + ";";
+		row.title = "Mostrar u ocultar " + label.toLowerCase() + " en el visor y en el calco";
+		const input = document.createElement("input");
+		input.type = "checkbox";
+		input.dataset.visibilityKey = key;
+		input.style.accentColor = THEME.accent;
+		input.onchange = () => {
+			activeSlot(stateOf(node)).visibility[key] = input.checked;
+			state.save();
+			queueRebuild();
+		};
+		const text = document.createElement("span");
+		text.textContent = label;
+		row.append(input, text);
+		visibilityBox.appendChild(row);
+		visibilityInputs.push(input);
+	}
+	visibilitySection.appendChild(visibilityBox);
+	ui.panel.appendChild(visibilitySection);
+	syncVisibilityControls();
+
 	// --- Controles de anatomía ---
 	// Se agrupan en dos columnas; el panel hace scroll si no entra todo.
 	const defs = [
@@ -1286,16 +1554,20 @@ export async function openPoseStudio3D(node) {
 		["weight", "Peso", "0 delgado → 1 obeso; morf nativo + vientre", "Cuerpo"],
 		["height", "Altura", "", "Cuerpo"],
 		["width", "Anchura", "Escala global en X, como Altura pero de lado a lado", "Cuerpo"],
-		["bust", "Pecho", "", "Cuerpo"],
-		["firmness", "Firmeza", "", "Cuerpo"],
+		["bust", "Pecho tamaño", "Copa nativa de MakeHuman (maxcup/mincup); por encima de 1 crece con margen extra", "Cuerpo"],
+		["firmness", "Pecho firmeza", "Firmeza nativa de la copa (maxfirmness/minfirmness)", "Cuerpo"],
 		["waist", "Cintura", "", "Cuerpo"],
 		["stomach", "Estómago", "Abdomen alto, crece hacia delante y en anchura", "Cuerpo"],
 		["hips", "Cadera", "", "Cuerpo"],
-		["glutes", "Glúteos", "", "Cuerpo"],
+		["glutes", "Glúteos largo", "Proyección de los glúteos hacia atrás", "Cuerpo"],
+		["gluteWidth", "Glúteos ancho", "Anchura de los glúteos sin cambiar su proyección", "Cuerpo"],
+		["gluteHeight", "Glúteos alto", "Volumen vertical de los glúteos sin desplazarlos", "Cuerpo"],
 		["armLength", "Largo brazos", "", "Brazos"],
 		["legLength", "Largo piernas", "", "Piernas y pies"],
 		["armThickness", "Grosor brazos", "", "Brazos"],
+		["thighLength", "Largo muslos", "Alarga el muslo y desplaza rodilla, pantorrilla y pie", "Piernas y pies"],
 		["thighThickness", "Grosor muslos", "", "Piernas y pies"],
+		["calfLength", "Largo pantorrillas", "Alarga la pantorrilla y desplaza tobillo y pie", "Piernas y pies"],
 		["calfThickness", "Grosor pantorrillas", "", "Piernas y pies"],
 		["handSize", "Tamaño manos", "Escala de ambas manos y dedos", "Manos"],
 		["footSize", "Tamaño pies", "Escala de ambos pies", "Piernas y pies"],
@@ -1310,16 +1582,21 @@ export async function openPoseStudio3D(node) {
 		["handLRotX", "Izq rot X", "Rotar mano izquierda, -180°…180°", "Manos"],
 		["handLRotY", "Izq rot Y", "Rotar mano izquierda, -180°…180°", "Manos"],
 		["handLRotZ", "Izq rot Z", "Rotar mano izquierda, -180°…180°", "Manos"],
+		["handLTwist", "Izq giro", "Girar mano izquierda sobre su eje longitudinal, -180°…180°", "Manos"],
 		["handRRotX", "Der rot X", "Rotar mano derecha, -180°…180°", "Manos"],
 		["handRRotY", "Der rot Y", "Rotar mano derecha, -180°…180°", "Manos"],
 		["handRRotZ", "Der rot Z", "Rotar mano derecha, -180°…180°", "Manos"],
+		["handRTwist", "Der giro", "Girar mano derecha sobre su eje longitudinal, -180°…180°", "Manos"],
 		["footRotX", "Rotar pie X", "Dorsiflexión / flexión plantar, -180°…180°", "Piernas y pies"],
 		["footRotY", "Rotar pie Y", "Giro del pie, -180°…180°", "Piernas y pies"],
 		["footRotZ", "Rotar pie Z", "Inversión / eversión, -180°…180°", "Piernas y pies"],
 		["headSize", "Cabeza", "", "Cuerpo"],
+		["headRotX", "Cabeza rot X", "Rotar cabeza, -180°…180°", "Cuerpo"],
+		["headRotY", "Cabeza rot Y", "Girar cabeza, -180°…180°", "Cuerpo"],
+		["headRotZ", "Cabeza rot Z", "Inclinar cabeza, -180°…180°", "Cuerpo"],
 		["genitalSize", "Genitales", "", "Zona íntima"],
-		["penisLength", "Largo pene", "Longitud: ×1.5 al máximo (2.5), activo en NSFW masculino", "Zona íntima"],
-		["penisGirth", "Grosor pene", "Circunferencia: ×3 al máximo (2.5), activo en NSFW masculino", "Zona íntima"],
+		["penisLength", "Largo pene", "Longitud: ×2 al máximo (2.5), activo en NSFW masculino", "Zona íntima"],
+		["penisGirth", "Grosor pene", "Circunferencia: ×5 al máximo (2.5), activo en NSFW masculino", "Zona íntima"],
 		["openingSize", "Abertura", "", "Zona íntima"],
 		["anusSize", "Ano", "", "Zona íntima"],
 		// El desplazamiento se hace con las tres flechas de la base azul.
@@ -1360,12 +1637,17 @@ export async function openPoseStudio3D(node) {
 				handLRotX: slot.anatomy?.handLRotX ?? 0,
 				handLRotY: slot.anatomy?.handLRotY ?? 0,
 				handLRotZ: slot.anatomy?.handLRotZ ?? 0,
+				handLTwist: slot.anatomy?.handLTwist ?? 0,
 				handRRotX: slot.anatomy?.handRRotX ?? 0,
 				handRRotY: slot.anatomy?.handRRotY ?? 0,
 				handRRotZ: slot.anatomy?.handRRotZ ?? 0,
+				handRTwist: slot.anatomy?.handRTwist ?? 0,
 				footRotX: slot.anatomy?.footRotX ?? 0,
 				footRotY: slot.anatomy?.footRotY ?? 0,
 				footRotZ: slot.anatomy?.footRotZ ?? 0,
+				headRotX: slot.anatomy?.headRotX ?? 0,
+				headRotY: slot.anatomy?.headRotY ?? 0,
+				headRotZ: slot.anatomy?.headRotZ ?? 0,
 			},
 		};
 	};
@@ -1432,9 +1714,11 @@ export async function openPoseStudio3D(node) {
 		body_13: "13 Delgada baja", body_14: "14 Todo grande",
 		body_15: "15 Arena extrema", body_16: "16 Barriga redonda",
 		body_17: "17 Ancha y maciza", body_18: "18 Caderas XX",
+		ref_hourglass: "Ref reloj de arena", ref_pear: "Ref pera",
+		ref_extreme: "Ref extrema",
 	};
 	for (const [id, label] of Object.entries(bodyLabels)) {
-		presetList.push(["Tipos de cuerpo", id, label]);
+		presetList.push([id.startsWith("ref_") ? "Referencias" : "Tipos de cuerpo", id, label]);
 	}
 	const presetSel = document.createElement("select");
 	presetSel.title = "Presets de maniquí";
@@ -1682,7 +1966,7 @@ export async function openPoseStudio3D(node) {
 		// Mantener el ángulo pero alejar/acercar para que el modelo siga
 		// cabiendo en el nuevo aspecto.
 		const box = sceneBox(scene);
-		if (!box.isEmpty()) {
+		if (!state.pov && !box.isEmpty()) {
 			const size = box.getSize(new THREE.Vector3());
 			const vFov = camera.fov * Math.PI / 180;
 			const dist = Math.max(
@@ -1707,6 +1991,7 @@ export async function openPoseStudio3D(node) {
 	const posReset = document.createElement("button");
 	const del = document.createElement("button");
 	const mover = document.createElement("button");
+	const povButton = document.createElement("button");
 	const send = document.createElement("button");
 	const btn = (b, text, title) => {
 		b.textContent = text;
@@ -1720,12 +2005,14 @@ export async function openPoseStudio3D(node) {
 	btn(posReset, "Restablecer posición", "Restablecer posición: pose y desplazamiento al origen, manteniendo los sliders de tamaño");
 	btn(del, "🗑 Eliminar", "Eliminar el personaje seleccionado");
 	btn(mover, "Mover", "Activar: arrastra el cuerpo para mover al personaje seleccionado");
+	btn(povButton, "POV", "Ver y capturar desde los ojos del personaje seleccionado");
 	btn(send, "Enviar al calco", "Enviar la escena 3D al calco del nodo lineart");
 	send.style.background = THEME.success;
 	send.style.color = THEME.successFg;
 	send.style.borderColor = THEME.success;
 
 	const syncButtons = () => {
+		syncVisibilityControls();
 		sfw.textContent = activeSlot(stateOf(node)).nsfw ? "NSFW" : "SFW";
 		count.textContent = "👥 " + (state.characters.length || 1);
 		selectorButtons.forEach((b, i) => {
@@ -1737,6 +2024,9 @@ export async function openPoseStudio3D(node) {
 		});
 		mover.style.background = state.moveMode ? THEME.selected : THEME.inputBg;
 		mover.style.borderColor = state.moveMode ? THEME.accent : THEME.border;
+		povButton.textContent = state.pov ? "Salir POV" : "POV";
+		povButton.style.background = state.pov ? THEME.selected : THEME.inputBg;
+		povButton.style.borderColor = state.pov ? THEME.accent : THEME.border;
 	};
 
 	const selectSlot = (i) => {
@@ -1756,6 +2046,44 @@ export async function openPoseStudio3D(node) {
 		refreshHandPopup?.();
 	};
 	state.select = selectSlot;
+	state.togglePov = () => {
+		if (!state.pov) {
+			const anchor = state.characters[state.selected]?.povAnchor;
+			if (!anchor) return;
+			writeCamera(node, camera, orbit);
+			state.pov = { normal: {
+				position: camera.position.clone(), target: orbit.target.clone(),
+				quaternion: camera.quaternion.clone(), fov: camera.fov,
+				near: camera.near, far: camera.far,
+			} };
+			orbit.enabled = false;
+			camera.fov = 65;
+			updatePovCamera(camera, anchor);
+		} else {
+			const normal = state.pov.normal;
+			state.pov = null;
+			camera.position.copy(normal.position);
+			orbit.target.copy(normal.target);
+			camera.quaternion.copy(normal.quaternion);
+			camera.fov = normal.fov; camera.near = normal.near; camera.far = normal.far;
+			camera.updateProjectionMatrix();
+			orbit.enabled = !state.pov;
+			const damping = orbit.enableDamping;
+			orbit.enableDamping = false;
+			orbit.update();
+			orbit.enableDamping = damping;
+			// La amortiguación residual de OrbitControls no debe alterar ni una
+			// unidad mínima del estado guardado al salir de POV.
+			camera.position.copy(normal.position);
+			orbit.target.copy(normal.target);
+			camera.quaternion.copy(normal.quaternion);
+			writeCamera(node, camera, orbit);
+			state.skipOrbitUpdate = true;
+		}
+		syncButtons();
+		requestRender();
+	};
+	povButton.onclick = state.togglePov;
 	sfw.onclick = () => {
 		const slot = activeSlot(stateOf(node));
 		slot.nsfw = !slot.nsfw;
@@ -1773,7 +2101,7 @@ export async function openPoseStudio3D(node) {
 	reset.onclick = () => {
 		const slot = activeSlot(stateOf(node));
 		for (const k of Object.keys(slot.anatomy)) {
-			slot.anatomy[k] = /^(footRot[XYZ]|penisRot[XYZ]|hand[LR](Pos|Rot)[XYZ])$/
+			slot.anatomy[k] = /^(footRot[XYZ]|headRot[XYZ]|penisRot[XYZ]|hand[LR]((Pos|Rot)[XYZ]|Twist))$/
 				.test(k) ? 0 : 0.5;
 		}
 		slot.anatomy.gender = 0.5;
@@ -1786,6 +2114,7 @@ export async function openPoseStudio3D(node) {
 		slot.pose = {};
 		slot.offset = [0, 0, 0];
 		slot.rotationY = 0;
+		slot.visibility = createDefaultBodyVisibility();
 		// Primero se reconstruye: save() captura las rotaciones de las mallas
 		// vivas, así que si se guarda antes se reescriben las poses antiguas.
 		rebuild();
@@ -1828,7 +2157,7 @@ export async function openPoseStudio3D(node) {
 		const [w, h] = captureSizeFor(node);
 		setPoseStudioCapture(renderCapture(w, h), node.id);
 	};
-	tools.append(sfw, count, reset, posReset, del, mover, send);
+	tools.append(sfw, count, reset, posReset, del, mover, povButton, send);
 	ui.panel.appendChild(tools);
 
 	// --- Articulaciones ---
@@ -1952,17 +2281,23 @@ export async function openPoseStudio3D(node) {
 			start: pointerOnPlane(event, plane),
 		};
 		if (bone.name === "penis_tip") {
-			// El miembro es corto: el tirador está a ~17px del ancla en pantalla.
-			// "Apuntar hacia el cursor" amplificaba cada píxel ~13° y daba
-			// saltos bruscos. Se usa un mapeo proporcional del delta del ratón
-			// (como un control orbital): horizontal → guiño (Y), vertical →
-			// cabeceo (X), sin roll. Así responde igual que brazos y piernas.
-			const a0 = activeSlot(stateOf(node)).anatomy;
+			// Arrastre directo: el plano pasa por el ancla, no por la punta. El
+			// desfase del clic se conserva para que el primer movimiento no salte.
+			const pelvis = parent.parent;
+			const pivotWorld = parent.getWorldPosition(new THREE.Vector3());
+			const tipWorld = bone.getWorldPosition(new THREE.Vector3());
+			const anchorPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, pivotWorld);
+			const pointerWorld = pointerOnPlane(event, anchorPlane);
+			if (!pelvis?.isBone || !pointerWorld) return;
+			const anchorLocal = pelvis.worldToLocal(pivotWorld.clone());
+			const initialDir = pelvis.worldToLocal(tipWorld.clone()).sub(anchorLocal).normalize();
+			state.drag.plane = anchorPlane;
+			state.drag.start = pointerWorld;
 			state.drag.penis = {
-				startX: event.clientX, startY: event.clientY,
-				rotX: a0.penisRotX || 0,
-				rotY: a0.penisRotY || 0,
-				rotZ: a0.penisRotZ || 0,
+				pelvis, anchorLocal, initialDir,
+				currentDir: initialDir.clone(),
+				currentQuat: parent.quaternion.clone(),
+				grabOffset: tipWorld.sub(pointerWorld),
 			};
 		}
 		hit.mesh.material = hit.matActive;
@@ -2010,17 +2345,26 @@ export async function openPoseStudio3D(node) {
 		if (!raycaster.ray.intersectPlane(state.drag.plane, target)) return;
 
 		if (state.drag.penis) {
-			// Mapeo directo y proporcional: cada píxel mueve el miembro un
-			// ángulo fijo, sin depender de lo corto que sea en pantalla ni de
-			// conversions quaternion→Euler que daban saltos de decenas de grados.
 			const d = state.drag.penis;
-			const SENS = 0.6; // grados por píxel
-			const clampAngle = (v) => Math.max(-180, Math.min(180, v));
+			const desired = d.pelvis.worldToLocal(target.clone().add(d.grabOffset))
+				.sub(d.anchorLocal);
+			if (desired.lengthSq() < 1e-8) return;
+			desired.normalize();
+			const step = new THREE.Quaternion().setFromUnitVectors(d.currentDir, desired);
+			// Un salto de cursor no puede dar la vuelta completa al miembro en un
+			// solo evento; en movimiento normal la punta alcanza el objetivo.
+			const maxStep = Math.PI / 4;
+			const angle = 2 * Math.acos(Math.min(1, Math.abs(step.w)));
+			if (angle > maxStep) {
+				step.slerp(new THREE.Quaternion(), 1 - maxStep / angle);
+			}
+			d.currentQuat.premultiply(step).normalize();
+			d.currentDir.applyQuaternion(step).normalize();
+			const euler = new THREE.Euler().setFromQuaternion(d.currentQuat, "XYZ");
 			const a = activeSlot(stateOf(node)).anatomy;
-			a.penisRotY = clampAngle(d.rotY + (event.clientX - d.startX) * SENS);
-			// rotX positivo baja la punta: arriba (dy negativo) debe restar.
-			a.penisRotX = clampAngle(d.rotX + (event.clientY - d.startY) * SENS);
-			a.penisRotZ = d.rotZ;
+			a.penisRotX = euler.x * 180 / Math.PI;
+			a.penisRotY = euler.y * 180 / Math.PI;
+			a.penisRotZ = euler.z * 180 / Math.PI;
 			queueRebuild();
 			requestRender();
 			return;
@@ -2048,7 +2392,7 @@ export async function openPoseStudio3D(node) {
 	const endDrag = (event) => {
 		if (state.axisDrag) {
 			state.axisDrag = null;
-			orbit.enabled = true;
+			orbit.enabled = !state.pov;
 			state.save();
 			requestRender();
 			return;
@@ -2056,7 +2400,7 @@ export async function openPoseStudio3D(node) {
 		if (state.moveDrag) {
 			state.moveDrag = null;
 			state.moveMode = false;
-			orbit.enabled = true;
+			orbit.enabled = !state.pov;
 			state.save();
 			syncButtons();
 			requestRender();
@@ -2073,7 +2417,7 @@ export async function openPoseStudio3D(node) {
 		if (!state.drag) return;
 		state.drag.handle.mesh.material = state.drag.handle.mat;
 		state.drag = null;
-		orbit.enabled = true;
+		orbit.enabled = !state.pov;
 		state.save();
 	};
 	ui.canvas.addEventListener("pointerup", endDrag);
@@ -2117,7 +2461,8 @@ export async function openPoseStudio3D(node) {
 		camera.position.copy(prevPos);
 		orbit.target.copy(prevTarget);
 		camera.updateProjectionMatrix();
-		orbit.update();
+		if (state.pov) updatePovCamera(camera, state.characters[state.selected]?.povAnchor);
+		else orbit.update();
 		applyOutlineWidth(Math.max(1, ui.viewport.clientHeight));
 		handlesGroup.visible = prevHandles;
 		if (state.selectionVolume) state.selectionVolume.visible = prevSelection;
