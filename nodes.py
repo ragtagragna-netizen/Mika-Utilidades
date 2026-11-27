@@ -4696,6 +4696,16 @@ _MIKA_TANGENT_PRESETS = {
     # 0.98 y cota final 0.002 (sigma residual ~0.006). Es el ajuste anti
     # plástico: colores y piel más mates, sin tocar la curva de refino.
     "bong (natural)": dict(zip(_MIKA_TANGENT_KEYS, (0.98, 0.24, 0.002, 0.62, 0.55, 0.07, 0.08))),
+    # Creatividad moderada y mejor definición del prompt/personaje. Los extremos
+    # naturales cuidan el color; la cola deja 5 pasos bajo sigma 0.3 en Anima
+    # (25 pasos) para refinar líneas, manos y dedos con suavidad.
+    "agahari (refinado)": dict(zip(_MIKA_TANGENT_KEYS, (0.98, 0.48, 0.002, 0.60, 0.50, 0.22, 0.10))),
+    # Primera etapa exacta de "bong (natural)" para su creatividad, con la
+    # segunda etapa de "agahari (refinado)" para conservar su acabado correcto.
+    "agahari (creativo exacto)": dict(zip(_MIKA_TANGENT_KEYS, (0.98, 0.24, 0.002, 0.62, 0.50, 0.07, 0.10))),
+    # Primera etapa intermedia: mas obediencia al prompt que el exacto, con la
+    # misma segunda etapa de refinado de Agahari.
+    "agahari (creativo inter)": dict(zip(_MIKA_TANGENT_KEYS, (0.98, 0.34, 0.002, 0.62, 0.50, 0.14, 0.10))),
 }
 _MIKA_TANGENT_PRESET_NAMES = list(_MIKA_TANGENT_PRESETS)
 

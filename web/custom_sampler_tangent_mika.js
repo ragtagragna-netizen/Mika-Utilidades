@@ -111,6 +111,12 @@ const PRESETS = {
   "equilibrado (manos)": { start: 1.0, middle: 0.38, end: 0.0, pivot_1: 0.62, pivot_2: 0.50, slope_1: 0.15, slope_2: 0.08 },
   // Igual que bong (manos) pero con start/end reducidos: menos plastico.
   "bong (natural)": { start: 0.98, middle: 0.24, end: 0.002, pivot_1: 0.62, pivot_2: 0.55, slope_1: 0.07, slope_2: 0.08 },
+  // Meseta creativa moderada, color natural y cola suave para lineas y manos.
+  "agahari (refinado)": { start: 0.98, middle: 0.48, end: 0.002, pivot_1: 0.60, pivot_2: 0.50, slope_1: 0.22, slope_2: 0.10 },
+  // Primera etapa Bong natural exacta + segunda etapa Agahari refinada.
+  "agahari (creativo exacto)": { start: 0.98, middle: 0.24, end: 0.002, pivot_1: 0.62, pivot_2: 0.50, slope_1: 0.07, slope_2: 0.10 },
+  // Primera etapa intermedia para conservar mas obediencia al prompt.
+  "agahari (creativo inter)": { start: 0.98, middle: 0.34, end: 0.002, pivot_1: 0.62, pivot_2: 0.50, slope_1: 0.14, slope_2: 0.10 },
 };
 
 function widgetNamed(node, name) {
